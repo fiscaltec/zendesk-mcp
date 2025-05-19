@@ -52,7 +52,7 @@ This server provides a comprehensive integration with Zendesk. It offers:
         "ZENDESK_EMAIL",
         "-e",
         "ZENDESK_API_KEY",
-        "zendesk-mcp"
+        "ghcr.io/fiscaltec/zendesk-mcp:latest"
         ],
         "env": {
           "ZENDESK_SUBDOMAIN": "ZENDESK_SUBDOMAIN",
