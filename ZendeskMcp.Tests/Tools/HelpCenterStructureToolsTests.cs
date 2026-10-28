@@ -114,6 +114,23 @@ public class HelpCenterStructureToolsTests
     }
 
     [Fact]
+    public async Task UpdateCategory_ResultCarriesTheNewName_NotTheOneReadBeforeTheRename()
+    {
+        // Live, the position PUT answers with the category as it was, old name included; the rename
+        // lands in the translation PUT that follows.
+        using var fake = TestHelpers.CreateFakeZendesk(r => r.Path.EndsWith("/translations/en-gb", StringComparison.Ordinal)
+            ? FakeResponse.Json("""{"translation":{"id":9,"locale":"en-gb","title":"New name","body":"New description"}}""")
+            : FakeResponse.Json("""{"category":{"id":5,"name":"Old name","description":"Old description","locale":"en-gb","position":3}}"""));
+        var zendesk = TestHelpers.BuildZendeskService(fake.Client);
+
+        var json = JsonNode.Parse(await HelpCenterStructureTools.UpdateHelpCenterCategory(zendesk, 5, position: 3, name: "New name", description: "New description", locale: "en-gb"))!;
+
+        json["category"]!["name"]!.GetValue<string>().Should().Be("New name");
+        json["category"]!["description"]!.GetValue<string>().Should().Be("New description");
+        json["category"]!["position"]!.GetValue<int>().Should().Be(3);
+    }
+
+    [Fact]
     public async Task UpdateCategory_ValidatesArguments()
     {
         using var fake = TestHelpers.CreateFakeZendesk(Echo);

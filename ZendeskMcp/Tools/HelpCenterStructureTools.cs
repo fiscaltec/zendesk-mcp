@@ -98,6 +98,7 @@ public static class HelpCenterStructureTools
         {
             var response = await zendesk.PutAsync($"{path}/translations/{ZendeskService.Segment(validLocale!)}", new JsonObject { ["translation"] = translation }, brandUrl: brand_url, cancellationToken: cancellationToken);
             result["translation"] = ToolJson.Pick(response["translation"], "id", "locale", "title", "body", "updated_at");
+            HelpCenterJson.OverlayTranslation(result["category"] as JsonObject, response["translation"]);
         }
 
         return result.ToJsonString();
@@ -224,6 +225,7 @@ public static class HelpCenterStructureTools
         {
             var response = await zendesk.PutAsync($"{path}/translations/{ZendeskService.Segment(validLocale!)}", new JsonObject { ["translation"] = translation }, brandUrl: brand_url, cancellationToken: cancellationToken);
             result["translation"] = ToolJson.Pick(response["translation"], "id", "locale", "title", "body", "updated_at");
+            HelpCenterJson.OverlayTranslation(result["section"] as JsonObject, response["translation"]);
         }
 
         return result.ToJsonString();

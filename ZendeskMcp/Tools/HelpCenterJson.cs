@@ -200,6 +200,30 @@ public static partial class HelpCenterJson
         return ToolJson.Pick(item, fields);
     }
 
+    /// <summary>
+    /// Brings a category or section read before its translation was updated in line with that update,
+    /// so one result never reports both the old and the new name. Only when the locales match: the
+    /// container's name is its own locale's.
+    /// </summary>
+    public static void OverlayTranslation(JsonObject? container, JsonNode? translation)
+    {
+        if (container is null || translation is null
+            || !string.Equals(ToolJson.String(container["locale"]), ToolJson.String(translation["locale"]), StringComparison.OrdinalIgnoreCase))
+        {
+            return;
+        }
+
+        if (translation["title"] is { } title)
+        {
+            container["name"] = title.DeepClone();
+        }
+
+        if (translation["body"] is { } body)
+        {
+            container["description"] = body.DeepClone();
+        }
+    }
+
     /// <summary>The query pairs for cursor pagination.</summary>
     public static List<KeyValuePair<string, string?>> PageQuery(int pageSize, string? afterCursor, params (string Key, object? Value)[] extra)
     {
