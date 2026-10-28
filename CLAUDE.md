@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 A Model Context Protocol (MCP) server in C# giving FISCAL staff access to Zendesk Support and the Help Center. It is built to the standard of [fiscaltec/vitally-mcp](https://github.com/fiscaltec/vitally-mcp) — the same host, OAuth façade, RBAC, audit, telemetry, CI/CD and Azure shape, ported rather than reinvented — and reproduces the functionality of Swifteq's hosted Zendesk MCP server.
 
-**Status: built, not deployed.** The Azure estate in `infra/terraform/` is greenfield and has not been applied; the Zendesk endpoints were written from the API documentation with no tenant to test against (code marks each uncertain one `// Unverified against the live API`). See *Staging validation* before trusting any tool against production.
+**Status: built, not deployed.** The Azure estate in `infra/terraform/` is greenfield and has not been applied (it passes `terraform validate`; it has never been planned). The Zendesk endpoints were written from the API documentation; on 2026-10-28 every **read** tool was run against the live account with a development token in read-only mode, and what that showed was fixed (PR #1). The **write** tools, per-user OAuth, refresh and the audit trail have not been exercised against a tenant. Code marks each remaining uncertainty `// Unverified against the live API` — writes checked against the documentation only say "docs-checked, not live-tested". See *Staging validation* before trusting any tool against production.
 
 **Provenance.** Issue references written `vitally-mcp#NNN` point at fiscaltec/vitally-mcp, where the lesson was learnt; the design and the code that carries it came across together. vitally-mcp's own `CLAUDE.md` holds the full history — dates, measurements, incident write-ups — behind the rules stated here more briefly. When this file and that one disagree about a shared component, check the code here.
 
@@ -559,6 +559,8 @@ Dropped from Swifteq's set: `get_usage` and `submit_mcp_feedback` (Swifteq billi
 
 xUnit v3 on **Microsoft.Testing.Platform** (not VSTest): `global.json` selects the runner, the test project is an `Exe`, and VSTest-only flags (`--filter "FullyQualifiedName~…"`, `--logger`, `--collect`) are rejected — use `--filter-class` / `--filter-method`, `--report-trx`, `--coverage`.
 
+⚠️ **Run the tests in a shell without the dev-mode variables.** The host-based tests build the app with `WebApplicationFactory`, which reads environment variables, so `OAuth__NoAuth`, `Authorization__ReadOnly`, `Zendesk__DevelopmentAccessToken` and friends left over from running the server locally override the tests' own configuration — about 100 tests fail for that reason alone. CI does not set them. Clear them first, e.g. `env -u OAuth__NoAuth -u Authorization__ReadOnly -u Zendesk__DevelopmentAccessToken -u Zendesk__Subdomain -u ASPNETCORE_ENVIRONMENT dotnet test --solution ZendeskMcp.sln -c Debug`.
+
 | Area | Tests |
 |---|---|
 | Per-user OAuth | `ZendeskCredentialProviderTests` (own bearer, connect link with no request made, 401 → forget + link, refresh and rotation stored, one refresh under concurrency, refused refresh, development token), `ZendeskConnectEndpointsTests` (full flow through the host, wrong email / end user refused **and revoked**, missing cookie, one-shot link and state, encoded result page), `ZendeskTokenStoreTests` (secret shape, absence cached, tombstone not delete) |
@@ -600,7 +602,7 @@ Before production, on staging against the real Zendesk account, with `Authorizat
 
 1. Sign in (Entra), then connect a Zendesk agent; confirm a mismatched Zendesk login is refused and its token revoked.
 2. Run every read tool once, and every write tool against a test ticket, test macro (inactive) and draft article, with the feature switches as production will have them.
-3. Check each place the code says `// Unverified against the live API` — the response shapes in particular — and remove the marker once confirmed.
+3. Check each place the code says `// Unverified against the live API` — the response shapes in particular — and remove the marker once confirmed. The read-side markers were settled live on 2026-10-28; what remains is write endpoints (docs-checked only) and shapes the validation account could not show (no messaging tickets, checkbox fields, custom objects, macro attachments or next-reply SLA targets; one Help Center locale; agent and account in the same time zone).
 4. Confirm refresh: leave a connection past its access-token expiry and call again.
 5. Confirm the audit records in `AppEvents` (`AppRoleName` separates staging) carry the expected ids.
 6. Disconnect, and confirm the token is revoked in Zendesk and the secret reads as a tombstone.
