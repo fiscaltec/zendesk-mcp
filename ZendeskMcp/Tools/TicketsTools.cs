@@ -130,8 +130,8 @@ public static class TicketsTools
             ["total_results"] = await countTask,
             ["tickets"] = shaped,
             ["search_url"] = TicketSearchQuery.AgentSearchUrl(zendesk.BaseUrl, query),
-            // Unverified against the live API: the export endpoint takes no sort parameter; the
-            // order reported here is the one Zendesk documents as its default.
+            // The export endpoint refuses a sort parameter ("Export request does not support
+            // order_by") and answers newest first (confirmed against the live API).
             ["sorted_by"] = "created_at desc",
             ["pages_fetched"] = 1,
             ["pagination_info"] = ToolJson.PaginationInfo(page, pageSize),
@@ -371,14 +371,20 @@ public static class TicketsTools
         {
             try
             {
-                // Unverified against the live API: the conversation_log endpoint and its response shape.
-                var log = await zendesk.GetAsync($"/api/v2/tickets/{Id(ticket_id)}/conversation_log", cancellationToken: cancellationToken);
-                var logEntries = TicketConversationHelpers.ConversationLogEntries(log);
+                var log = await zendesk.GetAllPagesAsync($"/api/v2/tickets/{Id(ticket_id)}/conversation_log", null, "events",
+                    maxItems: int.MaxValue, pageSize: 100, cancellationToken: cancellationToken);
+                var logEntries = TicketConversationHelpers.ConversationLogEntries(log.Items);
                 if (logEntries.Count > 0)
                 {
                     result["source"] = "conversation_log";
                     result["entry_count"] = logEntries.Count;
                     result["entries"] = new JsonArray(logEntries.Select(e => (JsonNode)e).ToArray());
+                    if (log.HasMore)
+                    {
+                        result["truncated"] = true;
+                        result["note"] = $"This conversation has more than {logEntries.Count} entries; only the earliest are shown.";
+                    }
+
                     return result.ToJsonString();
                 }
             }

@@ -12,7 +12,8 @@ public static partial class TicketConversationHelpers
 {
     // Unverified against the live API: the full list of via.channel values used by messaging
     // (Sunshine Conversations) tickets. These are the ones whose comments are a poor record of the
-    // conversation, so the conversation log is tried first.
+    // conversation, so the conversation log is tried first. The validation account had no messaging
+    // tickets (only api, email and web), so none of these has been seen live.
     public static readonly HashSet<string> MessagingChannels = new(StringComparer.Ordinal)
     {
         "native_messaging", "whatsapp", "messenger", "instagram_dm", "line", "wechat", "telegram",
@@ -78,16 +79,16 @@ public static partial class TicketConversationHelpers
     /// nothing recognisable (the caller then falls back to comments).
     /// </summary>
     /// <remarks>
-    /// Unverified against the live API: the conversation_log endpoint and its shape. This reads
-    /// <c>events[]</c> with <c>created_at</c>, <c>author {type, display_name|name}</c> and
-    /// <c>content {body|text, attachments}</c>, tolerantly, and keeps only entries with a message
-    /// or attachments.
+    /// Confirmed against the live API (on an email ticket; no messaging ticket was available): the
+    /// log is cursor-paged <c>events[]</c>, oldest first, each with <c>created_at</c>,
+    /// <c>author {type ('user' for the customer, 'agent'), display_name}</c>,
+    /// <c>content {type: 'html', body}</c>, <c>attachments</c> and <c>metadata.is_public</c>. Read
+    /// tolerantly, keeping only entries with a message or attachments.
     /// </remarks>
-    public static List<JsonObject> ConversationLogEntries(JsonNode log)
+    public static List<JsonObject> ConversationLogEntries(IEnumerable<JsonNode> events)
     {
         var entries = new List<JsonObject>();
-        var events = (log["events"] ?? log["conversation_log"] ?? log["messages"]) as JsonArray;
-        foreach (var item in events ?? [])
+        foreach (var item in events)
         {
             if (item is not JsonObject evt)
             {
@@ -95,9 +96,11 @@ public static partial class TicketConversationHelpers
             }
 
             var content = evt["content"] as JsonObject;
-            var message = ToolJson.String(content?["body"]) ?? ToolJson.String(content?["text"])
+            var isHtml = string.Equals(ToolJson.String(content?["type"]), "html", StringComparison.OrdinalIgnoreCase);
+            var body = ToolJson.String(content?["body"]);
+            var message = (isHtml ? null : body) ?? ToolJson.String(content?["text"])
                 ?? ToolJson.String(evt["body"]) ?? ToolJson.String(evt["text"]);
-            var htmlBody = ToolJson.String(content?["html_body"]) ?? ToolJson.String(evt["html_body"]);
+            var htmlBody = (isHtml ? body : null) ?? ToolJson.String(content?["html_body"]) ?? ToolJson.String(evt["html_body"]);
             if (message is null && htmlBody is not null)
             {
                 message = HtmlToText(htmlBody);
@@ -110,7 +113,7 @@ public static partial class TicketConversationHelpers
             }
 
             var authorType = (ToolJson.String(evt["author"]?["type"]) ?? string.Empty).ToLowerInvariant();
-            var isPublic = evt["public"] is not JsonValue p || !p.TryGetValue<bool>(out var flag) || flag;
+            var isPublic = (evt["public"] ?? evt["metadata"]?["is_public"]) is not JsonValue p || !p.TryGetValue<bool>(out var flag) || flag;
             entries.Add(new JsonObject
             {
                 ["timestamp"] = (evt["created_at"] ?? evt["timestamp"])?.DeepClone(),

@@ -431,6 +431,34 @@ public class TicketsToolsTests
         fake.Requests.Should().NotContain(r => r.Path.EndsWith("/comments", StringComparison.Ordinal));
     }
 
+    [Fact]
+    public async Task GetTicketConversation_ReadsTheLiveConversationLogShape()
+    {
+        // The shape the live API returns: HTML bodies, visibility under metadata.is_public, cursor pages.
+        using var fake = TestHelpers.CreateFakeZendesk(r => r.Path switch
+        {
+            "/api/v2/tickets/5" => Json("""{"ticket":{"id":5,"via":{"channel":"native_messaging"}}}"""),
+            "/api/v2/tickets/5/conversation_log" when r.Query("page[after]") is null => Json("""
+                {"events":[{"id":"e1","type":"Comment","created_at":"t1","author":{"type":"user","zen:support:user_id":7,"display_name":"Bob"},
+                  "content":{"type":"html","body":"<div><p>Help &amp; thanks</p></div>"},"attachments":[],"metadata":{"system":{},"custom":{},"is_public":true}}],
+                 "meta":{"has_more":true,"after_cursor":"c1"},"links":{}}
+                """),
+            "/api/v2/tickets/5/conversation_log" => Json("""
+                {"events":[{"id":"e2","type":"Comment","created_at":"t2","author":{"type":"agent","zen:support:user_id":8,"display_name":"Ann"},
+                  "content":{"type":"html","body":"<p>Checking</p>"},"attachments":[],"metadata":{"system":{},"custom":{},"is_public":false}}],
+                 "meta":{"has_more":false,"after_cursor":"c2"},"links":{}}
+                """),
+            _ => FakeResponse.NotFound(),
+        });
+        var result = JsonNode.Parse(await TicketsTools.GetTicketConversation(TestHelpers.BuildZendeskService(fake.Client), 5))!;
+
+        var entries = result["entries"]!.AsArray();
+        entries.Should().HaveCount(2, "the log is cursor-paged");
+        entries[0]!["message"]!.GetValue<string>().Should().Be("Help & thanks", "an html body is read as text");
+        entries[0]!["visibility"]!.GetValue<string>().Should().Be("public");
+        entries[1]!["visibility"]!.GetValue<string>().Should().Be("private", "an internal note must not read as public");
+    }
+
     // ---------- Create_ticket ----------
 
     private static FakeZendesk CreateFake(Func<RecordedRequest, FakeResponse?>? extra = null) =>
