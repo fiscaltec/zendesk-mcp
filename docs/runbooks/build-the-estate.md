@@ -270,7 +270,9 @@ for ns in Microsoft.App Microsoft.Network Microsoft.KeyVault Microsoft.ManagedId
   az provider register --namespace "$ns" --wait -o none
 done
 # A clone of the repo, for scan/run.py (Phase 9) and the verification scripts (Phase 14).
-gh auth status >/dev/null 2>&1 || { echo "Run 'gh auth login' first, then re-run this block"; exit 1; }
+# Proves gh can reach THIS repo, not just that a login exists. Not `gh auth status`: in a Claude Code
+# cloud session the proxy-injected token serves REST but fails that check (2026-10-28, #3).
+gh api "repos/$GH_REPO" --silent || { echo "gh cannot reach $GH_REPO — run 'gh auth login' first, then re-run this block"; exit 1; }
 [ -d "$REPO_DIR/.git" ] || gh repo clone "$GH_REPO" "$REPO_DIR"
 git -C "$REPO_DIR" fetch -q origin main && git -C "$REPO_DIR" checkout -q main && git -C "$REPO_DIR" pull -q --ff-only
 )
