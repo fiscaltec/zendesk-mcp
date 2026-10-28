@@ -1,0 +1,290 @@
+using System.Security.Claims;
+using Microsoft.AspNetCore.Http;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Options;
+
+namespace ZendeskMcp;
+
+/// <summary>
+/// Enforces <see cref="ToolAuthorizationOptions"/> against the authenticated caller. Called from
+/// <see cref="ZendeskService.SendAsync"/> — the single point every Zendesk API call funnels
+/// through — so every tool is covered without per-tool annotation. Because every read (search and
+/// macro preview included) is a GET and every mutation is a POST/PUT/DELETE, the HTTP verb is a
+/// faithful proxy for the tool's read/write/delete tier. Tools are written to keep it that way: a
+/// write tool never issues a DELETE, so the write tier never needs the delete tier.
+///
+/// Permission resolution has two modes, chosen by
+/// <see cref="ToolAuthorizationOptions.LiveGroupCheck"/> and never mixed:
+///   1. <b>Live group check on</b> (every deployed target): permissions come from the caller's
+///      current Entra group membership via <see cref="IGroupPermissionResolver"/>, which answers
+///      from its own fresh cache and, when a Graph call fails, from that caller's last known-good
+///      set for up to <see cref="ToolAuthorizationOptions.LiveGroupStaleSeconds"/>. So the tiers are
+///      <b>fresh Graph → stale Graph → deny</b>. Nothing in the token can grant access.
+///   2. <b>Live group check off</b>: the token's permission claim / scope, for deployments with no
+///      Graph reachability that accept a token-frozen entitlement.
+///
+/// <para>Which mode applies is decided by that one flag alone. A missing resolver does not quietly
+/// select mode 2 — it denies, because a miswired container silently reverting to token claims is
+/// exactly the posture this arrangement exists to rule out.</para>
+///
+/// <para>The token claim used to sit beneath the stale cache as a third tier in mode 1, minted by a
+/// sign-in hook at the identity provider, and while it was consulted it genuinely authorised — which
+/// is why vitally-mcp#106 added the stale cache beneath it rather than in place of it. vitally-mcp#108 removed the
+/// fall-through, and nothing mints such a claim for this server today, so the tier is gone twice
+/// over. Keeping the fall-through would have left code that reads like a working fallback and
+/// behaves like a silent denial; the explicit deny below says what actually happens, and logs
+/// why.</para>
+/// </summary>
+public class ToolAuthorizer
+{
+    private readonly ToolAuthorizationOptions _options;
+    private readonly bool _noAuth;
+    private readonly IHttpContextAccessor? _httpContextAccessor;
+    private readonly IGroupPermissionResolver? _groupResolver;
+    private readonly ILogger<ToolAuthorizer>? _logger;
+
+    // One line per request per cause, not one per evaluation. This service is scoped, so an instance
+    // is exactly one HTTP request — and a single tools/list evaluates authorisation once per tool
+    // (93 of them), so an unguarded warning turns one malformed token or one Graph outage into 93
+    // identical lines per request. That is not merely noisy: it buries the one line that says what
+    // went wrong under its own repetitions, in the logs someone is reading precisely because
+    // authorisation is failing. A benign race between concurrent evaluations can at worst emit a
+    // second line, which is why a plain bool is enough and Interlocked would be theatre.
+    private bool _loggedNoResolver;
+    private bool _loggedNoObjectId;
+    private bool _loggedUnresolvable;
+    private readonly ToolCallAuditContext? _auditContext;
+
+    public ToolAuthorizer(
+        IOptions<ToolAuthorizationOptions> options,
+        IOptions<OAuthOptions> oauth,
+        IHttpContextAccessor? httpContextAccessor = null,
+        IGroupPermissionResolver? groupResolver = null,
+        ILogger<ToolAuthorizer>? logger = null,
+        ToolCallAuditContext? auditContext = null)
+    {
+        _options = options.Value;
+        _noAuth = oauth.Value.NoAuth;
+        _httpContextAccessor = httpContextAccessor;
+        _groupResolver = groupResolver;
+        _logger = logger;
+        _auditContext = auditContext;
+    }
+
+    /// <summary>
+    /// Throws <see cref="UnauthorizedAccessException"/> if the current caller lacks the permission
+    /// required for the given HTTP verb. No-op when authorisation is disabled or in NoAuth dev mode.
+    /// </summary>
+    public async Task EnsureAuthorizedAsync(HttpMethod method, CancellationToken cancellationToken = default)
+    {
+        // Deployment-level read-only kill switch: deny every mutating verb regardless of RBAC
+        // state, NoAuth, or token permissions. Checked before the Enabled/NoAuth gate so a
+        // read-only deployment is locked even when per-user RBAC isn't configured.
+        if (_options.ReadOnly && method != HttpMethod.Get)
+        {
+            throw new UnauthorizedAccessException(
+                "This server is deployed in read-only mode; create, update and delete operations are disabled.");
+        }
+
+        if (!_options.Enabled || _noAuth)
+        {
+            return;
+        }
+
+        var required = RequiredPermission(method);
+        var user = _httpContextAccessor?.HttpContext?.User;
+
+        if (user?.Identity?.IsAuthenticated != true
+            || !await HasEffectivePermissionAsync(user, required, cancellationToken))
+        {
+            throw new UnauthorizedAccessException(
+                $"Access denied: this operation requires the '{required}' permission, which your token does not grant. "
+                + "Contact the Infrastructure team if you need this access.");
+        }
+    }
+
+    /// <summary>
+    /// Resolves whether <paramref name="user"/> effectively holds <paramref name="required"/> — from
+    /// the live Entra group lookup when it is enabled, and from the token claim only when it is not.
+    /// There is no path from the former to the latter: see the class remarks. Public so the
+    /// ASP.NET Core authorization policy handler can share exactly this resolution — the discovery
+    /// filter and the <see cref="ZendeskService"/> enforcement backstop must never disagree.
+    /// </summary>
+    public async Task<bool> HasEffectivePermissionAsync(ClaimsPrincipal user, string required, CancellationToken cancellationToken = default)
+    {
+        if (_options.LiveGroupCheck)
+        {
+            // Fail closed: with the live check on, Graph is the *only* source of entitlement, so
+            // every way out of this block that is not an answer from Graph is a denial. Each is
+            // logged once per request rather than quietly returning false — after the cutover they
+            // are the only ways a correctly signed-in user can be refused everything, and none of
+            // them is visible in the audit record, which reports the denial and not its cause. The
+            // messages name no permission, because the outcome is not tier-specific: whichever tool
+            // was evaluated first, the answer for every other one is the same.
+            //
+            // The resolver being absent is deliberately part of that rule and not a reason to leave
+            // the block. Testing it in the condition above would have handed a miswired container
+            // back to the token claim — a silent downgrade to the posture this cutover removed,
+            // reached by the one route where nobody is watching.
+            if (_groupResolver is null)
+            {
+                if (!_loggedNoResolver)
+                {
+                    _loggedNoResolver = true;
+                    _logger?.LogError(
+                        "Denying all tool access for this request: Authorization:LiveGroupCheck is enabled "
+                        + "but no IGroupPermissionResolver is registered, so entitlement cannot be resolved at all.");
+                }
+                return false;
+            }
+
+            var objectId = ExtractObjectId(user);
+            if (objectId is null)
+            {
+                // An Entra v2 token always carries `oid`. Reaching here means the token is not
+                // shaped as expected (or inbound claim mapping has changed), not that the user lacks
+                // a tier — so it is worth its own line.
+                if (!_loggedNoObjectId)
+                {
+                    _loggedNoObjectId = true;
+                    _logger?.LogWarning(
+                        "Denying all tool access for this request: no Entra object id could be determined from "
+                        + "the caller's token, and Authorization:LiveGroupCheck makes the live group lookup the "
+                        + "only source of entitlement.");
+                }
+                return false;
+            }
+
+            var resolved = await _groupResolver.TryResolvePermissionsAsync(objectId, cancellationToken);
+            if (resolved is null)
+            {
+                // The resolver had neither a fresh result nor a usable stale one — it has already
+                // considered and declined the stale window by this point, and logged the underlying
+                // Graph failure itself. Subject id only, never the caller's email (see AuditOptions).
+                if (!_loggedUnresolvable)
+                {
+                    _loggedUnresolvable = true;
+                    _logger?.LogWarning(
+                        "Denying all tool access for this request for {UserObjectId}: the live group lookup "
+                        + "returned nothing usable and there is no other source of entitlement.",
+                        objectId);
+                }
+                return false;
+            }
+
+            // Hand the audit record the tier THIS decision was made against. Re-deriving it later
+            // would mean a second Graph lookup that could answer differently, leaving a record that
+            // disagrees with the decision it documents — and, because entitlement is resolved live,
+            // nothing could afterwards say which was right.
+            //
+            // Staleness travels with it, from the resolver's own answer (vitally-mcp#161). It is the resolver's
+            // to report because only the resolver knows which branch it took: `false` here means
+            // Graph confirmed the tier, not that nobody looked. Never substitute a literal.
+            _auditContext?.RecordResolvedTier(resolved.Permissions, resolved.ServedStale);
+
+            // Authoritative when the live lookup succeeds (empty set => deny).
+            return resolved.Permissions.Contains(required);
+        }
+
+        // The claim path is inert on every deployed target (vitally-mcp#108/#156), but it is the supported
+        // local-dev mode and the audit record promises "the tier the caller resolved to" — leaving it
+        // unresolved here makes the field look broken to anyone reading their own dev output.
+        _auditContext?.RecordResolvedTier(ClaimedPermissions(user, _options.CustomPermissionsClaim), servedStale: null);
+
+        return HasPermission(user, required, _options.CustomPermissionsClaim);
+    }
+
+    /// <summary>
+    /// The user's Entra object id for the Graph lookup. Delegates to <see cref="CallerIdentity"/>,
+    /// which <see cref="AuditLogger"/> also uses — so the identifier an entitlement decision is made
+    /// against is by construction the one the audit record carries, and a denial can be joined to
+    /// the group membership that caused it.
+    /// </summary>
+    private static string? ExtractObjectId(ClaimsPrincipal user) => CallerIdentity.TryGetObjectId(user);
+
+    /// <summary>
+    /// Maps an HTTP verb to the required permission. Unknown verbs fall back to the most
+    /// restrictive (delete) permission so an unexpected method can never be the soft option.
+    /// </summary>
+    public string RequiredPermission(HttpMethod method)
+    {
+        if (method == HttpMethod.Get)
+        {
+            return _options.ReadPermission;
+        }
+        if (method == HttpMethod.Post || method == HttpMethod.Put || method == HttpMethod.Patch)
+        {
+            return _options.WritePermission;
+        }
+        return _options.DeletePermission;
+    }
+
+    /// <summary>
+    /// True when authorisation is switched off entirely (RBAC disabled or NoAuth dev mode), in which
+    /// case discovery filtering must be a pass-through — otherwise local development would see an
+    /// empty tool list. Async purely to keep the policy handler's call site uniform.
+    /// </summary>
+    public Task<bool> IsAuthorizationBypassedAsync() => Task.FromResult(!_options.Enabled || _noAuth);
+
+    /// <summary>
+    /// True if the principal carries <paramref name="required"/> as a <c>permissions</c> claim entry,
+    /// as an entry in the optional <paramref name="customClaimType"/> claim, or as a space-delimited
+    /// value in the <c>scope</c> claim.
+    /// </summary>
+    /// <remarks>
+    /// Reached only when <see cref="ToolAuthorizationOptions.LiveGroupCheck"/> is off, where it is
+    /// that mode's entire resolution rather than a fallback beneath the live check. See the class
+    /// remarks for why there is no longer a fall-through from the live path to here.
+    /// </remarks>
+    public static bool HasPermission(ClaimsPrincipal user, string required, string? customClaimType = null)
+    {
+        if (user.FindAll("permissions").Any(c => string.Equals(c.Value, required, StringComparison.Ordinal)))
+        {
+            return true;
+        }
+
+        if (!string.IsNullOrWhiteSpace(customClaimType)
+            && user.FindAll(customClaimType).Any(c => string.Equals(c.Value, required, StringComparison.Ordinal)))
+        {
+            return true;
+        }
+
+        var scope = user.FindFirst("scope")?.Value;
+        return !string.IsNullOrEmpty(scope)
+            && scope.Split(' ', StringSplitOptions.RemoveEmptyEntries)
+                .Any(s => string.Equals(s, required, StringComparison.Ordinal));
+    }
+
+    /// <summary>
+    /// Every Zendesk MCP permission the principal's claims assert, for the audit record. Mirrors the
+    /// sources <see cref="HasPermission"/> consults, so the recorded tier cannot claim something the
+    /// decision would have refused.
+    /// </summary>
+    private IReadOnlySet<string> ClaimedPermissions(ClaimsPrincipal user, string? customClaimType)
+    {
+        var claimed = new HashSet<string>(StringComparer.Ordinal);
+        claimed.UnionWith(user.FindAll("permissions").Select(c => c.Value));
+
+        if (!string.IsNullOrWhiteSpace(customClaimType))
+        {
+            claimed.UnionWith(user.FindAll(customClaimType).Select(c => c.Value));
+        }
+
+        var scope = user.FindFirst("scope")?.Value;
+        if (!string.IsNullOrEmpty(scope))
+        {
+            claimed.UnionWith(scope.Split(' ', StringSplitOptions.RemoveEmptyEntries));
+        }
+
+        // Keep only the permissions this server governs, so an OIDC scope like `openid` is not
+        // recorded as a tier. Compared against the CONFIGURED names rather than a `zendesk:` prefix:
+        // the three are settable and only validated as non-empty, so a deployment may legitimately
+        // use unprefixed names — and filtering on the prefix would let `HasPermission` authorise a
+        // call while the record claimed the caller held nothing.
+        var governed = new HashSet<string>(
+            [_options.ReadPermission, _options.WritePermission, _options.DeletePermission],
+            StringComparer.Ordinal);
+        claimed.IntersectWith(governed);
+        return claimed;
+    }
+}

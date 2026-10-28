@@ -1,0 +1,66 @@
+namespace ZendeskMcp;
+
+/// <summary>
+/// Controls the per-user audit trail. Every Zendesk call is made with the person's own Zendesk token,
+/// so Zendesk's audit log attributes each change to the agent — but Zendesk records changes, not
+/// reads, and knows nothing of the Entra identity or the tool call behind a request. So the server
+/// emits its own structured audit record (Entra object id + tool + verb + resource + outcome) at the
+/// single point every Zendesk call funnels through.
+/// <para>
+/// ⚠️ <b>Where these records go depends on one setting.</b>
+/// <list type="bullet">
+///   <item><b>With <c>ApplicationInsights__ConnectionString</c> set</b> — the Azure Monitor exporter
+///     is registered and every record carries <c>microsoft.custom_event.name</c>, so they land in
+///     <b><c>AppEvents</c></b>, where per-table retention and access apply. The whole
+///     <c>ZendeskMcp.AuditLogger</c> category is then suppressed from the console, and a
+///     customer-data-free breadcrumb takes its place there (see
+///     <see cref="EmitBreadcrumb"/>).</item>
+///   <item><b>Without it</b> — no exporter, no suppression: the records go to stdout and are
+///     <b>retained nowhere</b>, which is how it was for this server's entire prior lifetime. Verified
+///     2026-09-17: the workspace has shared-key authentication disabled and the Container Apps log
+///     shipper authenticates with a shared key, so that path was refused from the day the workspace
+///     was created.</item>
+/// </list>
+/// <b>Production has that setting since 2026-09-25 (vitally-mcp#147) — the first row is its live state, verified by
+/// reading <c>ZendeskToolCall</c> rows back out of <c>AppEvents</c> rather than inferred from a clean
+/// deploy, since a wrong attribute routes to <c>AppTraces</c> silently. Staging was switched on the same
+/// day (revision 17) and writes to the same table, told apart by <c>AppRoleName</c> — but it is an
+/// on-demand app and the setting does not survive a recreate, so the second row describes any
+/// deployment stood up without it.</b> Design in
+/// <c>docs/superpowers/specs/2026-09-17-logging-observability-design.md</c>; the console-log export
+/// it ungates is vitally-mcp#142.
+/// </para>
+/// </summary>
+public class AuditOptions
+{
+    /// <summary>
+    /// Whether to emit the customer-data-free breadcrumb alongside each tool-call record.
+    /// </summary>
+    /// <remarks>
+    /// Set in <c>Program.cs</c> only when the Azure Monitor exporter is configured, because the
+    /// breadcrumb exists to survive an export that silently fails — and with no exporter there is
+    /// nothing to survive, while the full record is still on the console. Keying it off
+    /// <see cref="ILoggerFactory"/> being present instead would fire on every host, since DI always
+    /// supplies one, and local runs would get two records per call.
+    /// </remarks>
+    public bool EmitBreadcrumb { get; set; }
+
+    public const string SectionName = "Audit";
+
+    /// <summary>When true, emit an audit record for each Zendesk action. Defaults to true.</summary>
+    public bool Enabled { get; set; } = true;
+
+    /// <summary>
+    /// When true, read operations (HTTP GET) are also audited. <b>Defaults to true</b>, and the
+    /// default is the point: Zendesk logs changes, not reads, so this is the only record of who read
+    /// which ticket, and most tools are reads — a deployment that does not audit them has no meaningful
+    /// trail at all. (In vitally-mcp it defaulted to false until vitally-mcp#139, and because no deployed
+    /// target ever set it, no read had ever been recorded there.)
+    /// <para>Left configurable rather than removed so ingest volume stays controllable — reads are
+    /// genuinely the high-volume path. Turning it off is a deliberate cost decision that trades away
+    /// the attribution this class exists to provide; mutations and denials are recorded either way.
+    /// Do not rely on a per-deployment override to switch it back on: a Container App recreate does
+    /// not inherit environment variables, so coverage would lapse silently.</para>
+    /// </summary>
+    public bool IncludeReads { get; set; } = true;
+}

@@ -1,0 +1,14 @@
+# Copy to terraform.tfvars (gitignored) and fill in, OR supply each value as TF_VAR_<name>.
+# Everything not listed here, apart from the secrets below, has a default in variables.tf / entra.tf.
+
+# Tag imported into the ACR for the first create (README.md, step 3). Ignored afterwards.
+image_tag         = "<tag>"
+staging_image_tag = "<tag>"
+
+# ---- Secrets: prefer the environment over this file ----
+#   export TF_VAR_teams_webhook_url='…'
+#   export TF_VAR_oauth_shared_client_secret='…'   # from step 2 of the apply procedure; not needed
+#                                                  # for the first, targeted apply
+#
+# There is no Application Insights connection-string variable: the component is created here and
+# the apps read its connection string directly.

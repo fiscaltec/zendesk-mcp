@@ -1,0 +1,200 @@
+using System.Diagnostics;
+using FluentAssertions;
+using ZendeskMcp;
+
+namespace ZendeskMcp.Tests;
+
+/// <summary>
+/// The gate on exporting dependency telemetry: a search term must never leave this process inside a
+/// span attribute.
+/// </summary>
+/// <remarks>
+/// <c>Search_users</c> passes its term as <c>?query=&lt;value&gt;</c> and the tool's own description
+/// says the term is an email or externalId, so this is the concrete path by which a customer's email
+/// could reach <c>AppDependencies</c> — a different table from the audit records, with its own
+/// retention, and one <see cref="AuditLogger"/>'s <c>ResourcePath</c> stripping does not touch.
+/// </remarks>
+// Serialised with the integration tests because the sanitiser tests create spans on the MCP SDK's
+// source NAME, and two tests there depend on nothing else listening to it: the exporter test's
+// post-dispose guard, and the composed PII test's catch-all listener. Running in parallel, these
+// would flake both.
+[Collection(IntegrationTestCollection.Name)]
+public class TelemetryRedactionTests
+{
+    [Theory]
+    [InlineData("https://acme.zendesk.com/api/v2/users/search?query=alice@example.com",
+                "https://acme.zendesk.com/api/v2/users/search?*")]
+    [InlineData("https://acme.zendesk.com/api/v2/organizations?page%5Bsize%5D=100&page%5Bafter%5D=cursor",
+                "https://acme.zendesk.com/api/v2/organizations?*")]
+    [InlineData("https://acme.zendesk.com/api/v2/tickets/35101",
+                "https://acme.zendesk.com/api/v2/tickets/35101")]
+    public void Redact_RemovesTheQuery_AndLeavesThePath(string url, string expected) =>
+        QueryStringRedactingProcessor.Redact(url).Should().Be(expected,
+            "the path carries the record id, which the trail records deliberately; the query carries "
+            + "the search term, which it must not");
+
+    [Fact]
+    public void Redact_LeavesAnAlreadyRedactedUrlAlone()
+    {
+        // The runtime redacts url.full itself on .NET 9+, so most spans arrive in this shape. Without
+        // this the processor would append its own marker to the runtime's and produce "?*​*".
+        const string alreadyRedacted = "https://acme.zendesk.com/api/v2/users/search?*";
+
+        QueryStringRedactingProcessor.Redact(alreadyRedacted).Should().Be(alreadyRedacted);
+    }
+
+    [Fact]
+    public void OnEnd_StripsTheQueryFromASpanAttribute()
+    {
+        using var source = new ActivitySource("ZendeskMcp.Tests.Redaction");
+        using var listener = new ActivityListener
+        {
+            ShouldListenTo = s => s.Name == "ZendeskMcp.Tests.Redaction",
+            Sample = (ref ActivityCreationOptions<ActivityContext> _) => ActivitySamplingResult.AllData,
+        };
+        ActivitySource.AddActivityListener(listener);
+
+        using var activity = source.StartActivity("GET")!;
+        activity.SetTag("url.full", "https://acme.zendesk.com/api/v2/users/search?query=bob@example.com");
+
+        new QueryStringRedactingProcessor().OnEnd(activity);
+
+        activity.GetTagItem("url.full").Should().Be("https://acme.zendesk.com/api/v2/users/search?*");
+    }
+
+    private const string SanitiseSource = "ZendeskMcp.Tests.Sanitise";
+    private static readonly KnownToolNames Known = new(["Search_organizations"]);
+
+    private static (ActivitySource Source, ActivityListener Listener) StartSource(string name)
+    {
+        var source = new ActivitySource(name);
+        var listener = new ActivityListener
+        {
+            ShouldListenTo = s => s.Name == name,
+            Sample = (ref ActivityCreationOptions<ActivityContext> _) => ActivitySamplingResult.AllData,
+        };
+        ActivitySource.AddActivityListener(listener);
+        return (source, listener);
+    }
+
+    [Fact]
+    public void Sanitiser_ClearsTheStatusDescription_ButKeepsTheErrorStatus()
+    {
+        // The MCP SDK copies a failed tool call's whole error text into the span's StatusDescription,
+        // and that text carries the caller's arguments ("got 'alice@example.com'") and Zendesk's
+        // response body. The status code says everything an operator needs; the text is customer data.
+        var (source, listener) = StartSource(SanitiseSource);
+        using var _source = source;
+        using var _listener = listener;
+        using var activity = source.StartActivity("tools/call Search_organizations")!;
+        activity.SetStatus(ActivityStatusCode.Error, "Zendesk returned 400. Body: alice@example.com");
+
+        new SpanSanitisingProcessor(Known).OnEnd(activity);
+
+        activity.Status.Should().Be(ActivityStatusCode.Error);
+        activity.StatusDescription.Should().BeNullOrEmpty();
+    }
+
+    [Fact]
+    public void Sanitiser_ReplacesAnUnregisteredToolName_InTheTagAndTheSpanName()
+    {
+        // A tools/call naming a tool that does not exist still produces a span, and the SDK puts the
+        // invented name in gen_ai.tool.name and in the span name — caller-controlled text, which the
+        // audit breadcrumb and the failure log already refuse to repeat.
+        var (source, listener) = StartSource(TelemetrySources.McpActivitySource);
+        using var _source = source;
+        using var _listener = listener;
+        using var activity = source.StartActivity("tools/call Alice_Smith_customer")!;
+        activity.SetTag("gen_ai.tool.name", "Alice_Smith_customer");
+
+        new SpanSanitisingProcessor(Known).OnEnd(activity);
+
+        activity.GetTagItem("gen_ai.tool.name").Should().Be("unrecognised");
+        activity.DisplayName.Should().Be("tools/call unrecognised");
+    }
+
+    [Fact]
+    public void Sanitiser_LeavesARegisteredToolName_Alone()
+    {
+        var (source, listener) = StartSource(TelemetrySources.McpActivitySource);
+        using var _source = source;
+        using var _listener = listener;
+        using var activity = source.StartActivity("tools/call Search_organizations")!;
+        activity.SetTag("gen_ai.tool.name", "Search_organizations");
+
+        new SpanSanitisingProcessor(Known).OnEnd(activity);
+
+        activity.GetTagItem("gen_ai.tool.name").Should().Be("Search_organizations");
+        activity.DisplayName.Should().Be("tools/call Search_organizations");
+    }
+
+    [Fact]
+    public void Sanitiser_ReplacesAnUnknownMethodName_InTheTagAndTheSpanName()
+    {
+        // A JSON-RPC method the SDK does not define still produces a span, named after the method and
+        // tagged with it — caller text, by a route that has nothing to do with tools.
+        var (source, listener) = StartSource(TelemetrySources.McpActivitySource);
+        using var _source = source;
+        using var _listener = listener;
+        using var activity = source.StartActivity("alice@example.com")!;
+        activity.SetTag("mcp.method.name", "alice@example.com");
+
+        new SpanSanitisingProcessor(Known).OnEnd(activity);
+
+        activity.GetTagItem("mcp.method.name").Should().Be("unrecognised");
+        activity.DisplayName.Should().Be("unrecognised");
+    }
+
+    [Fact]
+    public void Sanitiser_KeepsAKnownMethod_AndDropsTheCallerPartOfItsSpanName()
+    {
+        // prompts/get names its span "prompts/get <prompt name>" — the prompt name is the caller's. The
+        // span name is rebuilt from the cleaned method, so only a registered TOOL name is ever appended.
+        var (source, listener) = StartSource(TelemetrySources.McpActivitySource);
+        using var _source = source;
+        using var _listener = listener;
+        using var activity = source.StartActivity("prompts/get alice@example.com")!;
+        activity.SetTag("mcp.method.name", "prompts/get");
+        activity.SetTag("gen_ai.prompt.name", "alice@example.com");
+
+        new SpanSanitisingProcessor(Known).OnEnd(activity);
+
+        activity.GetTagItem("mcp.method.name").Should().Be("prompts/get");
+        activity.DisplayName.Should().Be("prompts/get");
+    }
+
+    [Fact]
+    public void Sanitiser_DropsEveryMcpTagNotOnTheAllowlist()
+    {
+        // Allowlist, not blocklist: the SDK sets mcp.resource.uri and gen_ai.prompt.name from the
+        // caller's request, and a future SDK version could add another such tag. Anything unknown goes.
+        var (source, listener) = StartSource(TelemetrySources.McpActivitySource);
+        using var _source = source;
+        using var _listener = listener;
+        using var activity = source.StartActivity("resources/read")!;
+        activity.SetTag("mcp.method.name", "resources/read");
+        activity.SetTag("mcp.resource.uri", "https://alice@example.com/x");
+        activity.SetTag("gen_ai.prompt.name", "alice@example.com");
+        activity.SetTag("some.future.tag", "alice@example.com");
+        activity.SetTag("error.type", "tool_error");
+
+        new SpanSanitisingProcessor(Known).OnEnd(activity);
+
+        activity.TagObjects.Select(t => t.Key).Should().BeEquivalentTo(["mcp.method.name", "error.type"]);
+    }
+
+    [Fact]
+    public void Sanitiser_DropsTheCallerChosenRequestId()
+    {
+        // The JSON-RPC id is whatever the client sent, and it is on every MCP span.
+        var (source, listener) = StartSource(TelemetrySources.McpActivitySource);
+        using var _source = source;
+        using var _listener = listener;
+        using var activity = source.StartActivity("tools/call Search_organizations")!;
+        activity.SetTag("jsonrpc.request.id", "alice@example.com");
+
+        new SpanSanitisingProcessor(Known).OnEnd(activity);
+
+        activity.GetTagItem("jsonrpc.request.id").Should().BeNull();
+    }
+}

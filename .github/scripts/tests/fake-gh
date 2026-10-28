@@ -1,0 +1,26 @@
+#!/usr/bin/env bash
+# Stub `gh` for pre-merge-copilot-gate.test.sh. Supports only what the hook calls:
+#   gh api [--paginate] <path>[?query] [--jq <expr>] [-f/-F key=value ...]
+# The response for <path> (query string dropped, `/` and `:` turned into `_`) is read from
+# $FAKE_GH_DIR/<that>.json and run through the real jq with the caller's --jq expression. A
+# missing fixture makes the call fail, as a refused or failing API call would.
+set -uo pipefail
+[ "${1:-}" = "api" ] || { echo "fake-gh: only 'gh api' is supported (got: $*)" >&2; exit 2; }
+shift
+path="" expr="."
+while [ $# -gt 0 ]; do
+	case "$1" in
+	--paginate) ;;
+	--jq) expr=$2; shift ;;
+	-f | -F | --field | --raw-field | -X | --method) shift ;;
+	-*) ;;
+	*) [ -z "$path" ] && path=$1 ;;
+	esac
+	shift
+done
+key=${path%%\?*}
+key=${key//\//_}
+key=${key//:/_}
+fixture="$FAKE_GH_DIR/$key.json"
+[ -f "$fixture" ] || { echo "fake-gh: no fixture for $path ($fixture)" >&2; exit 1; }
+jq -r "$expr" "$fixture"
