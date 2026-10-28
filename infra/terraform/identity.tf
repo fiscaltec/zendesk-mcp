@@ -93,7 +93,7 @@ resource "azurerm_federated_identity_credential" "github_actions_staging" {
 # needs: read the registry, and trigger an import. Scoped to that one registry.
 #
 # ⚠️ What remains: an import with --force can still overwrite any tag in the shared registry,
-# Vitally's included (acr.tf). Creating this role and assignment needs the applying principal to
+# Vitally's included (acr.tf). Creating this role and assignment needs whoever builds it to
 # hold role-administration rights over the Vitally estate's registry.
 resource "azurerm_role_definition" "acr_importer" {
   name        = "Zendesk MCP ACR importer"

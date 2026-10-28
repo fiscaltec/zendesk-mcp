@@ -52,11 +52,14 @@ Zendesk OAuth client `fiscal_zendesk_mcp`, and the subscription's `NetworkWatche
 
 ## Set these first
 
-Run once per Cloud Shell (it rewrites the file, so re-running is safe). Every value is a Terraform
-default from `variables.tf`, `entra.tf`, `keyvault.tf` and friends, or derived from one exactly as the
-Terraform derives it; nothing later in this runbook repeats a literal defined here.
+Run it once. Cloud Shell keeps `~` across sessions, so after a timeout you do not need it again.
+Re-running it is safe: it rewrites the file but keeps image tags Phase 8 has already recorded. Every
+value is a Terraform default from `variables.tf`, `entra.tf`, `keyvault.tf` and friends, or derived
+from one exactly as the Terraform derives it. Fixed names that appear once (connection and DNS-group
+names such as `kv-conn`) stay inline at the step that uses them.
 
 ```bash
+_keep_tags=$(grep -E '^(STAGING_)?IMAGE_TAG=[A-Za-z0-9._-]+' ~/zendesk-estate.env 2>/dev/null || true)
 cat > ~/zendesk-estate.env <<'ENVFILE'
 # Zendesk MCP estate — names and settings from infra/terraform/*.tf defaults. Non-secret. Sourced by
 # every block in docs/runbooks/build-the-estate.md.
@@ -166,7 +169,7 @@ GATE1_GROUP_ID=6ba9bf61-e959-4dd9-8a96-d477a35b0d03 # entra_gate1_group_object_i
 GROUP_READERS=sg-zendesk-readers
 GROUP_EDITORS=sg-zendesk-editors
 GROUP_ADMINS=sg-zendesk-admins
-TIER_INDIVIDUAL=dsearle@fiscaltec.com               # README step 8: holds every tier
+TIER_INDIVIDUAL=dsearle@fiscaltec.com               # Terraform README, Decisions: holds every tier
 
 # ---- Working locations ----
 SECRET_DIR=/tmp/zendesk-estate-secrets              # NOT under ~ (Cloud Shell persists ~)
@@ -220,6 +223,10 @@ link_name() {  # private DNS VNet link names, as network.tf and ampls.tf build t
   esac
 }
 ENVFILE
+while IFS= read -r _line; do      # put back tags recorded in Phase 8, if any
+  [ -n "$_line" ] && sed -i "s/^${_line%%=*}=.*/$_line/" ~/zendesk-estate.env
+done <<< "$_keep_tags"
+unset _keep_tags _line
 source ~/zendesk-estate.env
 az account set --subscription "$SUB"
 assert_context
@@ -244,7 +251,7 @@ Cloud Shell after activating, or the cached token lacks the new rights.
 
 ### 0.2 Zendesk OAuth client (Admin Centre, by hand)
 
-As `infra/terraform/README.md` step 0. Admin Centre → Apps and integrations → APIs → OAuth clients →
+Admin Centre → Apps and integrations → APIs → OAuth clients →
 `fiscal_zendesk_mcp`:
 
 - **Client kind: Confidential.** Remove `http://localhost:5099/zendesk/callback`.
@@ -285,21 +292,27 @@ expect "Gate 1 group name" "$GATE1_GROUP_NAME" "$(az ad group show --group "$GAT
 # The regional Network Watcher the flow log hangs off.
 expect "Network Watcher" "$NW_NAME" "$(az network watcher list --query "[?location=='$LOC'].name | [0]" -o tsv)"
 expect "Network Watcher RG" "${NW_RG,,}" "$(az network watcher list --query "[?location=='$LOC'].resourceGroup | [0]" -o tsv | tr '[:upper:]' '[:lower:]')"
-# Greenfield: the RG must not exist yet (if you are RE-running after a partial build, skip this check).
-expect "RG absent (greenfield)" false "$(az group exists -n "$RG")"
-# The VNet range is free in this subscription (variables.tf says it was on 2026-10-28; re-check).
-az network vnet list --query "[].addressSpace.addressPrefixes[]" -o tsv > /tmp/zendesk-prefixes.txt
-python3 - "$VNET_CIDR" /tmp/zendesk-prefixes.txt <<'PY'
+# Greenfield checks: the RG must not exist yet, the VNet range must be free and the global names
+# unclaimed. On a RE-RUN after Phase 1 they would fail against this estate's own resources, so they
+# run only while the RG is absent.
+if [ "$(az group exists -n "$RG")" = false ]; then
+  echo "OK   RG $RG absent (greenfield)"
+  # The VNet range is free in this subscription (variables.tf says it was on 2026-10-28; re-check).
+  az network vnet list --query "[].addressSpace.addressPrefixes[]" -o tsv > /tmp/zendesk-prefixes.txt
+  python3 - "$VNET_CIDR" /tmp/zendesk-prefixes.txt <<'PY'
 import ipaddress, sys
 want = ipaddress.ip_network(sys.argv[1])
 clash = [l.strip() for l in open(sys.argv[2]) if l.strip() and ipaddress.ip_network(l.strip()).overlaps(want)]
 print(("FAIL %s overlaps %s" % (want, clash)) if clash else ("OK   %s overlaps no VNet in the subscription" % want))
 sys.exit(1 if clash else 0)
 PY
-# Global names free: no soft-deleted vault of this name (purge protection would block it for 90 days),
-# and the storage account name is available.
-expect "no soft-deleted vault named $KV" 0 "$(az keyvault list-deleted --query "length([?name=='$KV'])" -o tsv)"
-expect "storage name $FLOW_SA available" true "$(az storage account check-name -n "$FLOW_SA" --query nameAvailable -o tsv)"
+  # Global names free: no soft-deleted vault of this name (purge protection would block it for 90 days),
+  # and the storage account name is available.
+  expect "no soft-deleted vault named $KV" 0 "$(az keyvault list-deleted --query "length([?name=='$KV'])" -o tsv)"
+  expect "storage name $FLOW_SA available" true "$(az storage account check-name -n "$FLOW_SA" --query nameAvailable -o tsv)"
+else
+  echo "NOTE $RG exists: this is a re-run, so the greenfield checks are skipped"
+fi
 # Terraform's preconditions on the OAuth origins (entra.tf), so a mistyped env file fails here.
 expect "audience = production origin, no slash" "$PROD_ORIGIN" "$OAUTH_AUDIENCE"
 expect "production resource = origin + /" "$PROD_ORIGIN/" "$OAUTH_RESOURCE"
@@ -985,9 +998,45 @@ rm -f "$SECRET_DIR/zendesk-oauth-client-secret"      # the app reads it from the
 ```
 
 `$SECRET_DIR/entra-oauth-client-secret` is kept until Phase 9 has copied it onto both apps, then
-deleted. If it is lost before then (Cloud Shell restarted), **do not** create another Entra secret:
-read it back from the vault through the same window — replace the `for name in …` loop above with
-`( umask 077; az keyvault secret show --vault-name "$KV" --name entra-mcp-client-secret --query value -o tsv | tr -d '\n' > "$SECRET_DIR/entra-oauth-client-secret" )`.
+deleted. **If it is lost before then (Cloud Shell restarted), do not re-run 7.2** — its guard would
+stop you, and getting past it would create a second Entra credential. Read the stored copy back from
+the vault instead, through the same window, with this block on its own:
+
+```bash
+( set -euo pipefail; source ~/zendesk-estate.env; assert_context
+umask 077
+KVW_ME=$(az ad signed-in-user show --query id -o tsv)
+KVW_ID=$(az keyvault show -g "$RG" -n "$KV" --query id -o tsv)
+KVW_PREV=$(az keyvault show -g "$RG" -n "$KV" --query "properties.networkAcls.defaultAction" -o tsv)
+KVW_IP=""
+close_window() {
+  set +e
+  az keyvault update -g "$RG" -n "$KV" --public-network-access Disabled -o none || echo "!!! could not disable public access on $KV — do it by hand" >&2
+  [ -n "$KVW_IP" ] && { az keyvault network-rule remove -g "$RG" -n "$KV" --ip-address "$KVW_IP/32" -o none || echo "!!! could not remove IP rule $KVW_IP" >&2; }
+  az keyvault update -g "$RG" -n "$KV" --default-action "${KVW_PREV:-Allow}" -o none || echo "!!! could not restore default action ${KVW_PREV:-Allow}" >&2
+  az role assignment delete --assignee "$KVW_ME" --role "Key Vault Secrets Officer" --scope "$KVW_ID" -o none || echo "!!! could not remove your Secrets Officer role" >&2
+  echo "window closed"
+}
+trap close_window EXIT
+[ "$(az role assignment list --scope "$KVW_ID" --assignee-object-id "$KVW_ME" --query "length([?roleDefinitionName=='Key Vault Secrets Officer'])" -o tsv)" = 1 ] \
+  || az role assignment create --assignee-object-id "$KVW_ME" --assignee-principal-type User \
+       --role "Key Vault Secrets Officer" --scope "$KVW_ID" -o none
+KVW_IP=$(curl -4 -fsS https://api.ipify.org)          # resolved here, every time — never reused
+case "$KVW_IP" in *.*.*.*) ;; *) fail "egress address '$KVW_IP' is not IPv4"; exit 1 ;; esac
+az keyvault update -g "$RG" -n "$KV" --default-action Deny -o none          # BEFORE public access
+az keyvault network-rule add -g "$RG" -n "$KV" --ip-address "$KVW_IP/32" -o none
+az keyvault update -g "$RG" -n "$KV" --public-network-access Enabled -o none
+ok=""
+for i in $(seq 1 20); do
+  az keyvault secret list --vault-name "$KV" -o none 2>/dev/null && { ok=1; break; }
+  echo "  vault not reachable yet from $KVW_IP (attempt $i)"; sleep 15
+done
+[ -n "$ok" ] || { fail "vault unreachable after 5 minutes — nothing stored"; exit 1; }
+az keyvault secret show --vault-name "$KV" --name entra-mcp-client-secret --query value -o tsv \
+  | tr -d '\n' > "$SECRET_DIR/entra-oauth-client-secret"
+[ -s "$SECRET_DIR/entra-oauth-client-secret" ] && echo "OK   recovered entra-oauth-client-secret" || { fail "nothing read back"; exit 1; }
+)
+```
 
 **Verify** — through the **management plane**, so the window stays shut.
 
@@ -1062,6 +1111,9 @@ earlier run imported it — carry on.
 nonempty "IMAGE_TAG" "$IMAGE_TAG"
 printf '%s' "$IMAGE_TAG" | grep -Eq '^[A-Za-z0-9._-]+$' || { fail "invalid tag '$IMAGE_TAG'"; exit 1; }
 nonempty "GH_USER" "${GH_USER:-}"
+trap 'rm -f "$SECRET_DIR/ghcr-read-pat"' EXIT     # removed on failure too
+# az acr import takes the source password only as an argument, so for the seconds this runs the PAT
+# is visible in your own Cloud Shell's process list. Use a short-lived, read:packages-only PAT.
 az acr import --name "$ACR" --resource-group "$ACR_RG" \
   --source "$GHCR_IMAGE:$IMAGE_TAG" --image "$IMAGE_REPO:$IMAGE_TAG" \
   --username "$GH_USER" --password "$(cat "$SECRET_DIR/ghcr-read-pat")" -o none
@@ -1252,6 +1304,7 @@ echo "wrote ~/zendesk-estate-apps.sh"
 nonempty "IMAGE_TAG" "$IMAGE_TAG"; nonempty "STAGING_IMAGE_TAG" "$STAGING_IMAGE_TAG"
 [ -s "$SECRET_DIR/entra-oauth-client-secret" ] || { fail "Entra secret file missing — see Phase 7"; exit 1; }
 umask 077
+trap 'rm -f "$SECRET_DIR/prod.yaml" "$SECRET_DIR/staging.yaml"' EXIT   # both carry the Entra secret
 # Production: one replica always warm, and never more than one.
 if ! az containerapp show -g "$RG" -n "$APP_PROD" -o none 2>/dev/null; then
   app_yaml prod "$IMAGE_TAG" 1 > "$SECRET_DIR/prod.yaml"
@@ -1295,6 +1348,7 @@ MI_ID=$(az identity show -g "$RG" -n "$MI" --query id -o tsv)
 MI_CID=$(az identity show -g "$RG" -n "$MI" --query clientId -o tsv)
 CAE_ID=$(az containerapp env show -g "$RG" -n "$CAE" --query id -o tsv)
 umask 077
+trap 'rm -f "$SECRET_DIR/job.yaml"' EXIT          # carries the webhook; removed on failure too
 cat > "$SECRET_DIR/job.yaml" <<EOF
 location: $LOC
 identity:
@@ -1589,7 +1643,9 @@ printf %s "$TENANT" | gh secret set AZURE_TENANT_ID       --repo "$GH_REPO"
 printf %s "$SUB"    | gh secret set AZURE_SUBSCRIPTION_ID --repo "$GH_REPO"
 for t in "production:$APP_PROD:$PROD_ORIGIN" "staging:$APP_STG:$STG_ORIGIN"; do
   env=${t%%:*}; rest=${t#*:}; app=${rest%%:*}; origin=${rest#*:}
-  gh api -X PUT "repos/$GH_REPO/environments/$env" --silent
+  # Create the environment only if it is missing: a PUT on an existing one can reset its protection
+  # rules (required reviewers, wait timer).
+  gh api "repos/$GH_REPO/environments/$env" --silent 2>/dev/null || gh api -X PUT "repos/$GH_REPO/environments/$env" --silent
   gh variable set CONTAINER_APP --repo "$GH_REPO" --env "$env" --body "$app"
   gh variable set PUBLIC_ORIGIN --repo "$GH_REPO" --env "$env" --body "$origin"   # origin only: no path, no slash
 done
@@ -1621,7 +1677,7 @@ and `--force`-imports over the same tag, which is harmless before anyone relies 
 
 ## Phase 14 — Whole-estate verification
 
-`infra/terraform/README.md` step 10, plus the checks only a finished estate can answer.
+The checks for each origin, plus those only a finished estate can answer.
 
 ```bash
 ( set -euo pipefail; source ~/zendesk-estate.env; assert_context
@@ -1695,19 +1751,22 @@ the first suspects if a block fails:
   keyed by resource id, `registries[].identity`, `secretRef` env, `workloadProfileName` under
   `properties`). The core module's YAML loader accepts these keys; Cloud Shell may load the
   `containerapp` *extension* instead, whose loader was not exercised.
-- `az role definition create` with `AssignableScopes` set to a single **registry** (resource-level
-  scope), as Terraform declares it. If Azure refuses a resource-level assignable scope, stop and
-  decide — widening it to the Vitally RG changes the record.
-- `az network watcher flow-log create --vnet <id>` placing the flow log under `NetworkWatcherRG`, and
-  `--retention 30` producing `retentionPolicy {enabled: true, days: 30}`.
+- `az role definition create` with `AssignableScopes` set to a single **registry**, as Terraform
+  declares it. Microsoft documents a resource-level assignable scope as possible from the command
+  line but *not recommended*, so expect it to be accepted; if it is refused, stop and decide —
+  widening it to the Vitally RG changes the record.
 - Graph `PATCH /applications` with the whole `api` object on each write — written so it works whether
   Graph merges or replaces, but not run.
-- `az keyvault network-rule remove --ip-address <ip>/32` matching the rule as stored.
 - The Key Vault window from Cloud Shell: whether the vault sees Cloud Shell's traffic from the address
   `api.ipify.org` reports.
 - `az containerapp env certificate list --managed-certificates-only` reporting
   `properties.subjectName`/`provisioningState` as queried.
 - `gh variable get` (needs a recent `gh`; Cloud Shell's should have it).
+
+Settled from the `az` 2.91 source, so no longer in doubt: `flow-log create` resolves the watcher from
+`--location` and puts the flow log in its resource group (`NetworkWatcherRG`), and `--retention 30`
+writes `{enabled: true, days: 30}`; `keyvault network-rule remove` compares addresses as networks,
+so `<ip>/32` matches a rule stored without the suffix.
 
 ## Coverage: Terraform resource → step
 

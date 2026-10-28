@@ -89,7 +89,7 @@ All five are **on** in FISCAL's deployment (decided 2026-10-28), so what limits 
 tier and your Zendesk role. The Infrastructure team can turn any of them off again
 (`Zendesk__Features__*`; the `zendesk_allow_*` Terraform variables).
 
-Group object ids (filled in from Terraform outputs once created):
+Group object ids (filled in once the build creates the groups — `docs/runbooks/build-the-estate.md`, Phase 6):
 
 | Group | Object ID |
 |---|---|

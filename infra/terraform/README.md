@@ -33,7 +33,7 @@ cite `vitally-mcp#NNN` where a lesson was learned there.
 | `containerapps.tf` | Container Apps environment, the production app, the secret-expiry scanner Job (`scan/run.py`) |
 | `containerapps-staging.tf` | the staging app — a second app in the same environment |
 | `entra.tf` | Entra app registration + service principal, Gate 1 assignments, `sg-zendesk-*` tier groups |
-| `outputs.tf` | the values the out-of-band steps below need |
+| `outputs.tf` | the values the build runbook's out-of-band steps need, as a record (no state, so never output) |
 
 ## What gets built
 - **Two Container Apps** in one VNet-injected environment: `zendesk-prod-ca-uksouth` (one warm
@@ -57,7 +57,7 @@ cite `vitally-mcp#NNN` where a lesson was learned there.
   is offered a connect link and reconnects.
 
 ## Decisions
-Settled on 2026-10-28 and committed as defaults, so a plan needs no further input on them:
+Settled on 2026-10-28 and committed as defaults, so the record and the build runbook agree on them:
 
 | Decision | Value | Where |
 |---|---|---|

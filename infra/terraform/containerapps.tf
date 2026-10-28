@@ -119,7 +119,7 @@ resource "azurerm_container_app" "app" {
     }
 
     # The custom domain (zendesk-mcp.fiscaltec.com) is bound to a FREE MANAGED certificate, which
-    # azurerm cannot create, so the binding is done out-of-band after the first apply (docs/runbooks/build-the-estate.md,
+    # azurerm cannot create, so the binding is done out-of-band after the build (docs/runbooks/build-the-estate.md,
     # Phase 11).
   }
 

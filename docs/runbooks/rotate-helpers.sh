@@ -16,7 +16,7 @@
 # .github/scripts/verify-oauth-metadata.sh).
 
 # The Zendesk MCP application's objectId (NOT its appId). Not known until entra.tf is applied:
-#   terraform -chdir=infra/terraform output -raw entra_app_object_id   (or `az ad app show --id <appId> --query id -o tsv`)
+#   az ad app list --display-name "Zendesk MCP" --query "[0].id" -o tsv   (the Terraform is a record with no state, so it has no outputs to read)
 # Export APP before sourcing; the placeholder makes every Graph call fail loudly rather than hit another app.
 APP="${APP:-SET-APP-OBJECT-ID-BEFORE-SOURCING}"
 RG=zendesk-prod-rg-uksouth

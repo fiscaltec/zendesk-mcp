@@ -43,8 +43,8 @@ name: Deploy
 # re-registering both per run.
 #
 # FIRST DEPLOY. "Capture current image" below needs the Container App to exist already, so the very
-# first image is imported by hand while the estate is being created -- infra/terraform/README.md,
-# "Apply procedure". From then on Terraform ignores the image and this workflow owns it.
+# first image is imported by hand while the estate is being built -- docs/runbooks/build-the-estate.md,
+# Phase 8. From then on this workflow owns the image.
 on:
   workflow_dispatch:
     inputs:

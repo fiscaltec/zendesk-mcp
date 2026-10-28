@@ -12,9 +12,10 @@ body:
 
         Two standing constraints worth knowing before you write the steps:
 
-        - **`infra/terraform/` is the source of truth for the estate.** Change it there, read the
-          `terraform plan` line by line, and apply deliberately (see `infra/terraform/README.md`).
-          An `az` change made by hand is drift the next apply will revert.
+        - **The estate is changed with `az` CLI; `infra/terraform/` is a record that is never
+          applied** (as in the Vitally estate). Make the change with `az`, then update the Terraform
+          to match in the same PR (see `infra/terraform/README.md` and
+          `docs/runbooks/build-the-estate.md`). Never run `terraform apply` against it.
         - **There is one live Zendesk account.** Staging and production both reach it, each as the
           signed-in person. Per-person tokens live in `zendesk-prod-kv-uksouth` as
           `zendesk-user-*` / `zendesk-staging-user-*` secrets — never edit or delete them by hand,

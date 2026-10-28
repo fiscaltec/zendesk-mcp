@@ -52,7 +52,7 @@ variable "entra_gate1_group_object_ids" {
 
 variable "entra_mcp_access_scope_id" {
   type        = string
-  description = "Stable id of the exposed mcp.access delegated scope. Changing it after the first apply invalidates every consent grant referencing it."
+  description = "Stable id of the exposed mcp.access delegated scope. Changing it after the first build invalidates every consent grant referencing it."
   default     = "c46bfcbe-1e71-4068-a6a8-6401ea221f85"
 }
 
@@ -239,7 +239,7 @@ resource "azuread_group" "zendesk_admins" {
 # ---------------------------------------------------------------------------------------------
 # NOT managed here, deliberately:
 #
-#  * The client secret. Create it out-of-band after the first apply and store it in Key Vault as
+#  * The client secret. Create it out-of-band after the app registration exists and store it in Key Vault as
 #    `entra-mcp-client-secret` — see docs/runbooks/entra-and-zendesk-oauth.md. Modelling it as
 #    `azuread_application_password` would persist the value in state AND tie its rotation to a
 #    Terraform run, and the vault's data plane is private-endpoint only so Terraform could not

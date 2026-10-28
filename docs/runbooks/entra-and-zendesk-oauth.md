@@ -17,7 +17,7 @@ does not change.
 
 | vitally-mcp | zendesk-mcp |
 |---|---|
-| app `Vitally MCP` | app `Zendesk MCP` (`terraform output entra_app_client_id`, objectId `entra_app_object_id`) |
+| app `Vitally MCP` | app `Zendesk MCP` (`az ad app list --display-name "Zendesk MCP" --query "[].{appId:appId, objectId:id}"`) |
 | `https://vitally.fiscaltec.com` | `https://zendesk-mcp.fiscaltec.com` |
 | `vitally-prod-rg-uksouth`, `vitally-prod-ca-uksouth`, `vitally-staging-ca-uksouth` | `zendesk-prod-rg-uksouth`, `zendesk-prod-ca-uksouth`, `zendesk-staging-ca-uksouth` |
 | `sg-vitally-*` | `sg-zendesk-*` |
@@ -32,7 +32,7 @@ does not change.
   grant sign-in. The list is `entra_gate1_group_object_ids` in `entra.tf`; since 2026-10-28 it
   admits the IT & Security Department only.
 - **Admin consent**: grant tenant-wide consent for `openid profile email offline_access mcp.access`
-  once, after the first apply: `az ad app permission admin-consent --id <appId>`.
+  once, when the estate is built (`docs/runbooks/build-the-estate.md`, Phase 10): `az ad app permission admin-consent --id <appId>`.
 - **Client secret**: create it out of band so it never lands in Terraform state. Store it in Key
   Vault as `entra-mcp-client-secret` with an expiry of 180 days or less, and copy it into both
   Container Apps as `entra-oauth-client-secret`. To rotate, follow vitally-mcp's verified procedure
@@ -47,8 +47,8 @@ does not change.
 
 > The production client exists: `fiscal_zendesk_mcp`, created on 2026-10-28 and set as
 > `zendesk_oauth_client_id`'s default. These steps are for recreating it, or for a separate
-> development client; `infra/terraform/README.md` step 0 lists what to change on the existing one
-> before the first apply.
+> development client; `docs/runbooks/build-the-estate.md` Phase 0 lists what to change on the existing
+> one before the build.
 
 1. Admin Centre → Apps and integrations → APIs → **OAuth clients** → Add OAuth client.
    - **Name**: `FISCAL Zendesk MCP`. Agents see this name on the consent screen and in their

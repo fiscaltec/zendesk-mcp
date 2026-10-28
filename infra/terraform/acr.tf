@@ -28,7 +28,7 @@ data "azurerm_container_registry" "acr" {
 # in the Vitally estate's privatelink.azurecr.io zone, linked only to its VNet; this one registers in
 # this estate's zone (network.tf), linked only to this VNet, so each estate resolves the registry to
 # its own endpoint. `is_manual_connection = false` approves the connection on creation, which needs
-# the applying principal to hold rights on the registry (README.md, Prerequisites).
+# whoever builds it to hold rights on the registry (docs/runbooks/build-the-estate.md, Phase 0).
 resource "azurerm_private_endpoint" "acr" {
   name                = "${var.name_prefix}-pe-acr-uksouth"
   resource_group_name = azurerm_resource_group.rg.name
