@@ -26,7 +26,7 @@ public class TicketAttachmentsToolsTests
         });
 
     [Fact]
-    public async Task GetTicketAttachment_ReturnsBase64AndImageBlock()
+    public async Task GetTicketAttachment_ReturnsAnImageOnceAsAnImageBlock()
     {
         using var fake = AttachmentFake("""{"attachment":{"id":55,"file_name":"a.png","content_type":"image/png","size":7,"content_url":"https://acme.zendesk.com/files/a.png"}}""");
         var result = await TicketAttachmentsTools.GetTicketAttachment(TestHelpers.BuildZendeskService(fake.Client), 55);
@@ -34,7 +34,7 @@ public class TicketAttachmentsToolsTests
         result.IsError.Should().NotBe(true);
         var text = JsonNode.Parse(result.Content.OfType<TextContentBlock>().Single().Text)!;
         text["file_name"]!.GetValue<string>().Should().Be("a.png");
-        Convert.FromBase64String(text["content_base64"]!.GetValue<string>()).Should().Equal("PNGDATA"u8.ToArray());
+        text.AsObject().ContainsKey("content_base64").Should().BeFalse("the image block already carries the bytes");
         var image = result.Content.OfType<ImageContentBlock>().Single();
         image.MimeType.Should().Be("image/png");
         image.DecodedData.ToArray().Should().Equal("PNGDATA"u8.ToArray());
@@ -45,7 +45,8 @@ public class TicketAttachmentsToolsTests
     {
         using var fake = AttachmentFake("""{"attachment":{"id":55,"file_name":"a.txt","content_type":"text/plain","size":7,"content_url":"https://acme.zendesk.com/files/a.png"}}""");
         var result = await TicketAttachmentsTools.GetTicketAttachment(TestHelpers.BuildZendeskService(fake.Client), 55);
-        result.Content.Should().ContainSingle().Which.Should().BeOfType<TextContentBlock>();
+        var block = result.Content.Should().ContainSingle().Which.Should().BeOfType<TextContentBlock>().Which;
+        JsonNode.Parse(block.Text)!["content_base64"]!.GetValue<string>().Should().NotBeEmpty("a file that is not an image is returned as base64");
     }
 
     [Fact]
