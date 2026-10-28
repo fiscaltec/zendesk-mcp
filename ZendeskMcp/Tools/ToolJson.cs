@@ -73,9 +73,30 @@ public static class ToolJson
         }
     }
 
-    /// <summary>Reads a long from a node that may be a number or absent.</summary>
-    public static long? Long(JsonNode? node) =>
-        node is JsonValue value && value.TryGetValue<long>(out var n) ? n : null;
+    /// <summary>
+    /// Reads a whole number from a node that may be a number or absent — whether parsed from Zendesk's
+    /// JSON or built in code (a <see cref="JsonValue"/> holding an <c>int</c> does not answer
+    /// <c>TryGetValue&lt;long&gt;</c>, so checking only that would read a tool's own values as null).
+    /// </summary>
+    public static long? Long(JsonNode? node)
+    {
+        if (node is not JsonValue value)
+        {
+            return null;
+        }
+
+        if (value.TryGetValue<long>(out var l))
+        {
+            return l;
+        }
+
+        if (value.TryGetValue<int>(out var i))
+        {
+            return i;
+        }
+
+        return value.TryGetValue<double>(out var d) && d == Math.Floor(d) && Math.Abs(d) < 9e15 ? (long)d : null;
+    }
 
     /// <summary>Reads a string from a node that may be a string or absent.</summary>
     public static string? String(JsonNode? node) =>
