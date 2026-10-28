@@ -50,7 +50,7 @@ public sealed class StartupGuardsTests : IDisposable
         // The token makes every Zendesk call as one person. Behind real sign-in it would quietly turn
         // the per-user server back into a shared service account, attributing every agent's changes
         // to whoever owns the token.
-        var act = () => StartupGuards.EnsureDevelopmentTokenIsLocal("zd_dev_token", keyVaultUri, noAuth);
+        var act = () => StartupGuards.EnsureDevelopmentTokenIsLocal("zd_dev_token", keyVaultUri, noAuth, isDevelopment: true);
         act.Should().Throw<InvalidOperationException>().WithMessage("*DevelopmentApiToken*");
     }
 
@@ -60,7 +60,7 @@ public sealed class StartupGuardsTests : IDisposable
     [InlineData(true, "   ")]
     public void EnsureDevelopmentTokenIsLocal_AllowsTheTokenForUnauthenticatedLocalDevelopment(bool noAuth, string? keyVaultUri)
     {
-        var act = () => StartupGuards.EnsureDevelopmentTokenIsLocal("zd_dev_token", keyVaultUri, noAuth);
+        var act = () => StartupGuards.EnsureDevelopmentTokenIsLocal("zd_dev_token", keyVaultUri, noAuth, isDevelopment: true);
         act.Should().NotThrow();
     }
 
@@ -71,7 +71,7 @@ public sealed class StartupGuardsTests : IDisposable
     public void EnsureDevelopmentTokenIsLocal_IsANoOpWithoutAToken(string? token, bool noAuth, string? keyVaultUri)
     {
         // Every deployed configuration has no token, so the guard must not get in its way.
-        var act = () => StartupGuards.EnsureDevelopmentTokenIsLocal(token, keyVaultUri, noAuth);
+        var act = () => StartupGuards.EnsureDevelopmentTokenIsLocal(token, keyVaultUri, noAuth, isDevelopment: true);
         act.Should().NotThrow();
     }
 
@@ -148,5 +148,33 @@ public sealed class StartupGuardsTests : IDisposable
             Options.Create(new OAuthOptions { Authority = StubOidcDiscovery.Issuer }),
             cache,
             NullLogger<UpstreamOidcMetadata>.Instance);
+    }
+
+    [Fact]
+    public void EnsureDevelopmentTokenIsLocal_RefusesTheTokenOutsideTheDevelopmentEnvironment()
+    {
+        var act = () => StartupGuards.EnsureDevelopmentTokenIsLocal("zd_dev_token", keyVaultUri: null, noAuth: true, isDevelopment: false);
+
+        act.Should().Throw<InvalidOperationException>("a mis-deployed NoAuth container would proxy one person's token to anyone");
+    }
+
+    [Theory]
+    [InlineData("false", false, true)]
+    [InlineData("False", false, true)]
+    [InlineData("false", true, false)]
+    [InlineData("true", false, false)]
+    [InlineData(null, false, false)]
+    public void EnsureIdentityBindingIsOn_RefusesTurningOffTheEmailMatchBehindSignIn(string? setting, bool noAuth, bool refused)
+    {
+        var act = () => StartupGuards.EnsureIdentityBindingIsOn(setting, noAuth);
+
+        if (refused)
+        {
+            act.Should().Throw<InvalidOperationException>();
+        }
+        else
+        {
+            act.Should().NotThrow();
+        }
     }
 }

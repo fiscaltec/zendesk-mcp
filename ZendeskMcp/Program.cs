@@ -298,7 +298,12 @@ builder.Services.AddScoped<AuditLogger>();
 builder.Services.AddScoped<ToolCallAuditContext>();
 builder.Services.AddTransient<ZendeskRateLimitHandler>();
 
+// AllowAutoRedirect = false: ZendeskService.DownloadAsync follows redirects itself, checking each
+// target's host. The default handler would follow any redirect to any https host — stripping the
+// Authorization header, but still fetching wherever a Zendesk response pointed and handing the bytes
+// back to the model.
 builder.Services.AddHttpClient<ZendeskService>(c => c.Timeout = TimeSpan.FromSeconds(100))
+    .ConfigurePrimaryHttpMessageHandler(() => new SocketsHttpHandler { AllowAutoRedirect = false })
     .AddHttpMessageHandler<ZendeskRateLimitHandler>();
 
 var oauthSection = builder.Configuration.GetSection(OAuthOptions.SectionName);
@@ -312,7 +317,8 @@ builder.Services.AddSingleton<UpstreamOidcMetadata>();
 
 // Fail fast on an unauthenticated production-looking config (NoAuth + Key Vault).
 StartupGuards.EnsureSafeAuthConfig(noAuth, zendeskSection["KeyVaultUri"]);
-StartupGuards.EnsureDevelopmentTokenIsLocal(zendeskSection["DevelopmentApiToken"], zendeskSection["KeyVaultUri"], noAuth);
+StartupGuards.EnsureDevelopmentTokenIsLocal(zendeskSection["DevelopmentApiToken"], zendeskSection["KeyVaultUri"], noAuth, builder.Environment.IsDevelopment());
+StartupGuards.EnsureIdentityBindingIsOn(zendeskSection["RequireEmailMatch"], noAuth);
 
 if (!noAuth)
 {

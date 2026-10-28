@@ -27,19 +27,40 @@ public static class StartupGuards
     /// per-user server back into a shared service account, attributing every agent's changes to
     /// whoever owns the token — the exact outcome per-user OAuth exists to prevent.
     /// </summary>
-    public static void EnsureDevelopmentTokenIsLocal(string? developmentApiToken, string? keyVaultUri, bool noAuth)
+    /// <remarks>
+    /// Also refused outside the Development environment: NoAuth with no Key Vault is otherwise a valid
+    /// shape for a mis-deployed container, and that container would be an unauthenticated public proxy
+    /// for one person's Zendesk token.
+    /// </remarks>
+    public static void EnsureDevelopmentTokenIsLocal(string? developmentApiToken, string? keyVaultUri, bool noAuth, bool isDevelopment)
     {
         if (string.IsNullOrWhiteSpace(developmentApiToken))
         {
             return;
         }
 
-        if (!noAuth || !string.IsNullOrWhiteSpace(keyVaultUri))
+        if (!noAuth || !string.IsNullOrWhiteSpace(keyVaultUri) || !isDevelopment)
         {
             throw new InvalidOperationException(
                 "Zendesk:DevelopmentApiToken is for unauthenticated local development only (OAuth:NoAuth=true, no " +
-                "Zendesk:KeyVaultUri). With sign-in enabled it would make every person's Zendesk calls as the " +
+                "Zendesk:KeyVaultUri, the Development environment). With sign-in enabled it would make every person's Zendesk calls as the " +
                 "token's owner. Remove it, and let each person connect their own Zendesk account.");
+        }
+    }
+
+    /// <summary>
+    /// Refuses <c>Zendesk:RequireEmailMatch=false</c> behind real sign-in. The email match is what binds
+    /// a Zendesk login to the Entra identity it is stored under: without it, anyone who opens a person's
+    /// connect link — forwarded, leaked, or coaxed out of a prompt-injected model — attaches their own
+    /// Zendesk account to that person's identity. It may only be relaxed for unauthenticated local work.
+    /// </summary>
+    public static void EnsureIdentityBindingIsOn(string? requireEmailMatch, bool noAuth)
+    {
+        if (!noAuth && bool.TryParse(requireEmailMatch, out var required) && !required)
+        {
+            throw new InvalidOperationException(
+                "Zendesk:RequireEmailMatch=false is refused with sign-in enabled: it would let a forwarded or leaked " +
+                "connect link attach someone else's Zendesk account to a person's identity.");
         }
     }
 

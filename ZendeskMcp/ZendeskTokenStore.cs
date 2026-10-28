@@ -97,8 +97,10 @@ public sealed class KeyVaultZendeskTokenStore(
             secret.Properties.ExpiresOn = refreshExpiry;
         }
 
-        await secrets.SetSecretAsync(secret, cancellationToken);
+        // Cached BEFORE the write: after a refresh, Zendesk has already spent the old refresh token, so
+        // if the vault write fails this replica must still hold the new one rather than the spent one.
         cache.Set(CacheKey(objectId), new CachedToken(token), _options.TokenCacheDuration);
+        await secrets.SetSecretAsync(secret, cancellationToken);
     }
 
     public async Task RemoveAsync(string objectId, CancellationToken cancellationToken = default)

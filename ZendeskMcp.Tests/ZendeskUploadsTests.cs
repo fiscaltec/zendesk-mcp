@@ -93,6 +93,21 @@ public class ZendeskUploadsTests
     }
 
     [Fact]
+    public async Task OnePerson_CanHoldOnlyAFewOpenSlots()
+    {
+        var slots = new ZendeskUploadSlots(new MemoryDistributedCache(Options.Create(new MemoryDistributedCacheOptions())));
+        for (var i = 0; i < ZendeskUploadSlots.MaxOpenSlotsPerPerson; i++)
+        {
+            await slots.CreateAsync(TestHelpers.UserPrincipal(), "a.txt", 1, false, null);
+        }
+
+        var act = () => slots.CreateAsync(TestHelpers.UserPrincipal(), "a.txt", 1, false, null);
+
+        await act.Should().ThrowAsync<ArgumentException>("each open slot can pin memory while a slow upload streams in");
+        await slots.CreateAsync(TestHelpers.UserPrincipal(objectId: "99999999-2222-3333-4444-555555555555"), "a.txt", 1, false, null);
+    }
+
+    [Fact]
     public async Task TheSlotCarriesIdentityAndPermissionClaims_AndNothingElse()
     {
         var slots = new ZendeskUploadSlots(new MemoryDistributedCache(Options.Create(new MemoryDistributedCacheOptions())));

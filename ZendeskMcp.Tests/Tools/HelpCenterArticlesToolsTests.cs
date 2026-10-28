@@ -178,8 +178,11 @@ public class HelpCenterArticlesToolsTests
 
         await HelpCenterArticlesTools.GetHelpCenterArticle(zendesk, 42, brand_url: "https://support.other.example/hc");
 
-        fake.Requests.Should().Contain(r => r.Url.Host == "support.other.example" && r.Path == "/api/v2/help_center/articles/42");
-        fake.Requests.Should().Contain(r => r.Url.Host == "support.other.example" && r.Path == "/api/v2/help_center/sections/7");
+        // A host mapping is accepted as an address but the calls go to that brand's own zendesk.com
+        // host: a mapping can name any domain, so it never receives the agent's token.
+        fake.Requests.Should().Contain(r => r.Url.Host == "otherbrand.zendesk.com" && r.Path == "/api/v2/help_center/articles/42");
+        fake.Requests.Should().Contain(r => r.Url.Host == "otherbrand.zendesk.com" && r.Path == "/api/v2/help_center/sections/7");
+        fake.Requests.Should().NotContain(r => r.Url.Host == "support.other.example");
     }
 
     [Fact]

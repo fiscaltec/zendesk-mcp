@@ -86,9 +86,85 @@ public class ZendeskServiceTests
             : FakeResponse.Json("{\"articles\":[]}"));
         var service = TestHelpers.BuildZendeskService(zendesk.Client);
 
+        await service.GetAsync("/api/v2/help_center/articles", brandUrl: "https://acme-other.zendesk.com/hc/en-gb");
+
+        zendesk.Requests.Last().Url.GetLeftPart(UriPartial.Path).Should().Be("https://acme-other.zendesk.com/api/v2/help_center/articles");
+    }
+
+    [Fact]
+    public async Task ABrandsHostMapping_IsTranslatedToItsZendeskHost_AndNeverSentTheCredential()
+    {
+        using var zendesk = TestHelpers.CreateFakeZendesk(r => r.Path == "/api/v2/brands"
+            ? FakeResponse.Json(BrandsJson)
+            : FakeResponse.Json("{\"articles\":[]}"));
+        var service = TestHelpers.BuildZendeskService(zendesk.Client);
+
         await service.GetAsync("/api/v2/help_center/articles", brandUrl: "https://help.other.example/hc/en-gb");
 
-        zendesk.Requests.Last().Url.GetLeftPart(UriPartial.Path).Should().Be("https://help.other.example/api/v2/help_center/articles");
+        zendesk.Requests.Last().Url.Host.Should().Be("acme-other.zendesk.com");
+        zendesk.Requests.Should().NotContain(r => r.Url.Host == "help.other.example",
+            "a host mapping can name any domain; only hosts Zendesk controls receive the token");
+    }
+
+    [Fact]
+    public async Task ABrandWhoseUrlIsNotAZendeskHost_IsNotACredentialDestination()
+    {
+        const string brands = """
+            {"brands":[{"id":3,"name":"Odd","brand_url":"https://odd.example","host_mapping":null}],"meta":{"has_more":false}}
+            """;
+        using var zendesk = TestHelpers.CreateFakeZendesk(r => r.Path == "/api/v2/brands" ? FakeResponse.Json(brands) : FakeResponse.Json("{}"));
+        var service = TestHelpers.BuildZendeskService(zendesk.Client);
+
+        var act = () => service.GetAsync("/api/v2/help_center/articles", brandUrl: "https://odd.example");
+
+        await act.Should().ThrowAsync<ArgumentException>();
+        zendesk.Requests.Should().NotContain(r => r.Url.Host == "odd.example");
+    }
+
+    [Fact]
+    public async Task ADownload_OfAnApiPath_IsRefused()
+    {
+        using var zendesk = TestHelpers.CreateFakeZendesk(_ => FakeResponse.Json("{}"));
+        var service = TestHelpers.BuildZendeskService(zendesk.Client);
+
+        var act = () => service.DownloadAsync("https://acme.zendesk.com/api/v2/users/me.json");
+
+        await act.Should().ThrowAsync<ArgumentException>().WithMessage("*API path*");
+        zendesk.Requests.Should().BeEmpty("an image src in an article must not make each reader's token call the API");
+    }
+
+    [Fact]
+    public async Task ADownloadRedirect_ToTheAttachmentCdn_IsFollowedWithoutTheCredential()
+    {
+        using var zendesk = TestHelpers.CreateFakeZendesk(r => r.Url.Host switch
+        {
+            "acme.zendesk.com" => new FakeResponse(HttpStatusCode.Found, string.Empty,
+                new Dictionary<string, string> { ["Location"] = "https://acme.zdusercontent.com/attachment/1/a.png?token=signed" }),
+            _ => new FakeResponse(HttpStatusCode.OK, "PNG", ContentType: "image/png"),
+        });
+        var service = TestHelpers.BuildZendeskService(zendesk.Client);
+
+        var file = await service.DownloadAsync("https://acme.zendesk.com/attachments/token/abc/?name=a.png");
+
+        file.ContentType.Should().Be("image/png");
+        var cdn = zendesk.Requests.Single(r => r.Url.Host == "acme.zdusercontent.com");
+        cdn.Headers.Should().NotContainKey("Authorization", "the CDN URL is signed and must never see the token");
+    }
+
+    [Fact]
+    public async Task ADownloadRedirect_ElsewhereIsRefused()
+    {
+        using var zendesk = TestHelpers.CreateFakeZendesk(r => r.Path == "/api/v2/brands"
+            ? FakeResponse.Json(BrandsJson)
+            : r.Url.Host == "acme.zendesk.com"
+                ? new FakeResponse(HttpStatusCode.Found, string.Empty, new Dictionary<string, string> { ["Location"] = "https://attacker.example/x" })
+                : FakeResponse.Json("{}"));
+        var service = TestHelpers.BuildZendeskService(zendesk.Client);
+
+        var act = () => service.DownloadAsync("https://acme.zendesk.com/hc/article_attachments/1/x.png");
+
+        await act.Should().ThrowAsync<ArgumentException>().WithMessage("*redirect*");
+        zendesk.Requests.Should().NotContain(r => r.Url.Host == "attacker.example");
     }
 
     [Theory]

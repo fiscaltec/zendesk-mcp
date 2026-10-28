@@ -57,6 +57,43 @@ public class ZendeskCredentialProviderTests
     }
 
     [Fact]
+    public async Task AZendesk401_WithALiveRefreshToken_RefreshesAndRetriesOnce()
+    {
+        var calls = 0;
+        using var zendesk = TestHelpers.CreateFakeZendesk(request => request.Path switch
+        {
+            "/oauth/tokens" => FakeResponse.Json("{\"access_token\":\"fresh\",\"refresh_token\":\"r2\",\"expires_in\":7200}"),
+            _ when request.Headers["Authorization"] == "Bearer revoked-early" => FakeResponse.WithStatus(HttpStatusCode.Unauthorized),
+            _ => Interlocked.Increment(ref calls) > 0 ? FakeResponse.Json(TestHelpers.GetSampleTicketJson()) : FakeResponse.Json("{}"),
+        });
+        var (service, store) = TestHelpers.BuildUserZendeskService(zendesk.Client, TestHelpers.SampleToken("revoked-early", refreshToken: "r1"));
+
+        var result = await service.GetAsync("/api/v2/tickets/101");
+
+        result["ticket"]!["id"]!.GetValue<long>().Should().Be(101);
+        (await store.GetAsync(TestHelpers.TestObjectId))!.AccessToken.Should().Be("fresh",
+            "a 401 can mean an access token revoked early while the grant is still good");
+    }
+
+    [Fact]
+    public async Task AZendesk401_ForATokenAlreadyReplaced_RetriesWithTheNewOne_AndForgetsNothing()
+    {
+        using var zendesk = TestHelpers.CreateFakeZendesk(request =>
+            request.Headers["Authorization"] == "Bearer new"
+                ? FakeResponse.Json(TestHelpers.GetSampleTicketJson())
+                : FakeResponse.WithStatus(HttpStatusCode.Unauthorized));
+        var (service, store) = TestHelpers.BuildUserZendeskService(zendesk.Client, TestHelpers.SampleToken("old", refreshToken: null));
+        var header = await service.Credentials.GetAuthorizationAsync();
+        await store.SaveAsync(TestHelpers.TestObjectId, TestHelpers.SampleToken("new", refreshToken: null));
+
+        // A request that went out with the old token comes back 401 after a reconnect stored a new one.
+        var retry = await service.Credentials.OnTokenRejectedAsync(header, allowRecovery: true);
+
+        retry.Parameter.Should().Be("new");
+        (await store.GetAsync(TestHelpers.TestObjectId))!.AccessToken.Should().Be("new", "the working grant must not be wiped");
+    }
+
+    [Fact]
     public async Task AnExpiringToken_IsRefreshedBeforeUse_AndTheRotatedTokenIsStored()
     {
         var time = new FixedClock(Now);

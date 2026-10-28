@@ -43,6 +43,12 @@ public sealed class ZendeskCredentialProvider(
     // person who did nothing wrong.
     private static readonly ConcurrentDictionary<string, SemaphoreSlim> RefreshLocks = new(StringComparer.Ordinal);
 
+    /// <summary>
+    /// The person's lock, for any write of their grant outside this class — the connect callback takes
+    /// it so that a refresh already in flight cannot overwrite a grant stored a moment later.
+    /// </summary>
+    internal static SemaphoreSlim LockFor(string objectId) => RefreshLocks.GetOrAdd(objectId, _ => new SemaphoreSlim(1, 1));
+
     private readonly ZendeskServerOptions _options = options.Value;
     private readonly TimeProvider _time = timeProvider ?? TimeProvider.System;
 
@@ -80,7 +86,7 @@ public sealed class ZendeskCredentialProvider(
             return token;
         }
 
-        var gate = RefreshLocks.GetOrAdd(objectId, _ => new SemaphoreSlim(1, 1));
+        var gate = LockFor(objectId);
         await gate.WaitAsync(cancellationToken);
         try
         {
@@ -96,35 +102,7 @@ public sealed class ZendeskCredentialProvider(
                 return token;
             }
 
-            if (string.IsNullOrWhiteSpace(token.RefreshToken))
-            {
-                await store.RemoveAsync(objectId, cancellationToken);
-                throw await ConnectionRequiredAsync(objectId, "Your Zendesk connection has expired.", cancellationToken);
-            }
-
-            ZendeskOAuthClient.TokenResponse refreshed;
-            try
-            {
-                refreshed = await oauthClient.RefreshAsync(token.RefreshToken, cancellationToken);
-            }
-            catch (ZendeskOAuthException ex) when (ex.Error is "invalid_grant" or "invalid_token" or "unauthorized_client")
-            {
-                // Expired, revoked in Zendesk, or the agent was downgraded: only a new sign-in helps.
-                await store.RemoveAsync(objectId, cancellationToken);
-                throw await ConnectionRequiredAsync(objectId, "Your Zendesk connection has expired or was revoked.", cancellationToken);
-            }
-
-            var renewed = token with
-            {
-                AccessToken = refreshed.AccessToken,
-                RefreshToken = refreshed.RefreshToken ?? token.RefreshToken,
-                ExpiresAt = refreshed.ExpiresIn is { } expiresIn ? _time.GetUtcNow().AddSeconds(expiresIn) : null,
-                RefreshExpiresAt = refreshed.RefreshTokenExpiresIn is { } refreshIn
-                    ? _time.GetUtcNow().AddSeconds(refreshIn)
-                    : token.RefreshExpiresAt,
-            };
-            await store.SaveAsync(objectId, renewed, cancellationToken);
-            return renewed;
+            return await RefreshHeldAsync(objectId, token, cancellationToken);
         }
         finally
         {
@@ -133,24 +111,113 @@ public sealed class ZendeskCredentialProvider(
     }
 
     /// <summary>
-    /// Called when Zendesk answers 401 to the caller's token: forgets the grant and returns the
-    /// exception for the caller to throw, which asks them to reconnect.
+    /// Called when Zendesk answers 401 to <paramref name="rejected"/>. Returns a credential worth one
+    /// retry, or throws: <see cref="ZendeskConnectionRequiredException"/> with a fresh link when the
+    /// person's grant is truly gone.
     /// </summary>
-    public async Task<Exception> OnTokenRejectedAsync(CancellationToken cancellationToken = default)
+    /// <remarks>
+    /// <para>
+    /// Decided under the same per-person lock as a refresh, and about the token that was actually
+    /// rejected — not whatever is stored now. A request can be in flight with an old token while a
+    /// refresh or a reconnect stores a new one; forgetting "the current token" when the old one comes
+    /// back 401 would wipe a working grant (and leave it unrevoked in Key Vault's version history).
+    /// </para>
+    /// <list type="bullet">
+    ///   <item>The stored token is no longer the rejected one → retry with the stored one.</item>
+    ///   <item>It is, and <paramref name="allowRecovery"/> holds and there is a refresh token → refresh,
+    ///     and retry with the new token. A 401 can mean an access token revoked early while the grant
+    ///     itself is still good.</item>
+    ///   <item>Otherwise → forget the grant and ask the person to reconnect.</item>
+    /// </list>
+    /// </remarks>
+    public async Task<AuthenticationHeaderValue> OnTokenRejectedAsync(AuthenticationHeaderValue rejected, bool allowRecovery, CancellationToken cancellationToken = default)
     {
         if (UsesDevelopmentToken)
         {
             // Logged here because nothing else will: ToolCallFailureLog treats the exception below as a
             // permission denial and stays silent, which would leave a bad development token with no line.
             logger.LogWarning("Zendesk rejected Zendesk:DevelopmentApiToken (401)");
-            return new UnauthorizedAccessException(
+            throw new UnauthorizedAccessException(
                 "Zendesk rejected Zendesk:DevelopmentApiToken. Check the token and Zendesk:DevelopmentEmail.");
         }
 
         var objectId = RequireObjectId();
-        logger.LogWarning("Zendesk rejected the stored token for {UserObjectId}; asking them to reconnect", objectId);
-        await store.RemoveAsync(objectId, cancellationToken);
-        return await ConnectionRequiredAsync(objectId, "Zendesk no longer accepts your connection (it may have been revoked or your Zendesk role changed).", cancellationToken);
+        var gate = LockFor(objectId);
+        await gate.WaitAsync(cancellationToken);
+        try
+        {
+            var stored = await store.GetAsync(objectId, cancellationToken);
+            if (stored is null)
+            {
+                throw await ConnectionRequiredAsync(objectId, "Your Zendesk account is not connected to this server.", cancellationToken);
+            }
+
+            if (!string.Equals(stored.AccessToken, rejected.Parameter, StringComparison.Ordinal))
+            {
+                return new AuthenticationHeaderValue("Bearer", stored.AccessToken);
+            }
+
+            if (allowRecovery && !string.IsNullOrWhiteSpace(stored.RefreshToken))
+            {
+                var renewed = await RefreshHeldAsync(objectId, stored, cancellationToken);
+                return new AuthenticationHeaderValue("Bearer", renewed.AccessToken);
+            }
+
+            logger.LogWarning("Zendesk rejected the stored token for {UserObjectId}; asking them to reconnect", objectId);
+            await store.RemoveAsync(objectId, cancellationToken);
+            throw await ConnectionRequiredAsync(objectId, "Zendesk no longer accepts your connection (it may have been revoked or your Zendesk role changed).", cancellationToken);
+        }
+        finally
+        {
+            gate.Release();
+        }
+    }
+
+    // Refreshes `token` and stores the result. The caller holds the person's lock.
+    private async Task<ZendeskUserToken> RefreshHeldAsync(string objectId, ZendeskUserToken token, CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(token.RefreshToken))
+        {
+            await store.RemoveAsync(objectId, cancellationToken);
+            throw await ConnectionRequiredAsync(objectId, "Your Zendesk connection has expired.", cancellationToken);
+        }
+
+        ZendeskOAuthClient.TokenResponse refreshed;
+        try
+        {
+            refreshed = await oauthClient.RefreshAsync(token.RefreshToken, cancellationToken);
+        }
+        catch (ZendeskOAuthException ex) when (ex.Error is "invalid_grant" or "invalid_token" or "unauthorized_client")
+        {
+            // Expired, revoked in Zendesk, or the agent was downgraded: only a new sign-in helps.
+            await store.RemoveAsync(objectId, cancellationToken);
+            throw await ConnectionRequiredAsync(objectId, "Your Zendesk connection has expired or was revoked.", cancellationToken);
+        }
+
+        var renewed = token with
+        {
+            AccessToken = refreshed.AccessToken,
+            RefreshToken = refreshed.RefreshToken ?? token.RefreshToken,
+            ExpiresAt = refreshed.ExpiresIn is { } expiresIn ? _time.GetUtcNow().AddSeconds(expiresIn) : null,
+            RefreshExpiresAt = refreshed.RefreshTokenExpiresIn is { } refreshIn
+                ? _time.GetUtcNow().AddSeconds(refreshIn)
+                : token.RefreshExpiresAt,
+        };
+
+        // Zendesk has already rotated the refresh token, so the old one is spent. A failed write here
+        // must not lose the new one: the store caches before it writes, so this replica keeps working
+        // with the renewed grant, and the failure is logged rather than failing the person's call.
+        try
+        {
+            await store.SaveAsync(objectId, renewed, cancellationToken);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            logger.LogError("Could not persist the refreshed Zendesk token for {UserObjectId} ({FailureType}); it is held in memory until the cache expires",
+                objectId, ex.GetType().Name);
+        }
+
+        return renewed;
     }
 
     /// <summary>A connect link for the current caller, for the connection tools.</summary>
@@ -192,13 +259,20 @@ public sealed class ZendeskCredentialProvider(
         return new ZendeskConnectionRequiredException(url, reason);
     }
 
-    // Prefer the configured origin, for the same Host-header reason the OAuth metadata does.
+    // The configured origin, for the same Host-header reason the OAuth metadata uses it. Behind real
+    // sign-in it is required: a link built from a forwarded Host header could point a person's browser,
+    // and their Zendesk authorisation, at someone else's server.
     private string PublicBaseUrl()
     {
         var configured = oauth.Value.PublicBaseUrl;
         if (!string.IsNullOrWhiteSpace(configured))
         {
             return configured;
+        }
+
+        if (!oauth.Value.NoAuth)
+        {
+            throw new InvalidOperationException("OAuth:PublicBaseUrl must be set to issue Zendesk connect links.");
         }
 
         var request = httpContextAccessor?.HttpContext?.Request;

@@ -15,10 +15,12 @@ namespace ZendeskMcp;
 /// <remarks>
 /// <para>
 /// The PUT carries no bearer token — curl has none — so the slot itself is the credential: 256 random
-/// bits, usable once, for fifteen minutes, for exactly the declared number of bytes. It records the
-/// caller's Entra object id and the permission claims they presented, and the PUT re-runs the
-/// <b>write</b>-tier check against those at upload time (live Graph lookup included), so a person
-/// removed from the editor group in between cannot use a slot issued before.
+/// bits, usable once, for fifteen minutes, for exactly the declared number of bytes, and at most
+/// <see cref="MaxOpenSlotsPerPerson"/> open per person. It records the caller's Entra object id and the
+/// permission claims they presented, and the PUT re-runs the <b>write</b>-tier check at upload time.
+/// With <c>Authorization:LiveGroupCheck</c> on (every deployed target) that check reads the person's
+/// group membership from Graph afresh, so someone removed from the editor group in between cannot use a
+/// slot issued before; with it off, it can only re-read the claims copied into the slot.
 /// </para>
 /// <para>
 /// Backed by <see cref="IDistributedCache"/> for the same single-replica reason as
@@ -28,7 +30,18 @@ namespace ZendeskMcp;
 public sealed class ZendeskUploadSlots(IDistributedCache cache)
 {
     public static readonly TimeSpan Lifetime = TimeSpan.FromMinutes(15);
+
+    /// <summary>
+    /// Open slots one person may hold. Each PUT can hold up to the file-size limit in memory while it
+    /// streams in, so without a cap one write-tier caller could request many slots and pin the single
+    /// replica's memory with slow uploads.
+    /// </summary>
+    public const int MaxOpenSlotsPerPerson = 5;
+
     private const string Prefix = "zendesk-upload:";
+
+    // Issue times of each person's open slots. Process-local, like the slots themselves (single replica).
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<string, List<DateTimeOffset>> _issued = new(StringComparer.Ordinal);
 
     // The claims a slot carries forward: identity for the audit record and the Zendesk token lookup,
     // and the token-claim permissions for deployments that resolve tiers from claims rather than Graph.
@@ -40,6 +53,21 @@ public sealed class ZendeskUploadSlots(IDistributedCache cache)
 
     public async Task<string> CreateAsync(ClaimsPrincipal caller, string fileName, long fileSize, bool inline, string? extraClaimType, CancellationToken cancellationToken = default)
     {
+        var owner = CallerIdentity.TryGetObjectId(caller) ?? "unknown";
+        var issued = _issued.GetOrAdd(owner, _ => []);
+        lock (issued)
+        {
+            var now = DateTimeOffset.UtcNow;
+            issued.RemoveAll(at => now - at > Lifetime);
+            if (issued.Count >= MaxOpenSlotsPerPerson)
+            {
+                throw new ArgumentException(
+                    $"You already have {MaxOpenSlotsPerPerson} upload links open. Use or let them expire (15 minutes) before asking for another.");
+            }
+
+            issued.Add(now);
+        }
+
         var slot = Convert.ToBase64String(RandomNumberGenerator.GetBytes(32)).TrimEnd('=').Replace('+', '-').Replace('/', '_');
         var claims = caller.Claims
             .Where(c => CarriedClaimTypes.Contains(c.Type) || (extraClaimType is not null && c.Type == extraClaimType))
@@ -102,17 +130,19 @@ public static class ZendeskUploadEndpoints
                     statusCode: StatusCodes.Status400BadRequest);
             }
 
-            // Read at most one byte more than promised, so an oversized body is detected without
-            // buffering all of it.
-            var buffer = new byte[upload.FileSize + 1];
-            var total = 0;
+            // Read at most one byte more than promised, into a buffer that grows with what actually
+            // arrives — allocating the declared size up front would let a slow, never-finished upload pin
+            // the whole amount.
+            using var buffer = new MemoryStream();
+            var chunk = new byte[81920];
             int read;
-            while (total < buffer.Length
-                   && (read = await ctx.Request.Body.ReadAsync(buffer.AsMemory(total, buffer.Length - total), ctx.RequestAborted)) > 0)
+            while (buffer.Length <= upload.FileSize
+                   && (read = await ctx.Request.Body.ReadAsync(chunk.AsMemory(0, (int)Math.Min(chunk.Length, upload.FileSize + 1 - buffer.Length)), ctx.RequestAborted)) > 0)
             {
-                total += read;
+                buffer.Write(chunk, 0, read);
             }
 
+            var total = buffer.Length;
             if (total != upload.FileSize)
             {
                 return Results.Json(new { error = $"Expected exactly {upload.FileSize} bytes, received {(total > upload.FileSize ? "more" : total.ToString(System.Globalization.CultureInfo.InvariantCulture))}." },
@@ -134,7 +164,7 @@ public static class ZendeskUploadEndpoints
                 }
 
                 var result = await zendesk.PostBinaryAsync("/api/v2/uploads", query,
-                    buffer.AsSpan(0, total).ToArray(), "application/binary", ctx.RequestAborted);
+                    new ArraySegment<byte>(buffer.GetBuffer(), 0, (int)total), "application/binary", ctx.RequestAborted);
                 var uploadNode = result["upload"];
                 var attachment = uploadNode?["attachment"];
                 return Results.Json(new JsonObject

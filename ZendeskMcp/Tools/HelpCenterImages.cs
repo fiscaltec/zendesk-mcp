@@ -21,6 +21,16 @@ public static partial class HelpCenterImages
     /// <summary>At most this many distinct images are inlined per call, so one article cannot balloon the result.</summary>
     public const int MaxImages = 25;
 
+    /// <summary>Largest single image inlined. Bigger ones are skipped and listed, with their URL.</summary>
+    public const long MaxImageBytes = 2 * 1024 * 1024;
+
+    /// <summary>
+    /// Total image bytes inlined per call. A base64 copy of every image sits in the result, and the
+    /// result is held and serialised in memory on the single replica; without a total, an article of
+    /// large images could make one call cost gigabytes.
+    /// </summary>
+    public const long MaxTotalBytes = 8 * 1024 * 1024;
+
     // The src attribute of an <img> tag, double- or single-quoted. Group "v" is the raw attribute value.
     [GeneratedRegex("""<img\b[^>]*?\bsrc\s*=\s*(?:"(?<v>[^"]*)"|'(?<v>[^']*)')""", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
     private static partial Regex ImgSrc();
@@ -33,6 +43,7 @@ public static partial class HelpCenterImages
         internal Dictionary<string, string?> Resolved { get; } = new(StringComparer.Ordinal);
         internal JsonArray Skipped { get; } = [];
         internal int Embedded { get; set; }
+        internal long BytesEmbedded { get; set; }
 
         /// <summary>Images that were not inlined, each with the src and the reason.</summary>
         public JsonArray SkippedImages => Skipped;
@@ -123,7 +134,20 @@ public static partial class HelpCenterImages
             return null;
         }
 
+        if (file.Content.LongLength > MaxImageBytes)
+        {
+            Skip(session, raw, $"larger than {MaxImageBytes} bytes; open it from its URL instead");
+            return null;
+        }
+
+        if (session.BytesEmbedded + file.Content.LongLength > MaxTotalBytes)
+        {
+            Skip(session, raw, $"the {MaxTotalBytes}-byte total for inlined images in one call is used up");
+            return null;
+        }
+
         session.Embedded++;
+        session.BytesEmbedded += file.Content.LongLength;
         return $"data:{contentType.ToLowerInvariant()};base64,{Convert.ToBase64String(file.Content)}";
     }
 

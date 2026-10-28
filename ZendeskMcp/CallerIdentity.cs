@@ -59,10 +59,8 @@ public static class CallerIdentity
     /// </summary>
     /// <remarks>
     /// Never written to a log or an audit record: the object id is the identifier those use (see
-    /// <see cref="AuditOptions"/>). Checked in the order an Entra v2 access token is most likely to
-    /// carry them — <c>preferred_username</c> is a v2 claim, <c>upn</c> and <c>unique_name</c> are v1 and
-    /// optional, and <c>email</c> is optional in both — with the mapped URI spellings for the same
-    /// reason as <c>oid</c> above.
+    /// <see cref="AuditOptions"/>). Checked most-trustworthy first (see the comment in the method), with the mapped URI spellings for
+    /// the same reason as <c>oid</c> above.
     /// </remarks>
     public static string? TryGetSignInName(ClaimsPrincipal? user)
     {
@@ -71,13 +69,17 @@ public static class CallerIdentity
             return null;
         }
 
+        // `upn` first: Microsoft documents `preferred_username` as mutable and not for authorisation
+        // decisions, and this one binds a Zendesk account to a person. `upn` is an optional claim on v2
+        // access tokens (entra.tf requests it); `preferred_username` remains the fallback, and in a
+        // single work tenant it carries the same UPN.
         string[] claimTypes =
         [
-            "preferred_username",
             "upn",
             ClaimTypes.Upn,
             "email",
             ClaimTypes.Email,
+            "preferred_username",
             "unique_name",
             ClaimTypes.Name,
         ];

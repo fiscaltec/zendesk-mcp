@@ -125,7 +125,19 @@ public static class ZendeskConnectEndpoints
                 return Page(StatusCodes.Status403Forbidden, "Connection refused", refusal.Value.Message);
             }
 
-            await store.SaveAsync(attempt.ObjectId, oauthClient.ToUserToken(token, identity), ctx.RequestAborted);
+            // Under the person's lock, so a refresh of their previous grant that is already in flight
+            // cannot land after this and overwrite the new connection with the old one renewed.
+            var gate = ZendeskCredentialProvider.LockFor(attempt.ObjectId);
+            await gate.WaitAsync(ctx.RequestAborted);
+            try
+            {
+                await store.SaveAsync(attempt.ObjectId, oauthClient.ToUserToken(token, identity), ctx.RequestAborted);
+            }
+            finally
+            {
+                gate.Release();
+            }
+
             await links.RedeemAsync(attempt.Ticket, ctx.RequestAborted);
             logger.LogInformation("Connected Zendesk user {ZendeskUserId} for {UserObjectId}", identity.Id, attempt.ObjectId);
 
@@ -162,8 +174,15 @@ public static class ZendeskConnectEndpoints
                 "Zendesk email does not match the sign-in name");
     }
 
+    // The configured origin; the request's own only for unauthenticated local work (see
+    // ZendeskCredentialProvider.PublicBaseUrl for why behind sign-in it must be configured).
     private static string CallbackUrl(HttpContext ctx, OAuthOptions oauth)
     {
+        if (string.IsNullOrWhiteSpace(oauth.PublicBaseUrl) && !oauth.NoAuth)
+        {
+            throw new InvalidOperationException("OAuth:PublicBaseUrl must be set for the Zendesk connect flow.");
+        }
+
         var baseUrl = string.IsNullOrWhiteSpace(oauth.PublicBaseUrl)
             ? $"{ctx.Request.Scheme}://{ctx.Request.Host}"
             : oauth.PublicBaseUrl;

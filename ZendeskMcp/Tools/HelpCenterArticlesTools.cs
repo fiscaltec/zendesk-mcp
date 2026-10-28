@@ -144,12 +144,12 @@ public static class HelpCenterArticlesTools
             var baseUrl = await zendesk.ResolveBrandBaseUrlAsync(brand_url, cancellationToken) ?? zendesk.BaseUrl;
             var session = new HelpCenterImages.Session(zendesk, baseUrl);
             result["body"] = await HelpCenterImages.EmbedAsync(session, ToolJson.String(result["body"]), cancellationToken);
-            foreach (var translation in translations ?? [])
+
+            // Only the main body. Inlining into every translation would put a base64 copy of each image
+            // into the result once per locale — up to hundreds of copies for locale 'all'.
+            if (translations is { Count: > 0 })
             {
-                if (translation is JsonObject t)
-                {
-                    t["body"] = await HelpCenterImages.EmbedAsync(session, ToolJson.String(t["body"]), cancellationToken);
-                }
+                result["images_note"] = "Images are inlined in the main body only; translations keep their image URLs.";
             }
 
             result["images_embedded"] = session.EmbeddedCount;

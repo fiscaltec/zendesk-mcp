@@ -81,6 +81,15 @@ resource "azuread_application" "zendesk_mcp" {
     }
   }
 
+  # `upn` on the access token: CallerIdentity.TryGetSignInName prefers it to `preferred_username`
+  # (which Microsoft documents as mutable and not for authorisation) when matching a person's Zendesk
+  # login to their Entra identity at /zendesk/callback.
+  optional_claims {
+    access_token {
+      name = "upn"
+    }
+  }
+
   # The proxy owns a single fixed callback per origin; MCP clients never register with Entra —
   # they converge on this app through the RFC 7591 DCR shim at /oauth/register. (The Zendesk
   # connection's /zendesk/callback is a redirect URL on the ZENDESK OAuth client, not here.)

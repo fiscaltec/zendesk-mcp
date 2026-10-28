@@ -75,10 +75,14 @@ public class ZendeskService
     /// <summary>
     /// POSTs raw bytes (Zendesk's <c>/api/v2/uploads</c> takes the file as the body, not JSON).
     /// </summary>
-    public async Task<JsonNode> PostBinaryAsync(string path, IEnumerable<KeyValuePair<string, string?>>? query, byte[] content, string contentType, CancellationToken cancellationToken = default)
+    public Task<JsonNode> PostBinaryAsync(string path, IEnumerable<KeyValuePair<string, string?>>? query, byte[] content, string contentType, CancellationToken cancellationToken = default) =>
+        PostBinaryAsync(path, query, new ArraySegment<byte>(content), contentType, cancellationToken);
+
+    /// <summary>As above, for part of a buffer, so a caller need not copy what it has already read.</summary>
+    public async Task<JsonNode> PostBinaryAsync(string path, IEnumerable<KeyValuePair<string, string?>>? query, ArraySegment<byte> content, string contentType, CancellationToken cancellationToken = default)
     {
         var url = BuildUrl(path, query, baseUrl: null);
-        using var httpContent = new ByteArrayContent(content);
+        using var httpContent = new ByteArrayContent(content.Array!, content.Offset, content.Count);
         httpContent.Headers.ContentType = System.Net.Http.Headers.MediaTypeHeaderValue.Parse(contentType);
         var body = await SendAsync(HttpMethod.Post, url, httpContent, headers: null, cancellationToken);
         return ParseOrEmpty(body);
@@ -165,58 +169,93 @@ public class ZendeskService
     }
 
     /// <summary>
-    /// Downloads a file from Zendesk — an attachment's <c>content_url</c>. The caller's credential is
-    /// sent only to the account's own origin or one of its brands' Help Center hosts; any other host is
-    /// refused rather than fetched, so a URL taken from ticket content can never carry a token away.
+    /// Downloads a file from Zendesk — an attachment's <c>content_url</c>, or an image in an article.
     /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Three rules keep a URL taken from ticket or article content from carrying the caller's token
+    /// anywhere it should not go:
+    /// </para>
+    /// <list type="number">
+    ///   <item>The host must be the account's own or one of its brands'. A brand's <i>host mapping</i>
+    ///     (a custom domain an admin points at the Help Center) is accepted as an address but never
+    ///     sent the credential: the request is rewritten to that brand's <c>{subdomain}.zendesk.com</c>
+    ///     host, the only hosts Zendesk itself controls. A mapping can name any domain, and a stale or
+    ///     malicious one would otherwise receive every reader's token.</item>
+    ///   <item>No <c>/api/</c> path: this fetches files, and an image <c>src</c> in an article must not
+    ///     be able to make each reader's token issue API calls.</item>
+    ///   <item>Redirects are followed here, not by the handler (which is built with
+    ///     <c>AllowAutoRedirect = false</c>): at most three, https only, to an account host (credential
+    ///     re-sent) or Zendesk's attachment CDN <c>*.zdusercontent.com</c> (no credential — its URLs are
+    ///     signed). Anything else is refused.</item>
+    /// </list>
+    /// </remarks>
     public async Task<DownloadedFile> DownloadAsync(string absoluteUrl, CancellationToken cancellationToken = default)
     {
         if (!Uri.TryCreate(absoluteUrl, UriKind.Absolute, out var uri) || uri.Scheme != Uri.UriSchemeHttps)
         {
-            throw new ArgumentException("The attachment URL is not an absolute https URL.");
+            throw new ArgumentException("The file URL is not an absolute https URL.");
         }
 
-        if (!await IsAccountHostAsync(uri.Host, cancellationToken))
-        {
-            throw new ArgumentException($"Refusing to download from '{uri.Host}': it is not this Zendesk account's host.");
-        }
+        var target = await CredentialTargetAsync(uri, cancellationToken)
+            ?? throw new ArgumentException($"Refusing to download from '{uri.Host}': it is not this Zendesk account's host.");
 
         await AuthorizeAsync(HttpMethod.Get, absoluteUrl, cancellationToken);
+        var authorization = await _credentials.GetAuthorizationAsync(cancellationToken);
 
-        using var request = new HttpRequestMessage(HttpMethod.Get, uri);
-        request.Headers.Authorization = await _credentials.GetAuthorizationAsync(cancellationToken);
-
-        var started = Stopwatch.GetTimestamp();
-        using var response = await _httpClient.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
-        _audit.LogAction(HttpMethod.Get, absoluteUrl, (int)response.StatusCode, _auditContext?.CorrelationId, Stopwatch.GetElapsedTime(started));
-
-        if (!response.IsSuccessStatusCode)
+        for (var hop = 0; ; hop++)
         {
-            throw new HttpRequestException(
-                $"Zendesk returned {(int)response.StatusCode} {response.ReasonPhrase} for the attachment.",
-                inner: null,
-                statusCode: response.StatusCode);
-        }
-
-        if (response.Content.Headers.ContentLength is { } length && length > _options.MaxAttachmentBytes)
-        {
-            throw new ArgumentException($"The file is {length} bytes; the limit is {_options.MaxAttachmentBytes}.");
-        }
-
-        await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken);
-        using var buffer = new MemoryStream();
-        var chunk = new byte[81920];
-        int read;
-        while ((read = await stream.ReadAsync(chunk, cancellationToken)) > 0)
-        {
-            buffer.Write(chunk, 0, read);
-            if (buffer.Length > _options.MaxAttachmentBytes)
+            using var request = new HttpRequestMessage(HttpMethod.Get, target.Uri);
+            if (target.SendCredential)
             {
-                throw new ArgumentException($"The file is larger than the {_options.MaxAttachmentBytes}-byte limit.");
+                request.Headers.Authorization = authorization;
             }
-        }
 
-        return new DownloadedFile(buffer.ToArray(), response.Content.Headers.ContentType?.MediaType);
+            var started = Stopwatch.GetTimestamp();
+            using var response = await _httpClient.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
+            _audit.LogAction(HttpMethod.Get, target.Uri.GetLeftPart(UriPartial.Path), (int)response.StatusCode, _auditContext?.CorrelationId, Stopwatch.GetElapsedTime(started));
+
+            if ((int)response.StatusCode is >= 300 and < 400 && response.Headers.Location is { } location)
+            {
+                if (hop >= 3)
+                {
+                    throw new HttpRequestException("Zendesk redirected the download too many times.");
+                }
+
+                var next = location.IsAbsoluteUri ? location : new Uri(target.Uri, location);
+                target = await RedirectTargetAsync(next, cancellationToken)
+                    ?? throw new ArgumentException($"Refusing to follow a redirect to '{next.Host}': it is neither this Zendesk account's host nor its attachment CDN.");
+                continue;
+            }
+
+            if (!response.IsSuccessStatusCode)
+            {
+                throw new HttpRequestException(
+                    $"Zendesk returned {(int)response.StatusCode} {response.ReasonPhrase} for the file.",
+                    inner: null,
+                    statusCode: response.StatusCode);
+            }
+
+            if (response.Content.Headers.ContentLength is { } length && length > _options.MaxAttachmentBytes)
+            {
+                throw new ArgumentException($"The file is {length} bytes; the limit is {_options.MaxAttachmentBytes}.");
+            }
+
+            await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken);
+            using var buffer = new MemoryStream();
+            var chunk = new byte[81920];
+            int read;
+            while ((read = await stream.ReadAsync(chunk, cancellationToken)) > 0)
+            {
+                buffer.Write(chunk, 0, read);
+                if (buffer.Length > _options.MaxAttachmentBytes)
+                {
+                    throw new ArgumentException($"The file is larger than the {_options.MaxAttachmentBytes}-byte limit.");
+                }
+            }
+
+            return new DownloadedFile(buffer.ToArray(), response.Content.Headers.ContentType?.MediaType);
+        }
     }
 
     /// <summary>
@@ -226,7 +265,9 @@ public class ZendeskService
     /// <remarks>
     /// ⚠️ This is a credential boundary, not input tidying. The base URL decides where the caller's
     /// Zendesk token is sent, and a <c>brand_url</c> can come from a model that has just read untrusted
-    /// ticket or article content. Anything that is not a host <c>/api/v2/brands</c> names is refused.
+    /// ticket or article content. Anything that is not a host <c>/api/v2/brands</c> names is refused,
+    /// and a brand's host mapping is translated to that brand's <c>{subdomain}.zendesk.com</c> host —
+    /// the credential only ever goes to a host Zendesk controls (see <see cref="DownloadAsync"/>).
     /// </remarks>
     public async Task<string?> ResolveBrandBaseUrlAsync(string? brandUrl, CancellationToken cancellationToken = default)
     {
@@ -240,12 +281,9 @@ public class ZendeskService
             throw new ArgumentException($"brand_url must be an https URL such as 'https://{_options.Subdomain}.zendesk.com' (got '{brandUrl}').");
         }
 
-        if (!await IsAccountHostAsync(uri.Host, cancellationToken))
-        {
-            throw new ArgumentException($"brand_url '{uri.Host}' is not one of this Zendesk account's brands. Use List_brands to see them.");
-        }
-
-        return $"https://{uri.Host}";
+        var host = await CanonicalHostAsync(uri.Host, cancellationToken)
+            ?? throw new ArgumentException($"brand_url '{uri.Host}' is not one of this Zendesk account's brands. Use List_brands to see them.");
+        return $"https://{host}";
     }
 
     /// <summary>Builds an absolute URL from an <c>/api/v2/...</c> path and query, escaping every query value.</summary>
@@ -297,38 +335,53 @@ public class ZendeskService
     {
         await AuthorizeAsync(method, url, cancellationToken);
 
-        using var request = new HttpRequestMessage(method, url);
-        if (content is not null)
+        var authorization = await _credentials.GetAuthorizationAsync(cancellationToken);
+        HttpResponseMessage response;
+        string body;
+        for (var attempt = 1; ; attempt++)
         {
-            request.Content = content;
-        }
-
-        if (headers is not null)
-        {
-            foreach (var (name, value) in headers)
+            // A fresh message per attempt (a request message cannot be sent twice); the content is
+            // buffered and HttpClient leaves it undisposed, so it can ride the retry.
+            using var request = new HttpRequestMessage(method, url);
+            if (content is not null)
             {
-                request.Headers.TryAddWithoutValidation(name, value);
+                request.Content = content;
             }
+
+            if (headers is not null)
+            {
+                foreach (var (name, value) in headers)
+                {
+                    request.Headers.TryAddWithoutValidation(name, value);
+                }
+            }
+
+            request.Headers.Authorization = authorization;
+
+            // Timed from send to body read, so the upstream record carries the duration that lets a slow
+            // composite tool be decomposed into its calls. That includes any 429 waits inside the
+            // rate-limit handler, deliberately: they are part of what the caller waited for.
+            var started = Stopwatch.GetTimestamp();
+            response = await _httpClient.SendAsync(request, cancellationToken);
+            body = await response.Content.ReadAsStringAsync(cancellationToken);
+            var elapsed = Stopwatch.GetElapsedTime(started);
+
+            _audit.LogAction(method, url, (int)response.StatusCode, _auditContext?.CorrelationId, elapsed);
+
+            if (response.StatusCode != HttpStatusCode.Unauthorized)
+            {
+                break;
+            }
+
+            response.Dispose();
+
+            // The caller's token was refused. The provider decides what that means for THIS token —
+            // it may already have been replaced by a refresh or a reconnect, or a refresh may rescue it —
+            // and either hands back a credential worth one retry or throws with a connect link.
+            authorization = await _credentials.OnTokenRejectedAsync(authorization, allowRecovery: attempt == 1, cancellationToken);
         }
 
-        request.Headers.Authorization = await _credentials.GetAuthorizationAsync(cancellationToken);
-
-        // Timed from send to body read, so the upstream record carries the duration that lets a slow
-        // composite tool be decomposed into its calls. That includes any 429 waits inside the
-        // rate-limit handler, deliberately: they are part of what the caller waited for.
-        var started = Stopwatch.GetTimestamp();
-        using var response = await _httpClient.SendAsync(request, cancellationToken);
-        var body = await response.Content.ReadAsStringAsync(cancellationToken);
-        var elapsed = Stopwatch.GetElapsedTime(started);
-
-        _audit.LogAction(method, url, (int)response.StatusCode, _auditContext?.CorrelationId, elapsed);
-
-        if (response.StatusCode == HttpStatusCode.Unauthorized)
-        {
-            // The caller's own token was refused, which no retry fixes: forget it and hand them a
-            // fresh connect link instead of Zendesk's bare 401.
-            throw await _credentials.OnTokenRejectedAsync(cancellationToken);
-        }
+        using var _ = response;
 
         if (!response.IsSuccessStatusCode)
         {
@@ -369,51 +422,91 @@ public class ZendeskService
         return body;
     }
 
-    private async Task<bool> IsAccountHostAsync(string host, CancellationToken cancellationToken)
+    /// <summary>
+    /// The host a request for <paramref name="host"/> may carry the caller's credential to: the account's
+    /// own host, a brand's <c>{subdomain}.zendesk.com</c> host, or — for a brand's host mapping — that
+    /// brand's <c>{subdomain}.zendesk.com</c> host instead. Null for anything else.
+    /// </summary>
+    private async Task<string?> CanonicalHostAsync(string host, CancellationToken cancellationToken)
     {
         var ownHost = new Uri(_baseUrl).Host;
         if (string.Equals(host, ownHost, StringComparison.OrdinalIgnoreCase))
         {
-            return true;
+            return ownHost;
         }
 
         var brandHosts = await GetBrandHostsAsync(cancellationToken);
-        return brandHosts.Contains(host);
+        return brandHosts.TryGetValue(host, out var canonical) ? canonical : null;
     }
 
-    // The hosts of the account's brands: each brand's {subdomain}.zendesk.com and its host mapping.
-    // Cached for ten minutes across callers, because the list is account configuration rather than
-    // anything personal, and every Help Center tool with a brand_url consults it.
-    private async Task<HashSet<string>> GetBrandHostsAsync(CancellationToken cancellationToken)
+    private async Task<DownloadTarget?> CredentialTargetAsync(Uri uri, CancellationToken cancellationToken)
+    {
+        if (uri.AbsolutePath.StartsWith("/api/", StringComparison.OrdinalIgnoreCase))
+        {
+            throw new ArgumentException("Refusing to download an API path; only files can be downloaded.");
+        }
+
+        var canonical = await CanonicalHostAsync(uri.Host, cancellationToken);
+        if (canonical is null)
+        {
+            return null;
+        }
+
+        var rewritten = new UriBuilder(uri) { Host = canonical, Port = -1 }.Uri;
+        return new DownloadTarget(rewritten, SendCredential: true);
+    }
+
+    private async Task<DownloadTarget?> RedirectTargetAsync(Uri uri, CancellationToken cancellationToken)
+    {
+        if (uri.Scheme != Uri.UriSchemeHttps)
+        {
+            return null;
+        }
+
+        if (uri.Host.EndsWith(".zdusercontent.com", StringComparison.OrdinalIgnoreCase))
+        {
+            return new DownloadTarget(uri, SendCredential: false);
+        }
+
+        return await CredentialTargetAsync(uri, cancellationToken);
+    }
+
+    private sealed record DownloadTarget(Uri Uri, bool SendCredential);
+
+    // Every host the account's brands answer on, mapped to the host the credential may go to: a brand's
+    // own {subdomain}.zendesk.com maps to itself, and its host mapping maps to that same
+    // {subdomain}.zendesk.com. Only *.zendesk.com hosts are ever credential destinations. Cached for ten
+    // minutes across callers, because the list is account configuration rather than anything personal.
+    private async Task<Dictionary<string, string>> GetBrandHostsAsync(CancellationToken cancellationToken)
     {
         const string cacheKey = "zendesk-brand-hosts";
-        if (_cache is not null && _cache.TryGetValue<HashSet<string>>(cacheKey, out var cached) && cached is not null)
+        if (_cache is not null && _cache.TryGetValue<Dictionary<string, string>>(cacheKey, out var cached) && cached is not null)
         {
             return cached;
         }
 
-        var hosts = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var hosts = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         var brands = await GetAllPagesAsync("/api/v2/brands", null, "brands", maxItems: 1000, cancellationToken: cancellationToken);
         foreach (var brand in brands.Items)
         {
-            AddHost(brand?["brand_url"]?.GetValue<string>());
-            var mapping = brand?["host_mapping"]?.GetValue<string>();
+            var brandUrl = brand?["brand_url"] is JsonValue v && v.TryGetValue<string>(out var u) ? u : null;
+            if (string.IsNullOrWhiteSpace(brandUrl)
+                || !Uri.TryCreate(brandUrl, UriKind.Absolute, out var parsed)
+                || !parsed.Host.EndsWith(".zendesk.com", StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            hosts[parsed.Host] = parsed.Host;
+            var mapping = brand?["host_mapping"] is JsonValue m && m.TryGetValue<string>(out var mapped) ? mapped : null;
             if (!string.IsNullOrWhiteSpace(mapping))
             {
-                hosts.Add(mapping.Trim());
+                hosts[mapping.Trim()] = parsed.Host;
             }
         }
 
         _cache?.Set(cacheKey, hosts, TimeSpan.FromMinutes(10));
         return hosts;
-
-        void AddHost(string? url)
-        {
-            if (!string.IsNullOrWhiteSpace(url) && Uri.TryCreate(url, UriKind.Absolute, out var parsed))
-            {
-                hosts.Add(parsed.Host);
-            }
-        }
     }
 
     // The first path segments this code builds, and so the only ones safe to put on the console.
