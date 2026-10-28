@@ -54,5 +54,5 @@ resource "azurerm_application_insights" "appi" {
   #
   # The connection string is STILL required by the app — it names the component and its ingestion
   # endpoint; the identity replaces the authentication, not the address (vitally-mcp#147).
-  local_authentication_disabled = true
+  local_authentication_enabled = false
 }

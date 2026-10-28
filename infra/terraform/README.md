@@ -9,9 +9,11 @@ next apply reverts.
 The design is the Vitally MCP estate's (fiscaltec/vitally-mcp), rebuilt for this server. Comments
 cite `vitally-mcp#NNN` where a lesson was learned there.
 
-> **Not yet validated.** This configuration has not been through `terraform validate` or a plan.
-> Expect the first `terraform plan` to surface provider-version details (diagnostic-setting block
-> syntax, container `cpu`/`memory` pairs, attribute names) to fix before anything is applied.
+> **Validated, not planned.** `terraform fmt -check -recursive` and `terraform validate` pass
+> (after `terraform init -backend=false`, which resolved azurerm 4.81.0 and azuread 3.10.0 on
+> 2026-10-28). `validate` checks syntax and provider schemas only: it does not reach Azure, so values
+> the API rejects (container `cpu`/`memory` pairs, SKUs, region availability) will first show at
+> `terraform plan`. Nothing has been planned or applied.
 
 ## Layout
 | File | Contents |
