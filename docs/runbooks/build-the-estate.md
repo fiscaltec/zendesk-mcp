@@ -272,7 +272,9 @@ az config set extension.use_dynamic_install=yes_without_prompt -o none
 # Resource providers the estate uses (Terraform's azurerm registers these itself).
 for ns in Microsoft.App Microsoft.Network Microsoft.KeyVault Microsoft.ManagedIdentity \
           Microsoft.OperationalInsights Microsoft.Insights Microsoft.Storage; do
-  az provider register --namespace "$ns" --wait -o none
+  # Only when needed: on a set-up subscription this is reads only, with no writes to fail part-way.
+  [ "$(az provider show -n "$ns" --query registrationState -o tsv)" = Registered ] \
+    || az provider register --namespace "$ns" --wait -o none
 done
 # A clone of the repo, for scan/run.py (Phase 9) and the verification scripts (Phase 14).
 # Proves gh can reach THIS repo, not just that a login exists. Not `gh auth status`: in a Claude Code
