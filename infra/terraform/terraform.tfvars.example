@@ -1,26 +1,26 @@
-# Copy to terraform.tfvars (gitignored) and fill in the secrets, OR supply via environment:
-#   export TF_VAR_oauth_shared_client_secret=...
-#   export TF_VAR_teams_webhook_url=...
-#   export TF_VAR_application_insights_connection_string=...
-#
-# All non-secret values have sensible defaults in variables.tf.
-#
-# There is ONE OAuth client secret. Both targets run the one Entra app registration (staging since
-# 2026-09-03, production since 2026-09-16) and hold the same value under the same Container App
-# secret name, `entra-oauth-client-secret` — vitally-mcp#156 collapsed the duplicated staging variable
-# (closing vitally-mcp#102) and removed the third, rollback-only value that used to sit alongside it.
+# Copy to terraform.tfvars (gitignored) and fill in, OR supply each value as TF_VAR_<name>.
+# Everything not listed here has a default in variables.tf / entra.tf / keyvault.tf.
 
-oauth_shared_client_secret = "<Entra app client secret, Key Vault 'entra-mcp-client-secret' — BOTH targets>"
-teams_webhook_url          = "<Teams Power Automate Workflows webhook URL>"
+# ---- Decided before the first apply (README.md, "Decisions pending") ----
+zendesk_subdomain       = "<subdomain, e.g. fiscaltec for https://fiscaltec.zendesk.com>"
+zendesk_oauth_client_id = "<unique identifier of the Zendesk OAuth client>"
 
-# ⚠️ `application_insights_connection_string` is REQUIRED as of 2026-09-25 (vitally-mcp#147) and is DELIBERATELY
-# NOT GIVEN A LINE HERE. It has no default so that Terraform prompts or fails; a placeholder sitting in
-# a copied-and-unfilled tfvars IS a default, and would be applied.
+# Department groups admitted at sign-in (Gate 1), display name => object id.
+entra_gate1_group_object_ids = {
+  # "Customer Operations Department" = "00000000-0000-0000-0000-000000000000"
+}
+
+# Tag imported into the ACR for the first create (README.md, step 3). Ignored afterwards.
+image_tag         = "<tag>"
+staging_image_tag = "<tag>"
+
+# Public address of whoever runs terraform apply, for the CMK vault firewall.
+cmk_vault_allowed_ip_cidrs = ["<a.b.c.d/32>"]
+
+# ---- Secrets: prefer the environment over this file ----
+#   export TF_VAR_teams_webhook_url='…'
+#   export TF_VAR_oauth_shared_client_secret='…'   # from step 2 of the apply procedure; not needed
+#                                                  # for the first, targeted apply
 #
-# That is not a lost export, it is a lost TRAIL. Program.cs:134 tests the value with
-# IsNullOrWhiteSpace, so any non-empty placeholder makes `exporterConfigured` true — which registers the
-# exporter (whose sends then fail) AND the console suppression at Program.cs:176. The audit records are
-# taken off stdout and cannot be delivered: they exist nowhere.
-#
-# Supply the live value by environment instead:
-#   export TF_VAR_application_insights_connection_string=$(az monitor app-insights component show -a vitally-prod-appi-uksouth -g vitally-prod-rg-uksouth --query connectionString -o tsv)
+# There is no Application Insights connection-string variable: the component is created here and
+# the apps read its connection string directly.

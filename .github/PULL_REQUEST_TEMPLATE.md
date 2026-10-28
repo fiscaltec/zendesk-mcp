@@ -2,7 +2,7 @@
 Title format: <type>: <short description>
 Allowed types: feat, fix, docs, style, refactor, perf, test, build, ci, chore, revert
 Examples:
-  feat: add EU region support
+  feat: add a tool to list ticket tags
   fix: handle 429 retries when Retry-After is absent
   docs: refresh README install instructions for Claude Code
 -->
@@ -26,16 +26,14 @@ Examples:
 
 - [ ] `dotnet test ZendeskMcp.sln -c Release` passes locally
 - [ ] CI is green on this PR
-- [ ] Manual smoke test against a real Vitally tenant (note region used):
-  - [ ] EU:
-  - [ ] US:
+- [ ] Manual smoke test against staging (`https://zendesk-mcp-staging.fiscaltec.com/mcp`), connected
+      as your own Zendesk account (note which tools you exercised):
 
 ## Documentation
 
 - [ ] `CLAUDE.md` reflects the change (if applicable)
 - [ ] `README.md` reflects the change (if applicable)
-- [ ] `CHANGELOG.md` updated under `[Unreleased]`
 
 ## Linked issues
 
-<!-- e.g. Closes vitally-mcp#123, Fixes vitally-mcp#456 -->
+<!-- e.g. Closes #123, Fixes #456 -->

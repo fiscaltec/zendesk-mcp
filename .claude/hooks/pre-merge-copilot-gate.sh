@@ -102,7 +102,7 @@ esac
 # was denied before the exemption was ever consulted — an exemption that only applies
 # when nothing else went wrong is not an exemption.
 
-# `headRefOid` LAGS after a push — CLAUDE.md records it still naming the previous
+# `headRefOid` LAGS after a push — vitally-mcp recorded it still naming the previous
 # commit seconds after one on vitally-mcp#122. Trusting it is this gate's worst failure mode
 # and it fails OPEN: in that window the field names the commit Copilot already
 # reviewed, so the comparison below matches and a newly pushed, UNREVIEWED commit

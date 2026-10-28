@@ -12,12 +12,13 @@ body:
 
         Two standing constraints worth knowing before you write the steps:
 
-        - **Never run `terraform apply`.** `infra/terraform/` is back-filled documentation of
-          record; the live resources are managed with `az cli`. A plan against shared state would
-          try to reconcile production drift as a side effect of whatever you were doing.
-        - **There is one live Vitally tenant and no sandbox.** Anything touching Vitally data must
-          keep `Authorization__ReadOnly=true`, and `vitally-shared` in
-          `vitally-prod-kv-uksouth` is the key production reads — never overwrite it.
+        - **`infra/terraform/` is the source of truth for the estate.** Change it there, read the
+          `terraform plan` line by line, and apply deliberately (see `infra/terraform/README.md`).
+          An `az` change made by hand is drift the next apply will revert.
+        - **There is one live Zendesk account.** Staging and production both reach it, each as the
+          signed-in person. Per-person tokens live in `zendesk-prod-kv-uksouth` as
+          `zendesk-user-*` / `zendesk-staging-user-*` secrets — never edit or delete them by hand,
+          and never overwrite `zendesk-oauth-client-secret` except as a rotation.
 
   - type: textarea
     id: description
@@ -52,7 +53,7 @@ body:
     id: wire-up
     attributes:
       label: Wire-up
-      description: Config, env vars, secrets, or repo files needing updates — including the Terraform back-fill (import block, not apply).
+      description: Config, env vars, secrets, or repo files needing updates — including the Terraform change that records it.
     validations:
       required: false
 

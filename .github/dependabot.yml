@@ -2,9 +2,9 @@ version: 2
 
 updates:
   # Keep NuGet packages current across both projects.
-  # We've already been bitten once by sitting on the MCP SDK preview far too
-  # long - weekly checks here would have caught the 0.4.0-preview.3 -> 1.0 GA
-  # transition immediately.
+  # Weekly, because vitally-mcp (the server this one is built from) sat on the
+  # MCP SDK preview far too long - weekly checks would have caught the
+  # 0.4.0-preview.3 -> 1.0 GA transition immediately.
   - package-ecosystem: "nuget"
     directory: "/"
     schedule:

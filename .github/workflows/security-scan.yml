@@ -65,12 +65,12 @@ jobs:
         uses: actions/checkout@v7
 
       - name: Build image
-        run: docker build -t vitally-mcp:scan -f Dockerfile .
+        run: docker build -t zendesk-mcp:scan -f Dockerfile .
 
       - name: Trivy scan (gate on High/Critical)
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
-          image-ref: vitally-mcp:scan
+          image-ref: zendesk-mcp:scan
           vuln-type: os,library
           severity: HIGH,CRITICAL
           ignore-unfixed: "false"
@@ -81,7 +81,7 @@ jobs:
         if: always()
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
-          image-ref: vitally-mcp:scan
+          image-ref: zendesk-mcp:scan
           format: sarif
           output: trivy-results.sarif
           exit-code: "0"

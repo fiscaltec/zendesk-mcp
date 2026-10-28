@@ -16,9 +16,10 @@
 #   --image                  the image is readable, and is printed. There is no expected value --
 #                            compare it yourself. Revisions on different images are called out.
 #
-# e.g. the staging spin-up check (CLAUDE.md, Staging):
-#   bash .github/scripts/check-serving-revisions.sh vitally-staging-ca-uksouth vitally-prod-rg-uksouth \
-#     --env Authorization__ReadOnly --equals true --env ApplicationInsights__ConnectionString
+# e.g. confirming staging is guarded and exporting its audit trail:
+#   bash .github/scripts/check-serving-revisions.sh zendesk-staging-ca-uksouth zendesk-prod-rg-uksouth \
+#     --env Authorization__ReadOnly --equals true --env ApplicationInsights__ConnectionString \
+#     --env Zendesk__TokenSecretPrefix --equals zendesk-staging-user-
 #
 # Exit codes -- distinct on purpose, because "no" and "could not ask" demand different actions:
 #   0   every serving revision satisfies every assertion
@@ -34,7 +35,7 @@
 #       ⚠️ Only meaningful for a caller with READ AT RESOURCE-GROUP SCOPE. Without it Azure answers
 #       AuthorizationFailed for an app that does not exist -- the same answer as a lost role -- so
 #       absence cannot be observed and every lookup of a missing app is 2. The deploy identity holds
-#       `ContainerApp Reader` on vitally-prod-rg-uksouth for exactly this reason (vitally-mcp#171).
+#       `ContainerApp Reader` on zendesk-prod-rg-uksouth for exactly this reason (vitally-mcp#171).
 #  64   usage error -- including no assertion at all, since a check of nothing must not pass
 #
 # WHY THIS IS A SCRIPT (vitally-mcp#167). The loop it replaces was copied into five places, and the copies

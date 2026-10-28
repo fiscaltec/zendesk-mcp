@@ -1,136 +1,67 @@
-# Diagnostic settings that deliver telemetry into vitally-prod-law-uksouth.
+# Diagnostic settings that deliver Container Apps logs into the workspace (monitoring.tf).
 #
-# WHY THIS FILE EXISTS, and why the Container App's own appLogsConfiguration is not the mechanism:
-#
-# The CAE's appLogsConfiguration is a SHARED-KEY shipper — it authenticates with the workspace id
-# and primary shared key. monitoring.tf sets local_authentication_enabled = false, so the workspace
-# refuses it. That path has therefore never delivered a single row, from the day the workspace was
-# created, and no network setting changes it (verified 2026-09-17: ContainerAppConsoleLogs_CL had
-# zero rows, ever, while Key Vault and ACR data arrived normally).
+# WHY A DIAGNOSTIC SETTING, and not the environment's own appLogsConfiguration: that is a SHARED-KEY
+# shipper — it authenticates with the workspace id and primary shared key — and monitoring.tf sets
+# local_authentication_enabled = false, so the workspace refuses it. In vitally-mcp it delivered not
+# one row in the workspace's lifetime, and no network setting changed that (vitally-mcp#142).
 #
 # A diagnostic setting authenticates through the Azure Monitor control plane instead, over a private
-# Microsoft channel that is governed by neither internet_ingestion_enabled nor the AMPLS access
-# modes. That is precisely why Key Vault and ACR records reach this workspace today with ingestion
-# private and local auth disabled — and it is why this is the right mechanism rather than a
-# workaround. Microsoft says so directly for this case:
+# Microsoft channel governed by neither internet_ingestion_enabled nor the AMPLS access modes — the
+# same path Key Vault and ACR use. Microsoft says so directly for this case:
 #
 #   "Private link: Sending logs directly to a Log Analytics Workspace through Private Link isn't
 #    supported. However, you can use Azure Monitor and send your logs to the same Log Analytics
 #    Workspace. This indirection is required to prevent system log data loss."
 #
 # ⚠️ THIS FILE IS HALF THE MECHANISM. A diagnostic setting is INERT unless the environment's
-# logs_destination is "azure-monitor" (containerapps.tf). With the default "log-analytics" the CAE
-# keeps using the shared-key shipper and ignores diagnostic settings entirely — which is exactly what
-# happened on 2026-09-17: this setting was created, nothing arrived for 18 minutes, and the cause was
-# the destination, not the setting. Change the two together or neither.
-#
-# Design: docs/superpowers/specs/2026-09-17-logging-observability-design.md. Issue: vitally-mcp#142.
+# logs_destination is "azure-monitor" (containerapps.tf). With the default "log-analytics" the
+# environment keeps the shared-key shipper and ignores diagnostic settings entirely — and logs go
+# nowhere, silently. Change the two together or neither.
 
 resource "azurerm_monitor_diagnostic_setting" "cae_system_logs" {
   name                       = "cae-system-logs"
   target_resource_id         = azurerm_container_app_environment.env.id
   log_analytics_workspace_id = azurerm_log_analytics_workspace.law.id
 
-  # ⚠️ log_analytics_destination_type is deliberately NOT set, and an earlier version of this file
-  # set it to "Dedicated" — which was wrong in a way worth recording, because the API does not tell
-  # you. Both `az monitor diagnostic-settings create --export-to-resource-specific true` and an
-  # explicit PUT carrying "logAnalyticsDestinationType": "Dedicated" RETURN it in their response and
-  # then store null. Reading the setting back from ARM is the only way to see that. Claiming it here
-  # would document a property the live resource does not have.
-  #
-  # RE-CONFIRMED 2026-09-26 while enabling ContainerAppConsoleLogs: the create was issued WITH
-  # --export-to-resource-specific true and its response said "Dedicated"; `diagnostic-settings show`
-  # immediately afterwards said null. The same call also returned "metrics": [] while ARM still held
-  # AllMetrics/false — so treat the create RESPONSE as untrustworthy for this resource generally, not
-  # only for the destination type, and read the setting back before recording anything from it.
-  #
-  # It is implicit for this resource type — CONFIRMED 2026-09-17 against the live table once records
-  # began flowing, rather than inferred from the documentation. ContainerAppSystemLogs has typed
-  # columns (ContainerAppName, Reason, RevisionName, ReplicaName) with no "_s" suffixes, which is the
-  # resource-specific shape; the custom-log shape would be ContainerAppSystemLogs_CL with _s columns.
-  # So records land in the real table and per-table retention is available to vitally-mcp#93, despite the
-  # property reading null.
+  # log_analytics_destination_type is deliberately NOT set. For this resource type the API accepts
+  # "Dedicated", echoes it in the create response, and then stores null — vitally-mcp found the
+  # create response untrustworthy for this resource generally and read the setting back instead.
+  # Records land in the resource-specific tables (ContainerAppSystemLogs / ContainerAppConsoleLogs,
+  # typed columns, no _CL suffix) regardless, so per-table retention is available.
 
   enabled_log {
     category = "ContainerAppSystemLogs"
   }
 
-  # Added 2026-09-26 (vitally-mcp#142). See the block below for the verification and the standing constraint.
+  # Console logs are safe to export because the application keeps customer data off stdout:
+  #   * with ApplicationInsights__ConnectionString set (both apps set it — containerapps.tf), the
+  #     full audit records go to AppEvents and Program.cs suppresses the AuditLogger category from
+  #     the console provider, leaving only a customer-data-free breadcrumb;
+  #   * Program.cs filters the System.Net.Http.HttpClient categories down to Warning, so outbound
+  #     Zendesk URLs are not logged per request.
+  # Those two conditions are what vitally-mcp gated enabling this category on (vitally-mcp#142/#143).
+  #
+  # ⚠️ It is NOT per-target. The setting is on the shared environment, so it exports the console of
+  # EVERY app and job in it: staging, production and the secret-expiry scanner (whose rows carry an
+  # EMPTY ContainerAppName and its name in JobName — filter on ContainerAppName alone and it
+  # silently drops out). Any new app added to this environment must set
+  # ApplicationInsights__ConnectionString, or its unsuppressed audit records — caller object ids, tool
+  # arguments including free-text search terms, ticket and user ids — land in this table.
   enabled_log {
     category = "ContainerAppConsoleLogs"
   }
-}
 
-# ✅ ContainerAppConsoleLogs was ENABLED on 2026-09-26T09:20Z, completing phase 2b (vitally-mcp#142).
-#
-# Verified all-time, over the whole table:
-#   ContainerAppConsoleLogs
-#     | summarize breadcrumbs = countif(Log contains 'Zendesk audit breadcrumb:'),
-#                 fullRecords = countif(Log contains 'ZendeskMcp.AuditLogger'), rows = count()
-#       by ContainerAppName
-#   production 1,510 rows / 152 breadcrumbs / 0 full records
-#   staging    1,911 rows /   2 breadcrumbs / 0 full records
-#
-# ⚠️ Count the MESSAGES, not rows matching 'breadcrumb'. The console logger writes each entry as two
-# rows — a header (info: ZendeskMcp.AuditBreadcrumb[0]) and the indented message — and both match a
-# naive 'breadcrumb' filter, so it reports exactly double. An earlier version of this comment said
-# "308 breadcrumbs" for what is 154.
-#
-# The breadcrumb count is the load-bearing half: zero full records is ALSO what a broken export looks
-# like, so it means nothing until some of this application's own output is present in the table. That
-# inference is strong for PRODUCTION (152 breadcrumbs, 0 full records) and WEAK for staging, whose 2
-# breadcrumbs are one tool call made at enabling time. Staging's suppression rests instead on a direct
-# console sample taken 2026-09-26 (0 AuditLogger lines, 2 breadcrumbs, with traffic driven first), and
-# on both apps running the same image with the same conditional. Re-check staging here once it has
-# carried real traffic.
-#
-# It was gated on the console stream carrying customer identifiers: AuditLogger wrote the caller's
-# object id and the Vitally resource path to stdout, and System.Net.Http.HttpClient logged outbound
-# URIs including query strings, which carry Search_users / Search_admins terms (vitally-mcp#143). Exporting it
-# then would have put that data into a table documented as customer-data-free, with the shortest
-# retention and the broadest access — the opposite of where the 2026-09-17 policy decision placed it.
-#
-# The two conditions it was gated on, both met on both targets before it was enabled:
-#   - vitally-mcp#143 filters the HttpClient categories down to Warning in Program.cs — closed.
-#   - The audit reroute landed and was SWITCHED ON 2026-09-25. AuditLogger's records carry the
-#     microsoft.custom_event.name attribute and Program.cs suppresses the category from the console
-#     provider. NOTE it lands via the Azure Monitor OpenTelemetry exporter, not TelemetryClient
-#     .TrackEvent as this comment used to say — see the design doc's routing decision. Both the
-#     export and the suppression are conditional on ApplicationInsights__ConnectionString, which is
-#     set on BOTH targets as of 2026-09-25 (production revision 39, staging revision 17), each
-#     verified by reading ZendeskToolCall rows back out of AppEvents; both consoles now carry only a
-#     customer-data-free breadcrumb.
-#
-# Both were met before it was enabled on 2026-09-26.
-#
-# ⚠️ It is NOT per-target, and that outlives the enabling. This setting is attached to the shared
-# CAE, so it exports the console of EVERY app in the environment; there is no way to scope it to
-# production, and it reaches Container Apps JOBS as well as apps: the Key Vault expiry scanner
-# (vitally-prod-secscan-uksouth) writes [scan] lines into this table with an EMPTY ContainerAppName
-# and its identity in JobName, so filtering by ContainerAppName alone silently omits it. Staging is an on-demand app and
-# the variable does NOT survive a recreate, so a staging spin-up that omits
-# ApplicationInsights__ConnectionString now carries that app's unsuppressed audit records — caller
-# object ids, tool arguments including free-text search terms, record ids, against the production
-# Vitally tenant — into the console table. Live consequence since 2026-09-26, not a future one.
-#
-# That is the same failure mode Authorization__ReadOnly already has, so the staging spin-up now has
-# two variables to set and containerapps-staging.tf carries both. Check them together.
-#
-# Startup failures reach stdout and so are NOT covered by the system-log category; since 2026-09-26
-# they ARE covered by the console category above, which is one of the things enabling 2b bought. The
-# live stream remains useful for watching them in real time, and is independent of this export path:
-#
-#   az containerapp logs show -n vitally-prod-ca-uksouth -g vitally-prod-rg-uksouth \
-#     --type console --tail 100
-#
-# ⚠️ A FAILED logs show looks exactly like a quiet container. It needs
-# Microsoft.App/containerApps/getAuthToken/action, which comes from a PIM-eligible role, so a lapsed
-# elevation returns AuthorizationFailed on stderr and nothing on stdout. Reading that as "no startup
-# failures" is the wrong conclusion in the one case you most want to be right about. The command
-# above is unpiped, so its exit status IS the answer — check it, and run /infra-pims if it is
-# non-zero. ⚠️ The copy of this note in
-# docs/runbooks/entra-cutover-staging-validation.md covers a PIPED form, where $? is grep's status
-# and cannot tell a failure from no matches; keep the two in step if you touch either.
-#
-# ContainerAppHTTPLogs is also deliberately absent: it carries request URLs and needs the same PII
-# scrutiny as the HttpClient categories before it can be considered.
+  # Startup failures reach stdout, so the console category covers them. For watching live:
+  #
+  #   az containerapp logs show -n zendesk-prod-ca-uksouth -g zendesk-prod-rg-uksouth \
+  #     --type console --tail 100
+  #
+  # ⚠️ A FAILED logs show looks exactly like a quiet container. It needs
+  # Microsoft.App/containerApps/getAuthToken/action, so a lapsed (PIM) elevation returns
+  # AuthorizationFailed on stderr and nothing on stdout. The command above is unpiped, so its exit
+  # status IS the answer — check it before concluding there were no failures.
+  #
+  # ContainerAppHTTPLogs is deliberately absent: it carries request URLs — including the one-time
+  # /zendesk/connect and /zendesk/callback query strings and /uploads/{slot} paths — and needs PII
+  # and secret-handling scrutiny before it can be considered.
+}

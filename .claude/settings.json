@@ -37,7 +37,7 @@
       "Bash(* --version)",
       "Bash(* --help)",
       "WebSearch",
-      "WebFetch(domain:docs.vitally.io)",
+      "WebFetch(domain:developer.zendesk.com)",
       "WebFetch(domain:github.com)",
       "WebFetch(domain:learn.microsoft.com)",
       "WebFetch(domain:docs.microsoft.com)",
@@ -46,7 +46,7 @@
       "WebFetch(domain:raw.githubusercontent.com)",
       "WebFetch(domain:modelcontextprotocol.io)",
       "WebFetch(domain:csharp.sdk.modelcontextprotocol.io)",
-      "WebFetch(domain:vitally.io)"
+      "WebFetch(domain:support.zendesk.com)"
     ],
     "deny": [],
     "ask": []

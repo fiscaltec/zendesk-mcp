@@ -1,7 +1,17 @@
+# Inputs. A value nobody has decided yet is a variable WITHOUT a default, so Terraform stops and asks
+# rather than applying a guess; each one is listed under "Decisions pending" in README.md.
+
+# ---- Placement ----
 variable "subscription_id" {
   type        = string
-  description = "Azure subscription (IT-Production)."
+  description = "Azure subscription (IT-Production), shared with the Vitally MCP estate."
   default     = "282207c6-4107-47fa-9d4e-b2fa9b3066cb"
+}
+
+variable "tenant_id" {
+  type        = string
+  description = "Entra tenant hosting the app registration, the sg-zendesk-* tier groups and the department groups."
+  default     = "75bd6050-92a8-4bde-a406-50000b310c86"
 }
 
 variable "location" {
@@ -10,42 +20,133 @@ variable "location" {
 }
 
 variable "resource_group_name" {
-  type    = string
-  default = "vitally-prod-rg-uksouth"
+  type        = string
+  description = "Resource group this configuration CREATES and owns. Everything in the estate lives in it."
+  default     = "zendesk-prod-rg-uksouth"
 }
 
 variable "name_prefix" {
   type        = string
-  description = "Resource naming prefix (vitally-prod-{type}-uksouth convention)."
-  default     = "vitally-prod"
+  description = "Resource naming prefix ({prefix}-{type}-uksouth convention)."
+  default     = "zendesk-prod"
+
+  # Key Vault names are at most 24 characters, and "-cmk-uksouth" is 12 of them.
+  validation {
+    condition     = length(var.name_prefix) <= 12 && can(regex("^[a-z][a-z0-9-]*$", var.name_prefix))
+    error_message = "name_prefix must be lower-case, start with a letter and be at most 12 characters, or the Key Vault names exceed 24."
+  }
 }
 
+# Globally unique, alphanumeric-only names, so they cannot follow name_prefix.
+variable "acr_name" {
+  type    = string
+  default = "zendeskproducruksouth"
+}
+
+variable "flow_log_storage_account_name" {
+  type    = string
+  default = "zendeskprodflowuksouth"
+}
+
+variable "vnet_address_space" {
+  type        = string
+  description = "VNet range (/23). Deliberately NOT Vitally's 10.80.0.0/23, so the two estates can be peered or routed through a hub later without renumbering. Subnets are carved from it in network.tf and ampls.tf."
+  default     = "10.81.0.0/23"
+}
+
+# ---- Images ----
+# Used only when each Container App is CREATED. After that deploy.yml owns the image and the apps
+# ignore it (lifecycle.ignore_changes), so a later apply never rolls back a release. No default:
+# it must name the tag imported into the ACR during the first apply (README.md, step 3).
 variable "image_tag" {
   type        = string
-  description = "Container image tag deployed to the Container App."
-  default     = "v4.0.16"
+  description = "Image tag in the ACR the production Container App is created with (initial create only)."
 }
 
-# ---- Identity / OAuth / Authorization (non-secret config) ----
-variable "managed_identity_client_id" {
-  type    = string
-  default = "d93687a0-ef76-4df8-804e-d941067abdeb"
+variable "staging_image_tag" {
+  type        = string
+  description = "Image tag in the ACR the staging Container App is created with (initial create only)."
 }
 
-# ---- OAuth inputs: the LIVE values. Entra, on BOTH targets ----
+# ---- Zendesk ----
+variable "zendesk_subdomain" {
+  type        = string
+  description = "Zendesk account subdomain: `fiscaltec` for https://fiscaltec.zendesk.com. Shared by both targets — there is one Zendesk account."
+
+  validation {
+    condition     = can(regex("^[A-Za-z0-9-]+$", var.zendesk_subdomain))
+    error_message = "zendesk_subdomain is the bare subdomain: letters, digits and hyphens only, no scheme or domain."
+  }
+}
+
+variable "zendesk_oauth_client_id" {
+  type        = string
+  description = "Unique identifier of the Zendesk OAuth client (Admin Centre > Apps and integrations > APIs > OAuth clients). Shared by both targets; its redirect URLs must list BOTH /zendesk/callback URLs. Its secret goes into Key Vault as `zendesk-oauth-client-secret`, never here."
+}
+
+# Account-wide safety switches (ZendeskFeatureOptions). Each guards an action that reaches beyond the
+# agent making it — a customer's inbox, the public Help Center, every agent's macro list, who can see
+# an organisation's tickets — and stays off until someone decides otherwise. Per target, so staging
+# can trial one without production following.
+variable "zendesk_allow_public_replies" {
+  type        = bool
+  description = "Production: allow public ticket comments, CCs and public macro replies (they email customers)."
+  default     = false
+}
+
+variable "zendesk_allow_article_publishing" {
+  type        = bool
+  description = "Production: allow publishing Help Center articles and translations rather than saving drafts."
+  default     = false
+}
+
+variable "zendesk_allow_macro_changes" {
+  type        = bool
+  description = "Production: allow creating, editing, activating and deactivating macros."
+  default     = false
+}
+
+variable "zendesk_allow_user_and_organization_changes" {
+  type        = bool
+  description = "Production: allow new end users from an email, and organisation membership changes."
+  default     = false
+}
+
+variable "staging_zendesk_allow_public_replies" {
+  type    = bool
+  default = false
+}
+
+variable "staging_zendesk_allow_article_publishing" {
+  type    = bool
+  default = false
+}
+
+variable "staging_zendesk_allow_macro_changes" {
+  type    = bool
+  default = false
+}
+
+variable "staging_zendesk_allow_user_and_organization_changes" {
+  type    = bool
+  default = false
+}
+
+variable "staging_read_only" {
+  type        = bool
+  description = "Authorization__ReadOnly on staging. Staging runs unreleased code against the ONE live Zendesk account, so every mutating tool is denied there unless someone deliberately turns this off for a write test (and back on afterwards)."
+  default     = true
+}
+
+# ---- OAuth (Entra) ----
 #
-# This directory is an as-built capture, so these record what the targets are configured with *now*.
-# A capture that runs ahead of reality is how a plan comes to propose a change nobody asked for, and
-# one that lags is how a reader concludes a cutover has not happened.
+# Shared by production and staging except `*_resource` and `*_public_base_url`, which stay per-target
+# permanently: each target publishes its own origin, and sharing those would make staging advertise
+# production's — an RFC 9728 document naming a server it is not, which strict clients reject.
 #
-# These are SHARED by production and staging. They were duplicated as `oauth_*` / `staging_oauth_*`
-# while the targets ran different identity providers during the vitally-mcp#108 migration; both have run Entra
-# since 2026-09-16 and vitally-mcp#156 collapsed the duplicates onto these (closing vitally-mcp#102).
-#
-# Only `oauth_resource` / `staging_oauth_resource` and `public_base_url` / `staging_public_base_url`
-# stay per-target, permanently: each target publishes its own origin, and sharing those would make
-# staging advertise production's — an RFC 9728 document naming a server it is not, which strict
-# clients reject outright.
+# The hostnames below are a PROPOSAL (README.md, "Decisions pending"). The Entra app registration is
+# built from these same variables (entra.tf), and preconditions there refuse a combination that does
+# not hang together.
 variable "oauth_authority" {
   type        = string
   description = "Upstream OIDC issuer — Entra, shared by both targets. Endpoints are read from the issuer's discovery document, not built from this."
@@ -53,7 +154,7 @@ variable "oauth_authority" {
 }
 
 # oauth_audience and oauth_resource are NOT the same value and must not be reconciled. They differ
-# by exactly one trailing slash:
+# by exactly one trailing slash (vitally-mcp#108):
 #
 #   Audience follows the Entra App ID URI, which cannot carry a trailing slash — Entra refuses to
 #     register one on identifierUris.
@@ -65,32 +166,48 @@ variable "oauth_authority" {
 # and the metadata document in the other.
 variable "oauth_audience" {
   type        = string
-  description = "Identifier validated against the JWT aud claim — the Entra App ID URI, with NO trailing slash (Entra refuses to register one on identifierUris). Shared: one registration serves both origins, so a staging token's aud names this production URI too."
-  default     = "https://vitally.fiscaltec.com"
+  description = "JWT aud — the Entra App ID URI, with NO trailing slash. Shared: one registration serves both origins, so a staging token's aud names this production URI too. Also the identifier URI entra.tf registers."
+  default     = "https://zendesk-mcp.fiscaltec.com"
 }
 
 variable "oauth_resource" {
   type        = string
-  description = "Canonical resource identifier PRODUCTION publishes in RFC 9728 and validates against as an RFC 8707 indicator. WITH the trailing slash. Per-target — staging has its own."
-  default     = "https://vitally.fiscaltec.com/"
+  description = "Canonical resource identifier PRODUCTION publishes in RFC 9728 and validates RFC 8707 indicators against. WITH the trailing slash. Per-target."
+  default     = "https://zendesk-mcp.fiscaltec.com/"
 }
 
 variable "oauth_upstream_resource_scope" {
   type        = string
-  description = "Shared by both targets. Set, so the proxy terminates the RFC 8707 `resource` parameter instead of relaying it — required under Entra, whose v2 authorize endpoint refuses any `resource` that does not match the requested scopes (AADSTS9010010), whatever its spelling. Empty is the RFC 8707 default, relaying the indicator; Entra is the outlier."
-  default     = "https://vitally.fiscaltec.com/mcp.access"
-}
-
-variable "oauth_shared_client_id" {
-  type        = string
-  description = "Shared OAuth client_id — the Entra app registration appId (vitally-mcp#107). One registration serves both targets."
-  default     = "c3812e7d-a413-4169-b57e-803326611ba3"
+  description = "Shared. Set, so the proxy terminates the RFC 8707 `resource` parameter instead of relaying it — required under Entra, whose v2 authorize endpoint refuses any `resource` that does not match the requested scopes (AADSTS9010010). Must be the App ID URI plus /mcp.access."
+  default     = "https://zendesk-mcp.fiscaltec.com/mcp.access"
 }
 
 variable "public_base_url" {
   type        = string
-  description = "Canonical public origin for PRODUCTION — no trailing slash. Per-target: staging has its own."
-  default     = "https://vitally.fiscaltec.com"
+  description = "Canonical public origin for PRODUCTION — no trailing slash. Per-target."
+  default     = "https://zendesk-mcp.fiscaltec.com"
+}
+
+variable "staging_app_name" {
+  type        = string
+  description = "Staging Container App name. Outside the name_prefix convention: it is a second app inside the production RG and Container Apps Environment, not a second environment."
+  default     = "zendesk-staging-ca-uksouth"
+}
+
+# Staging's Audience and Resource diverge by HOST as well as by slash, and that is expected: one
+# Entra registration serves both origins, so a staging token's `aud` is production's App ID URI,
+# whereas `resource` must equal the staging origin, because MCP clients reject a metadata document
+# whose `resource` does not name the server they fetched it from.
+variable "staging_oauth_resource" {
+  type        = string
+  description = "Canonical resource identifier published by staging, WITH the trailing slash. Must equal the staging origin plus '/'."
+  default     = "https://zendesk-mcp-staging.fiscaltec.com/"
+}
+
+variable "staging_public_base_url" {
+  type        = string
+  description = "Canonical public origin for staging — no trailing slash."
+  default     = "https://zendesk-mcp-staging.fiscaltec.com"
 }
 
 variable "allowed_client_redirect_uri" {
@@ -98,94 +215,30 @@ variable "allowed_client_redirect_uri" {
   default = "https://claude.ai/api/mcp/auth_callback"
 }
 
-variable "entra_group_reader" {
-  type    = string
-  default = "71451cc9-f5df-44ee-8ed1-3acc41a911eb"
-}
-
-variable "entra_group_editor" {
-  type    = string
-  default = "19b9d659-284c-4f93-b1c3-a6354db1027c"
-}
-
-variable "entra_group_admin" {
-  type    = string
-  default = "70b48a20-d4b1-47dc-a132-21bc99272a86"
-}
-
-# ---- Staging target (vitally-mcp#112) ----
-# Everything the staging Container App does NOT share with production. The rest — region, vault and
-# its `vitally-shared` secret, managed identity, ACR, Container Apps Environment, the `sg-vitally-*`
-# tier group ids AND the whole OAuth identity set above — is deliberately the same, so a staging
-# failure points at what changed rather than at the environment.
+# ---- Secrets (never committed — supply via TF_VAR_* or an untracked tfvars) ----
 #
-# The five duplicated identity variables (authority, audience, upstream_resource_scope,
-# shared_client_id and the client secret) were collapsed onto their `oauth_*` counterparts by vitally-mcp#156,
-# closing vitally-mcp#102. They existed separately only while the targets ran different providers during the
-# vitally-mcp#108 migration.
+# ONE Entra client secret for both targets, held on each Container App under the same name,
+# `entra-oauth-client-secret`. It is a COPY of the Key Vault secret `entra-mcp-client-secret`, not a
+# reference to it — so rotating the vault copy alone changes nothing the app sends (vitally-mcp#138's
+# trap). Rotation: docs/runbooks/entra-and-zendesk-oauth.md.
 #
-# What remains below is genuinely per-target. `staging_oauth_resource` and `staging_public_base_url`
-# stay separate permanently: each target publishes its own origin, so sharing those would make
-# staging advertise production's — an RFC 9728 document naming a server it is not, which strict
-# clients reject outright.
-variable "staging_app_name" {
-  type        = string
-  description = "Staging Container App name. Deliberately outside the name_prefix convention: it is a second app inside the production RG and Container Apps Environment, not a second environment."
-  default     = "vitally-staging-ca-uksouth"
-}
-
-variable "staging_image_tag" {
-  type        = string
-  description = "Container image tag deployed to the staging Container App. Moves independently of production's."
-  default     = "sha-3c40e0e"
-}
-
-# Staging's Audience and Resource diverge by HOST as well as by slash, and that is expected. One
-# Entra app registration serves both origins (vitally-mcp#107), so a staging token's `aud` is production's App
-# ID URI — which is why staging reads the shared `oauth_audience` above — whereas `resource` must
-# equal the staging origin, because MCP clients reject a metadata document whose `resource` does not
-# match the server they fetched it from.
-variable "staging_oauth_resource" {
-  type        = string
-  description = "Canonical resource identifier published by staging, WITH the trailing slash. Must equal the staging origin."
-  default     = "https://vitally-staging.fiscaltec.com/"
-}
-
-variable "staging_public_base_url" {
-  type        = string
-  description = "Canonical public origin for staging — no trailing slash (it is an origin, and Validate() trims one anyway)."
-  default     = "https://vitally-staging.fiscaltec.com"
-}
-
-# ---- Secrets (DO NOT hardcode/commit — supply via TF_VAR_* or an untracked tfvars) ----
-# ONE secret for both targets, held on each Container App under the SAME name,
-# `entra-oauth-client-secret` (vitally-mcp#156 normalised staging onto production's name and removed the
-# retained rollback credential that had occupied the other one).
+# Null by default ONLY so the first, targeted apply can create the Entra app before this secret can
+# exist (README.md, apply procedure). Both Container Apps carry a precondition that refuses to plan
+# without it, so a full apply cannot run on the default.
 #
-# The Container App secret is a COPY of the Key Vault secret `entra-mcp-client-secret`, not a
-# reference to it — so rotating the vault copy alone changes nothing the app sends. That is vitally-mcp#138's
-# trap, and it is why this name records its provenance rather than being provider-neutral.
+# The hazard is a WRONG value, not a missing one: a stale secret boots fine, passes /health and the
+# unauthenticated 401, and fails only at /oauth/token as `invalid_client` — for everyone at once.
+# Read this secret's line in the plan, and verify a change by signing in.
 variable "oauth_shared_client_secret" {
   type        = string
-  description = "Client secret for `oauth_shared_client_id` — the Entra app's, sourced from the Key Vault secret `entra-mcp-client-secret` and COPIED onto both Container Apps as 'entra-oauth-client-secret'. Expires 2027-03-01; see docs/runbooks/entra-app-registration.md."
+  description = "Client secret of the Zendesk MCP Entra app (Key Vault `entra-mcp-client-secret`), copied onto BOTH Container Apps as 'entra-oauth-client-secret'."
   sensitive   = true
-}
-
-variable "application_insights_connection_string" {
-  type        = string
-  description = "Connection string for the Application Insights component `vitally-prod-appi-uksouth`, set on BOTH Container Apps (production and staging) since 2026-09-25 (vitally-mcp#147). Read it with `az monitor app-insights component show -a vitally-prod-appi-uksouth -g vitally-prod-rg-uksouth --query connectionString -o tsv`. It is REQUIRED even though the component has DisableLocalAuth = true: that setting refuses the instrumentation key as a credential, while the string still names the component and its ingestion endpoint. Deliberately has no default — an adoption must supply the live value rather than plant a placeholder that would silently stop the export."
-  sensitive   = true
+  nullable    = true
+  default     = null
 }
 
 variable "teams_webhook_url" {
   type        = string
   description = "Teams Power Automate Workflows webhook URL for the secret-expiry scanner job."
   sensitive   = true
-}
-
-# ---- Entra (entra.tf, vitally-mcp#107) ----
-variable "tenant_id" {
-  type        = string
-  description = "Entra tenant hosting the app registration and the sg-vitally-* / department groups."
-  default     = "75bd6050-92a8-4bde-a406-50000b310c86"
 }

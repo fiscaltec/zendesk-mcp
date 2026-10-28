@@ -568,6 +568,29 @@ xUnit v3 on **Microsoft.Testing.Platform** (not VSTest): `global.json` selects t
 
 The same shape as vitally-mcp — Azure Container Apps (production warm, staging scale-to-zero) in a VNet, private Key Vault and ACR, Application Insights behind AMPLS, GitHub Actions deploying through OIDC federated credentials, a staging gate and a release train — defined **greenfield** in `infra/terraform/` (see its README for the apply procedure and pending decisions) and `.github/workflows/`. Nothing has been applied yet.
 
+### Freezing deploys
+
+**`gh workflow disable release.yml`** (re-enable with `gh workflow enable release.yml`). That stops
+tagging, releasing and deploying together — the coherent unit: a freeze must not leave a GitHub
+Release behind for something that never shipped. Nothing is lost by pausing; the next run cuts one
+tag and generates notes from everything since the previous one. **Do not add an `AUTO_DEPLOY`-style
+variable** to keep tagging during a freeze — vitally-mcp tried it (vitally-mcp#111), it produced a
+Release deployed nowhere, and it was reverted (vitally-mcp#115).
+
+An attended deploy stays available through `deploy.yml`'s own `workflow_dispatch`, staging first:
+
+```bash
+gh workflow run deploy.yml -f target=staging -f ref=<tag> -f image_tag=<tag>
+# read the digest from that run's summary, then:
+gh workflow run deploy.yml -f target=production -f ref=<tag> -f image_tag=<tag> -f image_digest=sha256:<…>
+```
+
+⚠️ A production dispatch without `image_digest` rebuilds and force-imports over the tag, so staging can
+cold-start into an image nobody smoke-tested. To recover a failed train run, use
+`gh run rerun <id> --failed` — not a fresh `gh workflow run release.yml`, which finds no new tag and is
+a green no-op. Train-driven deploys run inside `release.yml`'s run, so they never appear in
+`gh run list --workflow=deploy.yml`.
+
 ### Staging validation
 
 Before production, on staging against the real Zendesk account, with `Authorization__ReadOnly=true` except while deliberately testing writes on a test ticket:

@@ -1,14 +1,35 @@
-# User-assigned managed identity used by the Container App, the scanner Job, and ACR CMK.
+# User-assigned managed identity: the runtime identity of both Container Apps and the scanner Job,
+# the ACR's CMK identity, and the GitHub Actions deploy identity (federated credentials below).
 resource "azurerm_user_assigned_identity" "app" {
   name                = "${var.name_prefix}-id-uksouth"
-  resource_group_name = data.azurerm_resource_group.rg.name
+  resource_group_name = azurerm_resource_group.rg.name
   location            = var.location
 }
 
-# Runtime: read the Vitally API key from the secret vault.
-resource "azurerm_role_assignment" "mi_kv_secrets_user" {
+# Runtime: read AND WRITE secrets in the secret vault.
+#
+# Secrets Officer, not Secrets User, because the app writes: it stores one secret per connected
+# person (zendesk-user-{objectId}, or zendesk-staging-user-{objectId}), overwrites it on every token
+# refresh and tombstones it on disconnect. Secrets User would let people connect and then fail every
+# save.
+#
+# The cost, stated plainly: the same grant lets the app overwrite or delete the two shared secrets in
+# this vault — `zendesk-oauth-client-secret` and `entra-mcp-client-secret` — and the scanner Job, which
+# shares the identity, could too. Accepted, with one vault, because:
+#   * the identity already holds every person's Zendesk token, each of which can act in Zendesk as
+#     that person. A compromise of the identity is already the worst case; reaching the Zendesk
+#     client secret adds little to it.
+#   * a second vault for the two shared secrets would need its own private endpoint, diagnostic
+#     setting, expiry scanning and rotation steps, while the app still needs read on it — more
+#     surface to keep right, for no reduction in what the identity can do to Zendesk.
+#   * the app only supports one Zendesk__KeyVaultUri, so a split would also be a code change.
+# The mitigations are the vault's AuditEvent log (keyvault.tf), soft delete with purge protection
+# (any overwrite or delete is recoverable for 90 days), and the Container App's `entra-oauth-client-
+# secret` being a COPY — the app never reads `entra-mcp-client-secret`, so tampering with it changes
+# nothing the app sends.
+resource "azurerm_role_assignment" "mi_kv_secrets_officer" {
   scope                = azurerm_key_vault.secret.id
-  role_definition_name = "Key Vault Secrets User"
+  role_definition_name = "Key Vault Secrets Officer"
   principal_id         = azurerm_user_assigned_identity.app.principal_id
 }
 
@@ -26,24 +47,26 @@ resource "azurerm_role_assignment" "mi_cmk_crypto" {
   principal_id         = azurerm_user_assigned_identity.app.principal_id
 }
 
-# Telemetry: publish audit records and traces to Application Insights. Added 2026-09-24 with vitally-mcp#164's
-# audit routing. It is required rather than optional: the component has DisableLocalAuth = true, so
-# the instrumentation key in the connection string is NOT accepted as a credential and the exporter
-# authenticates with this identity. Without this grant the records are dropped at ingestion —
-# asynchronously, so nothing in the app notices.
+# Telemetry: publish audit records and traces to Application Insights. Required, not optional: the
+# component has DisableLocalAuth = true (monitoring.tf), so the instrumentation key in the connection
+# string is NOT accepted as a credential and the exporter authenticates with this identity. Without
+# this grant the records are dropped at ingestion — asynchronously, so nothing in the app notices
+# (vitally-mcp#164/#147).
 #
 # ⚠️ Verify DisableLocalAuth with `az resource show`, not `az monitor app-insights component show`:
-# the extension reports it as null for this component while ARM reports true.
+# the extension has been seen to report it as null while ARM reports true.
 resource "azurerm_role_assignment" "mi_monitoring_metrics_publisher" {
   scope                = azurerm_application_insights.appi.id
   role_definition_name = "Monitoring Metrics Publisher"
   principal_id         = azurerm_user_assigned_identity.app.principal_id
 }
 
-# NOTE (Microsoft Graph): the identity also holds the Graph application permission
-# GroupMember.Read.All (for the live group-membership check). Graph app-role grants are
-# not managed here — assign via Graph/PowerShell or azuread_app_role_assignment in a
-# separate Entra-scoped config.
+# NOTE (Microsoft Graph): the identity ALSO needs the Graph APPLICATION permission
+# GroupMember.Read.All, for the live sg-zendesk-* membership check (Gate 2). Without it every tool
+# call is denied — the resolver never fails open. It is not granted here: an app-role grant on
+# Microsoft Graph needs a Privileged Role Administrator–level principal, which the identity running
+# routine applies should not hold. Grant it once, out-of-band (README.md, apply procedure), to the
+# identity's principal id (output `managed_identity_principal_id`).
 
 # CI/CD (GitHub Actions OIDC): GitHub authenticates as this identity to deploy. The federated
 # credential subject matches the deploy workflow's `environment:` job, so only that environment can
@@ -54,20 +77,20 @@ resource "azurerm_role_assignment" "mi_monitoring_metrics_publisher" {
 # at azure/login rather than deploying somewhere unintended.
 resource "azurerm_federated_identity_credential" "github_actions_prod" {
   name                = "github-actions-prod-env"
-  resource_group_name = data.azurerm_resource_group.rg.name
+  resource_group_name = azurerm_resource_group.rg.name
   parent_id           = azurerm_user_assigned_identity.app.id
   audience            = ["api://AzureADTokenExchange"]
   issuer              = "https://token.actions.githubusercontent.com"
-  subject             = "repo:fiscaltec/vitally-mcp:environment:production"
+  subject             = "repo:fiscaltec/zendesk-mcp:environment:production"
 }
 
 resource "azurerm_federated_identity_credential" "github_actions_staging" {
   name                = "github-actions-staging-env"
-  resource_group_name = data.azurerm_resource_group.rg.name
+  resource_group_name = azurerm_resource_group.rg.name
   parent_id           = azurerm_user_assigned_identity.app.id
   audience            = ["api://AzureADTokenExchange"]
   issuer              = "https://token.actions.githubusercontent.com"
-  subject             = "repo:fiscaltec/vitally-mcp:environment:staging"
+  subject             = "repo:fiscaltec/zendesk-mcp:environment:staging"
 }
 
 # Deploy: `az acr import` the built image into the private ACR. AcrPush does NOT include the
@@ -93,22 +116,20 @@ resource "azurerm_role_assignment" "mi_ca_staging_contributor" {
   principal_id         = azurerm_user_assigned_identity.app.principal_id
 }
 
-# Release train (vitally-mcp#171): tell a TORN-DOWN staging apart from a failed lookup. With only the app-scoped
-# Contributor above, Azure answers `AuthorizationFailed` for an app that does not exist -- the same
-# answer as a lost role -- and `az containerapp list` silently lists only what the caller can see,
-# so absence was unobservable and every check of it either failed open or could not decide.
-# Measured from the deploy identity on 2026-09-29: before this grant, AuthorizationFailed; after it,
-# `(ResourceNotFound)`, which check-serving-revisions.sh reports as exit 3.
+# Release train: tell an ABSENT staging apart from a failed lookup (vitally-mcp#171). With only the
+# app-scoped Contributor above, Azure answers `AuthorizationFailed` for an app that does not exist —
+# the same answer as a lost role — and `az containerapp list` silently lists only what the caller can
+# see, so absence is unobservable. With this grant a missing app reads `(ResourceNotFound)`, which
+# check-serving-revisions.sh reports as exit 3 and staging-gate.yml turns into "skip staging".
 #
 # Mostly read, and not nothing: the identity is also both apps' RUNTIME identity, so the running
-# containers can now read every Container App's configuration in the group (non-secret env values
+# containers can read every Container App's configuration in the group (non-secret env values
 # included; secrets are a separate `listSecrets` action this role does not grant), every role
-# assignment in it (`Microsoft.Authorization/*/read`) and its deployment history
-# (`Microsoft.Resources/deployments/read`). The built-in role also carries
-# `Microsoft.Insights/alertRules/*` -- WRITE on classic alert rules. Accepted over maintaining a
-# custom role (decision: dsearle, 2026-09-29).
+# assignment in it (`Microsoft.Authorization/*/read`) and its deployment history. The built-in role
+# also carries `Microsoft.Insights/alertRules/*` — WRITE on classic alert rules. Accepted over
+# maintaining a custom role, as it was for the Vitally estate.
 resource "azurerm_role_assignment" "mi_rg_containerapp_reader" {
-  scope                = data.azurerm_resource_group.rg.id
+  scope                = azurerm_resource_group.rg.id
   role_definition_name = "ContainerApp Reader"
   principal_id         = azurerm_user_assigned_identity.app.principal_id
 }

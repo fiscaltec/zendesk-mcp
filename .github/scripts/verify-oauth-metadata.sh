@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Verifies the OAuth metadata documents a running Vitally MCP server publishes.
+# Verifies the OAuth metadata documents a running Zendesk MCP server publishes.
 #
 # WHY THIS EXISTS. deploy.yml's other smoke assertions are `/health` == 200 and unauthenticated
 # `/mcp` == 401. Both of those pass while the metadata documents are wrong -- wrong `issuer`, a
@@ -12,13 +12,14 @@
 # WHY THE WHOLE ASSERTION SET RETRIES, not just the fetches. In single-revision mode Container Apps
 # reports the new revision Provisioned/Healthy *before* ingress finishes shifting traffic, so a check
 # that runs immediately can be answered by the OLD revision -- with a perfectly valid 200 and a
-# perfectly valid document, just the previous configuration. Asserting once turned that race into a
-# rollback of a healthy deploy on 2026-08-28: revision 21 (v4.2.2) came up Healthy and was reverted
-# 23 seconds later. Neither /health nor the 401 can catch the race, because both pass on whichever
+# perfectly valid document, just the previous configuration. In vitally-mcp, the server this one is
+# built from, asserting once turned that race into a rollback of a healthy deploy: the new revision
+# came up Healthy and was reverted 23 seconds later. Neither /health nor the 401 can catch the race, because both pass on whichever
 # revision answers -- this is the first check able to tell them apart, so it has to wait for the swap.
 #
 # Usage:  verify-oauth-metadata.sh <public-origin>
-#   e.g.  verify-oauth-metadata.sh https://vitally.fiscaltec.com
+#   e.g.  verify-oauth-metadata.sh https://zendesk-mcp.fiscaltec.com
+#         verify-oauth-metadata.sh https://zendesk-mcp-staging.fiscaltec.com
 #         verify-oauth-metadata.sh http://localhost:5099      # local run, for testing this script
 #
 # Exits non-zero with a ::error:: annotation per failed assertion, emitted only after the final
@@ -166,6 +167,13 @@ verify_once() {
     if ! fetch_json "$ORIGIN$path" "$pr_doc"; then
       continue
     fi
+
+    # RFC 9728 section 3.3: the `resource` a client fetched must name the server it fetched it from,
+    # and MCP clients reject the document otherwise. Every target publishes its own origin WITH the
+    # trailing slash (OAuth:Resource; Claude Code normalises to that form and compares), so a staging
+    # app configured with production's resource -- or the slash-less audience pasted in its place --
+    # fails here rather than at every client's next sign-in.
+    assert_field "$pr_doc" '.resource' "$ORIGIN/" "$path resource"
 
     # The pairing a strict client actually checks: it reads authorization_servers out of this
     # document, uses that string verbatim to build the well-known URL, and requires the returned

@@ -3,8 +3,16 @@
 Gets a managed-identity token from the Container Apps identity endpoint, lists Key Vault
 secrets via the KV REST API, and posts an Adaptive Card to the Teams Workflows webhook for
 any secret expiring within 30 days. No Azure CLI dependency (runs on python:3-slim).
+
+Per-person Zendesk token secrets (tag kind=zendesk-user-token, written by the app as
+zendesk-user-* / zendesk-staging-user-*) are SKIPPED. Their expiry is the refresh token's, and it
+heals itself: when it lapses, the next tool call offers that person a connect link and they
+reconnect. Alerting on them would bury the two secrets that need a human to rotate them —
+zendesk-oauth-client-secret and entra-mcp-client-secret — under one line per user.
 """
 import json, os, datetime, urllib.request, urllib.parse
+
+USER_TOKEN_KIND = "zendesk-user-token"
 
 
 def getj(url, headers):
@@ -20,7 +28,8 @@ q = urllib.parse.urlencode({"resource": "https://vault.azure.net", "api-version"
 tok = getj(ie + "?" + q, {"X-IDENTITY-HEADER": ih})["access_token"]
 print("[scan] token acquired", flush=True)
 
-# List secrets, following nextLink pagination so large vaults aren't truncated.
+# List secrets, following nextLink pagination so large vaults aren't truncated (one secret per
+# connected person makes this vault large).
 secrets = []
 next_url = "https://%s.vault.azure.net/secrets?api-version=7.4" % vault
 while next_url:
@@ -30,13 +39,19 @@ while next_url:
 now = datetime.datetime.now(datetime.timezone.utc)
 thr = now + datetime.timedelta(days=30)
 near = []
+skipped = 0
 for s in secrets:
+    if (s.get("tags") or {}).get("kind") == USER_TOKEN_KIND:
+        skipped += 1
+        continue
     a = s.get("attributes") or {}
     exp = a.get("exp")
     if a.get("enabled") and exp:
         d = datetime.datetime.fromtimestamp(exp, datetime.timezone.utc)
         if d <= thr:
             near.append((s["id"].rstrip("/").split("/")[-1], d.date().isoformat()))
+# The count only — never the names, which embed each person's Entra object id.
+print("[scan] skipped %d per-person Zendesk token secret(s)" % skipped, flush=True)
 print("[scan] near-expiry:", near, flush=True)
 
 if not near:
@@ -55,7 +70,7 @@ card = {
             "body": [
                 {"type": "TextBlock", "size": "Medium", "weight": "Bolder", "text": "Key Vault secrets nearing expiry (<=30 days)"},
                 {"type": "TextBlock", "wrap": True, "text": lines},
-                {"type": "TextBlock", "wrap": True, "isSubtle": True, "text": "Vault: %s - rotate per the 180-day standard." % vault},
+                {"type": "TextBlock", "wrap": True, "isSubtle": True, "text": "Vault: %s - rotate per the 180-day standard (docs/runbooks/entra-and-zendesk-oauth.md)." % vault},
             ],
         },
     }],

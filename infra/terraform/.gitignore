@@ -4,6 +4,8 @@
 *.tfstate.*
 crash.log
 crash.*.log
+# Saved plans carry sensitive values in clear
+*.tfplan
 
 # Variable files with secrets — never commit (only the .example is tracked)
 *.tfvars

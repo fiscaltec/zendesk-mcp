@@ -1,10 +1,10 @@
 # VNet flow logs → dedicated, hardened storage account.
-# Applied to the live estate via CLI on 2026-06-10; adopt via the import blocks in imports.tf.
-# Traffic analytics is intentionally off (would ingest into the now-private LAW); raw flow logs only.
+# Traffic analytics is intentionally off (it would ingest into the private workspace); raw flow logs
+# only.
 
 resource "azurerm_storage_account" "flowlogs" {
-  name                            = "vitallyprodflowuksouth"
-  resource_group_name             = data.azurerm_resource_group.rg.name
+  name                            = var.flow_log_storage_account_name
+  resource_group_name             = azurerm_resource_group.rg.name
   location                        = var.location
   account_tier                    = "Standard"
   account_replication_type        = "LRS"
@@ -21,6 +21,8 @@ resource "azurerm_storage_account" "flowlogs" {
   }
 }
 
+# The subscription's regional Network Watcher (created by Azure, shared with every other estate in
+# IT-Production) — referenced by name, not managed.
 resource "azurerm_network_watcher_flow_log" "vnet" {
   name                 = "${var.name_prefix}-vnetflow-uksouth"
   network_watcher_name = "NetworkWatcher_uksouth"

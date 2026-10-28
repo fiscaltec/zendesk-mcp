@@ -1,35 +1,79 @@
 locals {
-  # The scanner Job decodes this base64'd Python script and runs it (matches the deployed job).
+  # The scanner Job decodes this base64'd Python script and runs it, so the job needs no image of
+  # its own.
   scanner_command = "echo ${base64encode(file("${path.module}/scan/run.py"))} | base64 -d > /tmp/run.py && python3 /tmp/run.py"
+
+  # Environment shared by BOTH Container Apps. Built once so the two targets cannot drift apart by
+  # accident; containerapps-staging.tf adds only what is genuinely per-target. Values only — the
+  # secret-backed and sensitive entries are separate `env` blocks in each app, because a sensitive
+  # value cannot drive a dynamic block.
+  app_env_shared = {
+    # Zendesk. One account, one OAuth client, one vault — the targets differ only in the token
+    # secret prefix and the feature switches.
+    "Zendesk__Subdomain"     = var.zendesk_subdomain
+    "Zendesk__KeyVaultUri"   = azurerm_key_vault.secret.vault_uri
+    "Zendesk__OAuthClientId" = var.zendesk_oauth_client_id
+
+    # DefaultAzureCredential picks the user-assigned identity by this.
+    "AZURE_CLIENT_ID" = azurerm_user_assigned_identity.app.client_id
+
+    # Entra. Audience is production's App ID URI on BOTH targets: one registration serves both
+    # origins, so a staging token's `aud` names production too.
+    "OAuth__Authority" = var.oauth_authority
+    "OAuth__Audience"  = var.oauth_audience
+    # Terminates the RFC 8707 `resource` parameter at the proxy and names the API by scope
+    # instead. Required under Entra; empty is the RFC 8707 relay default, which Entra rejects.
+    "OAuth__UpstreamResourceScope"        = var.oauth_upstream_resource_scope
+    "OAuth__NoAuth"                       = "false"
+    "OAuth__SharedClientId"               = azuread_application.zendesk_mcp.client_id
+    "OAuth__AllowedClientRedirectUris__0" = var.allowed_client_redirect_uri
+
+    # Gate 2: tiers from live, transitive sg-zendesk-* membership via Graph (needs the identity's
+    # GroupMember.Read.All — identity.tf). Identity-provider independent, so shared.
+    "Authorization__LiveGroupCheck" = "true"
+    "Authorization__ReaderGroupId"  = azuread_group.zendesk_readers.object_id
+    "Authorization__EditorGroupId"  = azuread_group.zendesk_editors.object_id
+    "Authorization__AdminGroupId"   = azuread_group.zendesk_admins.object_id
+  }
+
+  app_env_production = merge(local.app_env_shared, {
+    # Set explicitly although it is the application default, so the separation from staging's
+    # prefix is visible here rather than implied.
+    "Zendesk__TokenSecretPrefix" = "zendesk-user-"
+
+    # Per-target: each target publishes its own origin. Resource differs from Audience by exactly
+    # one trailing slash — see variables.tf; they must not be reunified.
+    "OAuth__Resource"      = var.oauth_resource
+    "OAuth__PublicBaseUrl" = var.public_base_url
+
+    "Zendesk__Features__AllowPublicReplies"              = tostring(var.zendesk_allow_public_replies)
+    "Zendesk__Features__AllowArticlePublishing"          = tostring(var.zendesk_allow_article_publishing)
+    "Zendesk__Features__AllowMacroChanges"               = tostring(var.zendesk_allow_macro_changes)
+    "Zendesk__Features__AllowUserAndOrganizationChanges" = tostring(var.zendesk_allow_user_and_organization_changes)
+  })
 }
 
 resource "azurerm_container_app_environment" "env" {
   name                = "${var.name_prefix}-cae-uksouth"
-  resource_group_name = data.azurerm_resource_group.rg.name
+  resource_group_name = azurerm_resource_group.rg.name
   location            = var.location
-  # Changed 2026-09-17 from the default "log-analytics" destination, which writes directly to the
-  # workspace using its SHARED KEY. That never worked here and never could: monitoring.tf sets
-  # local_authentication_enabled = false, so the workspace refuses shared-key writes — which is why
-  # ContainerAppConsoleLogs_CL had zero rows for the workspace's entire lifetime.
-  #
-  # It is also unsupported by design. Microsoft's Container Apps log-options documentation states:
+
+  # NOT the default "log-analytics" destination. That writes to the workspace with its SHARED KEY,
+  # which monitoring.tf disables (local_authentication_enabled = false), so it would deliver nothing
+  # — as it delivered nothing for the Vitally estate's whole life before vitally-mcp#142. It is also
+  # unsupported with Private Link by design; Microsoft's Container Apps log-options documentation:
   #
   #   "Private link: Sending logs directly to a Log Analytics Workspace through Private Link isn't
   #    supported. However, you can use Azure Monitor and send your logs to the same Log Analytics
   #    Workspace. This indirection is required to prevent system log data loss."
   #
-  # With "azure-monitor", the categories and destination are configured by DIAGNOSTIC SETTINGS
-  # instead (diagnostics.tf) — which reach the workspace over the Azure Monitor control plane rather
-  # than a shared key, so they work with ingestion private and local auth disabled.
-  #
-  # ⚠️ The diagnostic settings are NOT optional with this value: set "azure-monitor" without them and
-  # logs go nowhere silently, which is the state this repo was in before 2026-09-17 in the other
-  # direction. log_analytics_workspace_id is deliberately absent — it belongs to the destination that
-  # was removed, and the live resource's logAnalyticsConfiguration is now null.
+  # With "azure-monitor", the categories and destination come from DIAGNOSTIC SETTINGS
+  # (diagnostics.tf). ⚠️ They are not optional with this value: without them logs go nowhere,
+  # silently. log_analytics_workspace_id is deliberately absent — it belongs to the other destination.
   logs_destination = "azure-monitor"
 
   infrastructure_subnet_id       = azurerm_subnet.app.id
-  internal_load_balancer_enabled = false # external ingress — app stays internet-facing
+  internal_load_balancer_enabled = false # external ingress — the apps are internet-facing
 
   workload_profile {
     name                  = "Consumption"
@@ -39,7 +83,7 @@ resource "azurerm_container_app_environment" "env" {
 
 resource "azurerm_container_app" "app" {
   name                         = "${var.name_prefix}-ca-uksouth"
-  resource_group_name          = data.azurerm_resource_group.rg.name
+  resource_group_name          = azurerm_resource_group.rg.name
   container_app_environment_id = azurerm_container_app_environment.env.id
   revision_mode                = "Single"
   workload_profile_name        = "Consumption"
@@ -54,13 +98,10 @@ resource "azurerm_container_app" "app" {
     identity = azurerm_user_assigned_identity.app.id
   }
 
-  # ONE secret. Staging holds the same value under the same name (vitally-mcp#156 normalised it), so the two
-  # captures read alike — which is the point: a difference between them should mean something.
-  #
-  # The name records provenance deliberately. This is a COPY of the Key Vault secret
-  # `entra-mcp-client-secret`, not a reference to it, so rotating the vault copy alone changes
-  # nothing the app sends (vitally-mcp#138). A provider-neutral name would hide the Entra credential behind it
-  # and the 2027-03-01 expiry that comes with it.
+  # ONE secret, the same value and name on staging. The name records provenance deliberately: it is
+  # a COPY of the Key Vault secret `entra-mcp-client-secret`, not a reference to it, so rotating the
+  # vault copy alone changes nothing the app sends (vitally-mcp#138). The Zendesk OAuth client secret
+  # is NOT here — the app reads it from Key Vault itself (Zendesk__OAuthClientSecretRef).
   secret {
     name  = "entra-oauth-client-secret"
     value = var.oauth_shared_client_secret
@@ -68,7 +109,7 @@ resource "azurerm_container_app" "app" {
 
   ingress {
     external_enabled = true
-    target_port      = 8080
+    target_port      = 8080 # Dockerfile: ASPNETCORE_URLS=http://+:8080
     transport        = "auto"
 
     traffic_weight {
@@ -76,118 +117,83 @@ resource "azurerm_container_app" "app" {
       percentage      = 100
     }
 
-    # Custom domain bound to a FREE MANAGED certificate. azurerm cannot create managed certs;
-    # the binding is done out-of-band (az containerapp hostname bind --validation-method TXT).
-    # Leave this block here for documentation; on adoption, ignore drift on the cert binding or
-    # manage a BYO cert via azurerm_container_app_environment_certificate.
-    # custom_domain {
-    #   name                     = "vitally.fiscaltec.com"
-    #   certificate_binding_type = "SniEnabled"
-    #   certificate_id           = "<managed cert id>"
-    # }
+    # The custom domain (zendesk-mcp.fiscaltec.com) is bound to a FREE MANAGED certificate, which
+    # azurerm cannot create, so the binding is done out-of-band after the first apply (README.md,
+    # apply procedure).
   }
 
   template {
-    # Keep one replica always warm. With scale-to-zero (min 0), a request arriving after an
-    # idle gap paid a server-side cold start (scheduling + ACR image pull over the private
-    # endpoint + .NET boot + first-time Key Vault/Graph managed-identity token acquisitions) —
-    # ~5s worst case in the logs, of which the first Graph token alone was ~3s. A warm replica
-    # also keeps the token/JWKS/Key Vault caches hot. NOTE: this only affects the server-side
-    # slice; client-perceived MCP latency is dominated by model inference, not this change.
-    # Trade-off: one 0.5 vCPU / 1Gi replica is billed continuously at the idle rate.
+    # One replica always warm: a scale-to-zero cold start (scheduling, image pull over the private
+    # endpoint, .NET boot, first Key Vault and Graph token acquisitions) cost ~5s server-side in the
+    # Vitally estate, and a warm replica keeps the token, JWKS and Key Vault caches hot. The cost is
+    # one 0.5 vCPU / 1Gi replica billed continuously.
     min_replicas = 1
-    max_replicas = 3
+
+    # ⚠️ EXACTLY ONE replica, and do not raise this on its own. Connect links, Zendesk OAuth attempt
+    # state, the Entra OAuth proxy's state and upload slots (PUT /uploads/{slot}) all live in an
+    # IN-PROCESS cache: a request landing on a second replica would not find the link, the callback
+    # state or the slot its first request created. The per-person token cache must also stay coherent
+    # with a disconnect or revocation, which one process guarantees and several do not. Scaling out
+    # needs a shared cache (Redis) first — a registration change in Program.cs, then this.
+    max_replicas = 1
 
     container {
-      name   = "vitally-mcp"
-      image  = "${azurerm_container_registry.acr.login_server}/vitally-mcp:${var.image_tag}"
+      name   = "zendesk-mcp"
+      image  = "${azurerm_container_registry.acr.login_server}/zendesk-mcp:${var.image_tag}"
       cpu    = 0.5
       memory = "1Gi"
 
-      env {
-        name  = "Vitally__Region"
-        value = "EU"
+      dynamic "env" {
+        for_each = local.app_env_production
+        content {
+          name  = env.key
+          value = env.value
+        }
       }
-      env {
-        name  = "Vitally__KeyVaultUri"
-        value = "https://${azurerm_key_vault.secret.name}.vault.azure.net/"
-      }
-      env {
-        name  = "AZURE_CLIENT_ID"
-        value = var.managed_identity_client_id
-      }
-      env {
-        name  = "OAuth__Authority"
-        value = var.oauth_authority
-      }
-      env {
-        name  = "OAuth__Audience"
-        value = var.oauth_audience
-      }
-      # Deliberately a different variable from OAuth__Audience — see the note on oauth_resource in
-      # variables.tf. They differ by exactly one trailing slash and must not be reunified.
-      env {
-        name  = "OAuth__Resource"
-        value = var.oauth_resource
-      }
-      # Terminates the RFC 8707 `resource` parameter at the proxy and names the API by scope
-      # instead. Required under Entra; empty is the RFC 8707 relay default, which Entra rejects.
-      env {
-        name  = "OAuth__UpstreamResourceScope"
-        value = var.oauth_upstream_resource_scope
-      }
-      env {
-        name  = "OAuth__NoAuth"
-        value = "false"
-      }
-      env {
-        name  = "OAuth__SharedClientId"
-        value = var.oauth_shared_client_id
-      }
+
       env {
         name        = "OAuth__SharedClientSecret"
         secret_name = "entra-oauth-client-secret"
       }
-      env {
-        name  = "OAuth__AllowedClientRedirectUris__0"
-        value = var.allowed_client_redirect_uri
-      }
-      env {
-        name  = "OAuth__PublicBaseUrl"
-        value = var.public_base_url
-      }
-      env {
-        name  = "Authorization__LiveGroupCheck"
-        value = "true"
-      }
-      env {
-        name  = "Authorization__ReaderGroupId"
-        value = var.entra_group_reader
-      }
-      env {
-        name  = "Authorization__EditorGroupId"
-        value = var.entra_group_editor
-      }
-      env {
-        name  = "Authorization__AdminGroupId"
-        value = var.entra_group_admin
-      }
-      # Set on production 2026-09-25 (vitally-mcp#147). It switches on BOTH the Azure Monitor exporter — which
-      # routes the audit records to AppEvents via microsoft.custom_event.name — and the suppression
-      # of the ZendeskMcp.AuditLogger category from the console provider. Unset, both are absent and
-      # the records stay on stdout; the application treats an empty value as unset.
+
+      # Switches on BOTH the Azure Monitor exporter — which routes the audit records to AppEvents —
+      # and the suppression of the ZendeskMcp.AuditLogger category from the console provider. Unset,
+      # the full audit records stay on stdout, which diagnostics.tf exports for the whole environment.
       env {
         name  = "ApplicationInsights__ConnectionString"
-        value = var.application_insights_connection_string
+        value = azurerm_application_insights.appi.connection_string
       }
+    }
+  }
+
+  # The first revision must be able to pull its image (AcrPull, over the private endpoint) and reach
+  # the vault at startup; nothing in the attributes above implies that ordering.
+  depends_on = [
+    azurerm_role_assignment.mi_acr_pull,
+    azurerm_role_assignment.mi_kv_secrets_officer,
+    azurerm_private_endpoint.acr,
+    azurerm_private_endpoint.kv,
+    azurerm_private_dns_zone_virtual_network_link.acr,
+    azurerm_private_dns_zone_virtual_network_link.vault,
+  ]
+
+  lifecycle {
+    # deploy.yml owns the image after creation. Without this, every apply would roll production back
+    # to var.image_tag.
+    ignore_changes = [template[0].container[0].image]
+
+    precondition {
+      condition     = var.oauth_shared_client_secret != null && var.oauth_shared_client_secret != ""
+      error_message = "oauth_shared_client_secret is required to create or update the Container Apps. Create the Entra client secret first (README.md, apply procedure step 2) and supply it as TF_VAR_oauth_shared_client_secret."
     }
   }
 }
 
-# Scheduled secret-expiry scanner (replaces the old Consumption Logic App).
+# Scheduled secret-expiry scanner: alerts Teams about secrets in the secret vault nearing expiry.
+# It skips the per-person Zendesk token secrets — see scan/run.py.
 resource "azurerm_container_app_job" "scanner" {
   name                         = "${var.name_prefix}-secscan-uksouth"
-  resource_group_name          = data.azurerm_resource_group.rg.name
+  resource_group_name          = azurerm_resource_group.rg.name
   location                     = var.location
   container_app_environment_id = azurerm_container_app_environment.env.id
   workload_profile_name        = "Consumption"
@@ -221,7 +227,7 @@ resource "azurerm_container_app_job" "scanner" {
 
       env {
         name  = "MI_CLIENT_ID"
-        value = var.managed_identity_client_id
+        value = azurerm_user_assigned_identity.app.client_id
       }
       env {
         name  = "VAULT"

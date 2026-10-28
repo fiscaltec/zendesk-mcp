@@ -3,7 +3,8 @@ name: Dependabot auto-merge
 # Enables GitHub-native auto-merge on Dependabot PRs (all update types) and resolves bot-authored
 # review threads, so the main ruleset's thread-resolution requirement does not block an unattended
 # merge. Nothing merges unless every required check passes — GitHub performs the merge itself once
-# the ruleset is satisfied. See docs/superpowers/specs/2026-06-29-dependabot-auto-merge-design.md.
+# the ruleset is satisfied. The design is
+# docs/superpowers/specs/2026-06-29-dependabot-auto-merge-design.md in fiscaltec/vitally-mcp.
 on:
   pull_request:
     types: [opened, reopened, synchronize]

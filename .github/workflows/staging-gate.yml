@@ -1,11 +1,11 @@
 name: Staging gate
 
-# Decides whether the release train deploys this tag to staging (vitally-mcp#171). Called by release.yml; a
+# Decides whether the release train deploys this tag to staging (design: vitally-mcp#171). Called by release.yml; a
 # separate reusable workflow so its three verdicts can be exercised without running the train.
 #
 #   deploy=true    staging exists and every serving revision could be read
 #   deploy=false   staging is PINNED (STAGING_PINNED is non-empty -- its value is the reason) or
-#                  TORN DOWN (check-serving-revisions.sh exit 3: az said the app does not exist)
+#                  ABSENT (check-serving-revisions.sh exit 3: az said the app does not exist)
 #   job FAILS      anything else -- a lapsed login, a missing role, an Azure outage, a malformed
 #                  listing. Reading "could not check" as "absent" is the fail-open shape vitally-mcp#167 removed,
 #                  and it would ship production on an assumption, so the train stops instead.
@@ -14,13 +14,13 @@ name: Staging gate
 # scope (infra/terraform/identity.tf): without it Azure answers AuthorizationFailed for an app that
 # does not exist, identical to a lost role.
 #
-# ⚠️ A WRONG `CONTAINER_APP` on the staging environment reads as torn down: az says that name does
+# ⚠️ A WRONG `CONTAINER_APP` on the staging environment reads as absent: az says that name does
 # not exist, which is exactly absence. The notice names the app it looked for, on every tagged run;
-# if staging is up and the notice says torn down, check the variable.
+# if staging is up and the notice says absent, check the variable (`zendesk-staging-ca-uksouth`).
 #
-# Proven on 2026-09-29 by a temporary self-test calling this workflow (run 36584985171, ATTEMPT 1 --
-# attempt 2 was a deliberately pinned re-run): live staging -> deploy=true; a nonexistent app name ->
-# deploy=false; a bogus client id -> the gate failed at login. The pin path by attempt 2.
+# The three verdicts were proven in vitally-mcp by a temporary self-test calling this workflow: live
+# staging -> deploy=true; a nonexistent app name -> deploy=false; a bogus client id -> the gate
+# failed at login; a pinned re-run -> deploy=false. Worth repeating once against this estate.
 on:
   workflow_call:
     inputs:
@@ -49,7 +49,7 @@ jobs:
       contents: read
     # The staging credential -- the federated subject is per environment -- but NO deployment record:
     # nothing is deployed here, and a phantom staging deployment on every tagged run would make the
-    # environment's history lie. Verified to record none (vitally-mcp#171).
+    # environment's history lie. Verified in vitally-mcp to record none (vitally-mcp#171).
     environment:
       name: staging
       deployment: false
@@ -96,12 +96,12 @@ jobs:
             || { echo "::error::az is not usable on this runner (az config failed)"; exit 1; }
           # `|| rc=$?`, not a bare call then `rc=$?`: Actions runs this under `bash -e`, which `set -uo`
           # does not undo, so a non-zero exit would end the step before the case below ever saw it --
-          # turning ABSENT (3) into a failure. The self-test caught exactly that (run 36584594351).
+          # turning ABSENT (3) into a failure. vitally-mcp's self-test caught exactly that.
           rc=0
           bash .github/scripts/check-serving-revisions.sh "$CONTAINER_APP" "$RESOURCE_GROUP" --image || rc=$?
           case "$rc" in
             0) echo "deploy=true" >> "$GITHUB_OUTPUT" ;;
-            3) echo "::notice title=Staging torn down, not deployed::$CONTAINER_APP does not exist in $RESOURCE_GROUP. Production still deploys."
+            3) echo "::notice title=Staging absent, not deployed::$CONTAINER_APP does not exist in $RESOURCE_GROUP. Production still deploys."
                echo "deploy=false" >> "$GITHUB_OUTPUT" ;;
             *) echo "::error::Could not establish whether staging is up (check-serving-revisions exit $rc). Failing rather than skipping: an auth or Azure failure is not absence."
                exit 1 ;;

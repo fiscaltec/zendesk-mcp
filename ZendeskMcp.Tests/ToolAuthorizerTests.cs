@@ -109,15 +109,15 @@ public class ToolAuthorizerTests
     public void HasPermission_True_FromCustomNamespacedClaim()
     {
         var user = new ClaimsPrincipal(new ClaimsIdentity(
-            new[] { new Claim("https://vitally.fiscaltec.com/permissions", "zendesk:write") }, "Test"));
-        ToolAuthorizer.HasPermission(user, "zendesk:write", "https://vitally.fiscaltec.com/permissions").Should().BeTrue();
+            new[] { new Claim("https://zendesk-mcp.fiscaltec.com/permissions", "zendesk:write") }, "Test"));
+        ToolAuthorizer.HasPermission(user, "zendesk:write", "https://zendesk-mcp.fiscaltec.com/permissions").Should().BeTrue();
     }
 
     [Fact]
     public void HasPermission_IgnoresCustomClaim_WhenNotConfigured()
     {
         var user = new ClaimsPrincipal(new ClaimsIdentity(
-            new[] { new Claim("https://vitally.fiscaltec.com/permissions", "zendesk:write") }, "Test"));
+            new[] { new Claim("https://zendesk-mcp.fiscaltec.com/permissions", "zendesk:write") }, "Test"));
         ToolAuthorizer.HasPermission(user, "zendesk:write", customClaimType: null).Should().BeFalse();
     }
 

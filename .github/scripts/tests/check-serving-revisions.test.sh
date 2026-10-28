@@ -72,7 +72,7 @@ check() {  # $1 = description, then a condition evaluated with eval
 
 GUARDED='[{"name":"Authorization__ReadOnly","value":"true"},{"name":"ApplicationInsights__ConnectionString","value":"InstrumentationKey=SECRET-DO-NOT-PRINT"}]'
 UNGUARDED='[{"name":"ApplicationInsights__ConnectionString","value":"InstrumentationKey=SECRET-DO-NOT-PRINT"}]'
-IMG=registry.example/vitally-mcp:sha-abc1234
+IMG=registry.example/zendesk-mcp:sha-abc1234
 
 # ---------------------------------------------------------------- the pass path
 
@@ -443,7 +443,7 @@ check "an empty image is NOT ASSESSED" '[ "$RC" -eq 2 ]'
 new_case
 list_fixture r1:50 r2:50
 rev_fixture r1 "$IMG" "$GUARDED"
-rev_fixture r2 "registry.example/vitally-mcp:sha-def5678" "$GUARDED"
+rev_fixture r2 "registry.example/zendesk-mcp:sha-def5678" "$GUARDED"
 run app rg --image
 check "two images in a split still exit 0 (no expected value)" '[ "$RC" -eq 0 ]'
 check "...but are called out" 'grep -q "different images" <<< "$OUT"'

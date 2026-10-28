@@ -1,5 +1,5 @@
 name: Bug report
-description: Something in the Vitally MCP server isn't working as expected.
+description: Something in the Zendesk MCP server isn't working as expected.
 title: "fix: <short description>"
 labels: ["bug", "status: ready"]
 
@@ -24,7 +24,7 @@ body:
     attributes:
       label: Steps to reproduce
       placeholder: |
-        1. Call the `List_account` tool with `limit: 5`
+        1. Call the `Get_zendesk_connection` tool
         2. ...
         3. Observe response
     validations:
@@ -45,12 +45,15 @@ body:
       required: true
 
   - type: dropdown
-    id: region
+    id: connection
     attributes:
-      label: Vitally region
+      label: Zendesk connection
+      description: What `Get_zendesk_connection` reports. Every Zendesk call runs as the person's own connected Zendesk account.
       options:
-        - EU (default)
-        - US
+        - Connected
+        - Not connected / connect link offered
+        - Connect or callback failed
+        - Not checked
     validations:
       required: true
 
@@ -71,8 +74,8 @@ body:
     id: server-url
     attributes:
       label: Server URL
-      description: The URL your MCP client is pointed at, e.g. https://vitally.fiscaltec.com/mcp or a self-hosted instance URL.
-      placeholder: https://vitally.fiscaltec.com/mcp
+      description: The URL your MCP client is pointed at, e.g. https://zendesk-mcp.fiscaltec.com/mcp, the staging origin, or a self-hosted instance URL.
+      placeholder: https://zendesk-mcp.fiscaltec.com/mcp
     validations:
       required: true
 
@@ -112,4 +115,4 @@ body:
     id: dependencies
     attributes:
       label: Dependencies
-      description: "Related issues (`#N`) and the relationship, e.g. \"blocked on vitally-mcp#92\". If it depends on unresolved work, use `status: blocked` instead of `status: ready`."
+      description: "Related issues (`#N`) and the relationship, e.g. \"blocked on #12\". If it depends on unresolved work, use `status: blocked` instead of `status: ready`."

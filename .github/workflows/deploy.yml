@@ -1,26 +1,27 @@
 name: Deploy
 
-# Deploys the image to one of the Container Apps targets in `vitally-prod-rg-uksouth`: `production`
-# (the default) or `staging`. The release train calls it twice -- staging, then production with the
-# digest staging was rolled to (vitally-mcp#171). The ACR has public network access
+# Deploys the image to one of the Container Apps targets in `zendesk-prod-rg-uksouth`: `production`
+# (the default, `zendesk-prod-ca-uksouth`) or `staging` (`zendesk-staging-ca-uksouth`). The release
+# train calls it twice -- staging, then production with the digest staging was rolled to (the design
+# comes from vitally-mcp#171). The ACR (`zendeskproducruksouth`) has public network access
 # disabled, so the image cannot be built/pushed to it from a GitHub-hosted runner. Instead we build +
 # push to a private GHCR package, then `az acr import` (server-side, works with public access
 # disabled) pulls it into the private ACR, and `az containerapp update` rolls the app. OIDC auth as
 # the user-assigned managed identity (federated credential subject
-# repo:fiscaltec/vitally-mcp:environment:<target> -- one per target). Callable manually
+# repo:fiscaltec/zendesk-mcp:environment:<target> -- one per target, infra/terraform/identity.tf). Callable manually
 # (workflow_dispatch) or by the release train (workflow_call). On a failed health/smoke check it rolls
 # the Container App back to the previous image.
 #
 # BUILD ONCE, IMPORT BY DIGEST. The build step outputs the GHCR manifest digest, and the import
 # pulls `ghcr…@<digest>` -- never `ghcr…:<tag>` -- into the ACR tag. A caller that already has a
 # digest (the train's production call, passing what staging ran) sets `image_digest`, and the build
-# is skipped entirely. Two reasons, both from vitally-mcp#171:
+# is skipped entirely. Two reasons, both learned in vitally-mcp#171:
 #   * a rebuild of the same ref is not guaranteed byte-identical, so production would ship an image
 #     staging never smoke-tested; and
 #   * `az acr import --force` of a REBUILT image would overwrite the tag staging's revision points
 #     at, and staging (minReplicas 0, referencing a tag) would cold-start into production's rebuild.
 # Within one train run, importing the same digest into the same tag is a no-op on content, so neither
-# can happen. The revision still references the readable tag (`vitally-mcp:v4.7.0`); the digest is
+# can happen. The revision still references the readable tag (`zendesk-mcp:v1.2.0`); the digest is
 # what the tag held AT IMPORT TIME, printed in the job summary. ACR's data plane is unreachable from a
 # hosted runner (public access disabled), so the import IS the verification -- there is no read-back.
 #
@@ -35,10 +36,15 @@ name: Deploy
 # being duplicated per target and left to drift. Adding a target is a GitHub environment plus a
 # federated credential, with no change here.
 #
-# `staging` exists for the Entra migration (vitally-mcp#102/#112): authentication has the largest blast radius in
-# this system, so IdP changes are validated on staging first. Its hostname is deliberately stable --
-# identity-provider identifiers are immutable and must equal the server origin, so an ephemeral one
-# orphans an app registration per run.
+# `staging` is the pre-production target (the pattern is vitally-mcp#112's): authentication and the
+# per-person Zendesk connection have the largest blast radius in this system, so changes to either
+# are validated on staging first. Its hostname is deliberately stable -- the Entra app's redirect URIs
+# and the Zendesk OAuth client's redirect URLs must name it exactly, so an ephemeral one would mean
+# re-registering both per run.
+#
+# FIRST DEPLOY. "Capture current image" below needs the Container App to exist already, so the very
+# first image is imported by hand while the estate is being created -- infra/terraform/README.md,
+# "Apply procedure". From then on Terraform ignores the image and this workflow owns it.
 on:
   workflow_dispatch:
     inputs:

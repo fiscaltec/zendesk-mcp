@@ -1,11 +1,14 @@
 resource "azurerm_container_registry" "acr" {
-  name                          = "vitallyproducruksouth"
-  resource_group_name           = data.azurerm_resource_group.rg.name
+  name                          = var.acr_name
+  resource_group_name           = azurerm_resource_group.rg.name
   location                      = var.location
-  sku                           = "Premium"
+  sku                           = "Premium" # private endpoints and CMK both need Premium
   admin_enabled                 = false
   public_network_access_enabled = false
-  network_rule_bypass_option    = "AzureServices" # lets ACR Tasks (az acr build) work with public off
+  # Trusted Azure services through with public access off, as in the Vitally estate (it keeps ACR
+  # Tasks usable). Images arrive by `az acr import` — deploy.yml, and the first image in the apply
+  # procedure — which runs server-side and needs no data-plane path from the caller.
+  network_rule_bypass_option = "AzureServices"
 
   identity {
     type         = "UserAssigned"
@@ -23,7 +26,7 @@ resource "azurerm_container_registry" "acr" {
 
 resource "azurerm_private_endpoint" "acr" {
   name                = "${var.name_prefix}-pe-acr-uksouth"
-  resource_group_name = data.azurerm_resource_group.rg.name
+  resource_group_name = azurerm_resource_group.rg.name
   location            = var.location
   subnet_id           = azurerm_subnet.pe.id
 

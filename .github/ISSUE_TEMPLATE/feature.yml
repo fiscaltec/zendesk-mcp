@@ -1,5 +1,5 @@
 name: Feature request
-description: Suggest a new tool, capability, or improvement for the Vitally MCP server.
+description: Suggest a new tool, capability, or improvement for the Zendesk MCP server.
 title: "feat: <short description>"
 labels: ["feature", "status: ready"]
 
@@ -7,7 +7,7 @@ body:
   - type: markdown
     attributes:
       value: |
-        Use this template to propose new Vitally tool coverage, new server
+        Use this template to propose new Zendesk tool coverage, new server
         capabilities, or workflow improvements. For bug reports use the
         Bug report template instead.
 
@@ -23,7 +23,7 @@ body:
     id: proposal
     attributes:
       label: Proposal
-      description: How should the feature work? Include the Vitally REST endpoint(s) it would wrap, or the new behaviour in concrete terms.
+      description: How should the feature work? Include the Zendesk API endpoint(s) it would wrap (Support, Help Center, …), or the new behaviour in concrete terms.
     validations:
       required: true
 
@@ -48,7 +48,7 @@ body:
     id: files
     attributes:
       label: Files to create/modify
-      description: Explicit paths. Note any new call path reaching Vitally — it must route through `ZendeskService.SendAsync`, the single RBAC and audit choke point.
+      description: Explicit paths. Note any new call path reaching Zendesk — it must route through `ZendeskService.SendAsync`, the single RBAC and audit choke point.
 
   - type: textarea
     id: claude-md
