@@ -381,7 +381,7 @@ public static class MacrosTools
             }
 
             output["changes"] = sets;
-            output["comment"] = RenderedComment(general["result"]?["comment"], actions);
+            output["comment"] = RenderedComment(AppliedComment(general), actions);
             output["note"] = "No ticket given: placeholders are not filled in and values before the change are unknown.";
             return output.ToJsonString();
         }
@@ -394,7 +394,7 @@ public static class MacrosTools
 
         output["ticket_id"] = ticketId;
         output["changes"] = diff.Changes;
-        output["comment"] = RenderedComment(applied["result"]?["comment"], actions);
+        output["comment"] = RenderedComment(AppliedComment(applied), actions);
         return output.ToJsonString();
     }
 
@@ -464,7 +464,7 @@ public static class MacrosTools
         var diff = MacroTicketDiff.Compute(current, applied["result"]?["ticket"]);
 
         var effectivePublic = @public ?? MacroSupport.CommentPublic(actions) ?? false;
-        var macroComment = applied["result"]?["comment"];
+        var macroComment = AppliedComment(applied);
         var hasComment = comment_html is not null || MacroSupport.CommentHtml(actions) is not null;
         var warnings = new JsonArray();
 
@@ -534,7 +534,8 @@ public static class MacrosTools
             var comment = new JsonObject { ["html_body"] = html, ["public"] = effectivePublic };
 
             // Unverified against the live API: that the apply result carries the macro's attachments as
-            // upload tokens under comment.uploads. When it does, they go out with the comment.
+            // upload tokens under comment.uploads. When it does, they go out with the comment. Not in
+            // Zendesk's documentation, and no macro in the validation account has attachments.
             if (macroComment?["uploads"] is JsonArray uploads && uploads.Count > 0)
             {
                 comment["uploads"] = uploads.DeepClone();
@@ -548,8 +549,9 @@ public static class MacrosTools
         ticketBody["safe_update"] = true;
         ticketBody["updated_stamp"] = current["updated_at"]?.DeepClone();
 
-        // Unverified against the live API: Zendesk documents macro_ids (recording macro use in the
-        // audit) for ticket creation; it is sent on this update in the expectation that it is honoured.
+        // Unverified against the live API (docs-checked, not live-tested): Zendesk documents macro_ids
+        // as a write-only ticket property recorded in the audit, not as a creation-only one; it is sent
+        // on this update in the expectation that it is honoured.
         ticketBody["macro_ids"] = new JsonArray(macro_id);
 
         var response = await zendesk.PutAsync($"/api/v2/tickets/{Id(ticket_id)}", new JsonObject { ["ticket"] = ticketBody }, cancellationToken: cancellationToken);
@@ -653,8 +655,8 @@ public static class MacrosTools
 
         if (comment_public is { } isPublic)
         {
-            // Unverified against the live API: Zendesk's own macros carry this value as the string
-            // "true"/"false"; that form is sent.
+            // Zendesk's own macros carry this value as the string "true"/"false" (confirmed against the
+            // live API); that form is sent.
             built.Add(new JsonObject { ["field"] = MacroSupport.CommentPublicField, ["value"] = isPublic ? "true" : "false" });
         }
 
@@ -663,8 +665,8 @@ public static class MacrosTools
 
         // Idempotency: a macro with this exact title, the same actions and the same access is the one
         // this call would make, so it is returned instead of a duplicate.
-        // Unverified against the live API: /api/v2/macros/search?query= matches on title; only its first
-        // page (up to 100 matches) is checked.
+        // /api/v2/macros/search?query= matches on title only, not comment text (confirmed against the
+        // live API). It is offset-paged, and only its first page is checked.
         var candidates = await zendesk.GetAsync("/api/v2/macros/search", ToolJson.Query(("query", trimmedTitle)), cancellationToken: cancellationToken);
         var fingerprint = MacroSupport.ActionsFingerprint(built);
         var restrictionKey = RestrictionKey(restriction);
@@ -965,7 +967,8 @@ public static class MacrosTools
         var toChange = ids.Where(id => byId.TryGetValue(id, out var m) && MacroSupport.ParseBool(m["active"]) != active).ToList();
         if (toChange.Count > 0)
         {
-            // Unverified against the live API: that update_many answers synchronously rather than with a job.
+            // Unverified against the live API (docs-checked, not live-tested): Zendesk documents update_many
+            // as answering 200 with the updated macros, synchronously rather than with a job.
             var body = new JsonObject
             {
                 ["macros"] = new JsonArray(toChange.Select(id => (JsonNode)new JsonObject { ["id"] = id, ["active"] = active }).ToArray()),
@@ -1040,6 +1043,14 @@ public static class MacrosTools
         shaped["comment_html"] = MacroSupport.CommentHtml(MacroSupport.Actions(macro));
         return shaped;
     }
+
+    /// <summary>
+    /// The rendered comment in an apply result. Live it sits inside the ticket
+    /// (<c>result.ticket.comment {body, html_body, public: "true"|"false"}</c>); a top-level
+    /// <c>result.comment</c> is accepted too.
+    /// </summary>
+    private static JsonNode? AppliedComment(JsonNode applied) =>
+        applied["result"]?["comment"] ?? applied["result"]?["ticket"]?["comment"];
 
     private static JsonObject? RenderedComment(JsonNode? comment, JsonArray actions)
     {

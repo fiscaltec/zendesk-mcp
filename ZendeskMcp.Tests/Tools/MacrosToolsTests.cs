@@ -231,8 +231,8 @@ public class MacrosToolsTests
         """;
 
     private const string ApplyResult = """
-        {"result":{"ticket":{"id":42,"status":"solved","tags":["a","refund"],"group_id":77,"custom_fields":[{"id":900,"value":"refunded"}]},
-                   "comment":{"body":"Hi Ann, refunded.","html_body":"<p>Hi Ann, refunded.</p>","public":true}}}
+        {"result":{"ticket":{"id":42,"status":"solved","tags":["a","refund"],"group_id":77,"custom_fields":[{"id":900,"value":"refunded"}],
+                   "comment":{"body":"Hi Ann, refunded.","html_body":"<p>Hi Ann, refunded.</p>","public":"true"}}}}
         """;
 
     private static string ReplyMacro(bool active = true, string extra = "") =>
@@ -271,14 +271,14 @@ public class MacrosToolsTests
         var (fake, zendesk) = Build(r => r.Path switch
         {
             "/api/v2/macros/10" => FakeResponse.Json(ReplyMacro()),
-            "/api/v2/macros/10/apply" => FakeResponse.Json("""{"result":{"ticket":{"status":"solved"},"comment":{"body":"Hi {{ticket.requester.first_name}}"}}}"""),
+            "/api/v2/macros/10/apply" => FakeResponse.Json("""{"result":{"ticket":{"status":"solved","comment":{"body":"Hi {{ticket.requester.first_name}}","html_body":"<p>Hi {{ticket.requester.first_name}}</p>","public":"false"}}}}"""),
             _ => FakeResponse.NotFound(),
         });
         using var _ = fake;
 
         var result = Parse(await MacrosTools.PreviewMacro(zendesk, macro_id: 10));
 
-        result["changes"]![0]!["field"]!.GetValue<string>().Should().Be("status");
+        result["changes"]!.AsArray().Should().ContainSingle("the rendered comment is not a field change").Which!["field"]!.GetValue<string>().Should().Be("status");
         result["comment"]!["body"]!.GetValue<string>().Should().Contain("{{ticket.requester.first_name}}");
         result["note"].Should().NotBeNull();
     }

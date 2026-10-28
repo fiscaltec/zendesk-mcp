@@ -8,11 +8,13 @@ namespace ZendeskMcp.Tools;
 /// <c>…/macros/{id}/apply</c>), for Preview_macro's change list and Apply_macro's update body.
 /// </summary>
 /// <remarks>
-/// Unverified against the live API: exactly which keys the apply result's ticket carries. It is read
-/// tolerantly — scalar fields, <c>tags</c> (the full new list) or <c>additional_tags</c>/<c>remove_tags</c>,
-/// <c>custom_fields</c> or <c>fields</c> as <c>[{id, value}]</c>, and <c>email_cc_ids</c>,
-/// <c>follower_ids</c> and <c>collaborator_ids</c> — and only fields that differ from the current
-/// ticket are written back, so a full ticket echoed back changes nothing it does not mean to.
+/// Confirmed against the live API: for a ticket, the apply result's ticket is the whole ticket as the
+/// macro would leave it (scalar fields, <c>tags</c> as the full new list, <c>custom_fields</c> and
+/// <c>fields</c> as <c>[{id, value}]</c>, <c>email_cc_ids</c>, <c>follower_ids</c>,
+/// <c>collaborator_ids</c>) plus the rendered <c>comment</c>; without a ticket it carries only the keys
+/// the macro sets. It is still read tolerantly (<c>additional_tags</c>/<c>remove_tags</c> are accepted),
+/// and only fields that differ from the current ticket are written back, so the full ticket echoed back
+/// changes nothing it does not mean to.
 /// </remarks>
 public static class MacroTicketDiff
 {
