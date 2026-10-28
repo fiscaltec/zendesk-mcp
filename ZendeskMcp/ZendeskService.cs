@@ -15,7 +15,7 @@ namespace ZendeskMcp;
 /// (<see cref="ZendeskCredentialProvider"/>), and recorded in the audit trail with the record ids it
 /// returned. Tools build requests and shape results; they never talk to Zendesk any other way.
 /// </summary>
-public class ZendeskService
+public partial class ZendeskService
 {
     private readonly HttpClient _httpClient;
     private readonly ZendeskServerOptions _options;
@@ -522,6 +522,8 @@ public class ZendeskService
     // own {subdomain}.zendesk.com maps to itself, and its host mapping maps to that same
     // {subdomain}.zendesk.com. Only *.zendesk.com hosts are ever credential destinations. Cached for ten
     // minutes across callers, because the list is account configuration rather than anything personal.
+    // Live, a brand with a host mapping reports that mapped host as its brand_url, so the Zendesk host
+    // comes from the brand's subdomain, and brand_url is only an alias for it.
     private async Task<Dictionary<string, string>> GetBrandHostsAsync(CancellationToken cancellationToken)
     {
         const string cacheKey = "zendesk-brand-hosts";
@@ -535,24 +537,35 @@ public class ZendeskService
         foreach (var brand in brands.Items)
         {
             var brandUrl = brand?["brand_url"] is JsonValue v && v.TryGetValue<string>(out var u) ? u : null;
-            if (string.IsNullOrWhiteSpace(brandUrl)
-                || !Uri.TryCreate(brandUrl, UriKind.Absolute, out var parsed)
-                || !parsed.Host.EndsWith(".zendesk.com", StringComparison.OrdinalIgnoreCase))
+            var brandHost = Uri.TryCreate(brandUrl, UriKind.Absolute, out var parsed) ? parsed.Host : null;
+            var subdomain = brand?["subdomain"] is JsonValue s && s.TryGetValue<string>(out var sub) ? sub : null;
+            var zendeskHost = subdomain is not null && SubdomainPattern().IsMatch(subdomain)
+                ? $"{subdomain}.zendesk.com"
+                : brandHost is not null && brandHost.EndsWith(".zendesk.com", StringComparison.OrdinalIgnoreCase) ? brandHost : null;
+            if (zendeskHost is null)
             {
                 continue;
             }
 
-            hosts[parsed.Host] = parsed.Host;
+            hosts[zendeskHost] = zendeskHost;
+            if (brandHost is not null)
+            {
+                hosts[brandHost] = zendeskHost;
+            }
+
             var mapping = brand?["host_mapping"] is JsonValue m && m.TryGetValue<string>(out var mapped) ? mapped : null;
             if (!string.IsNullOrWhiteSpace(mapping))
             {
-                hosts[mapping.Trim()] = parsed.Host;
+                hosts[mapping.Trim()] = zendeskHost;
             }
         }
 
         _cache?.Set(cacheKey, hosts, TimeSpan.FromMinutes(10));
         return hosts;
     }
+
+    [System.Text.RegularExpressions.GeneratedRegex("^[a-z0-9][a-z0-9-]{0,62}$", System.Text.RegularExpressions.RegexOptions.CultureInvariant)]
+    private static partial System.Text.RegularExpressions.Regex SubdomainPattern();
 
     // The first path segments this code builds, and so the only ones safe to put on the console.
     private static readonly HashSet<string> KnownResourceTypes = new(StringComparer.Ordinal)

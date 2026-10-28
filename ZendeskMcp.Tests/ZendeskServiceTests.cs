@@ -141,6 +141,41 @@ public class ZendeskServiceTests
             "a host mapping can name any domain; only hosts Zendesk controls receive the token");
     }
 
+    // The live shape: a brand with a host mapping reports the mapped host as its brand_url.
+    private const string MappedBrandsJson = """
+        {"brands":[{"id":1,"name":"Main","subdomain":"acme","brand_url":"https://help.acme.example","host_mapping":"help.acme.example"}],"meta":{"has_more":false}}
+        """;
+
+    [Fact]
+    public async Task ABrandUrl_ThatIsItsHostMapping_IsTranslatedToTheSubdomainHost()
+    {
+        using var zendesk = TestHelpers.CreateFakeZendesk(r => r.Path == "/api/v2/brands"
+            ? FakeResponse.Json(MappedBrandsJson)
+            : FakeResponse.Json("{\"articles\":[]}"));
+        var service = TestHelpers.BuildZendeskService(zendesk.Client);
+
+        await service.GetAsync("/api/v2/help_center/articles", brandUrl: "https://help.acme.example");
+
+        zendesk.Requests.Last().Url.Host.Should().Be("acme.zendesk.com");
+        zendesk.Requests.Should().NotContain(r => r.Url.Host == "help.acme.example");
+    }
+
+    [Fact]
+    public async Task ADownload_FromAMappedHelpCenterHost_GoesToTheSubdomainHost()
+    {
+        using var zendesk = TestHelpers.CreateFakeZendesk(r => r.Path == "/api/v2/brands"
+            ? FakeResponse.Json(MappedBrandsJson)
+            : new FakeResponse(HttpStatusCode.OK, "png", ContentType: "image/png"));
+        var service = TestHelpers.BuildZendeskService(zendesk.Client);
+
+        await service.DownloadAsync("https://help.acme.example/hc/article_attachments/1/x.png");
+
+        var file = zendesk.Requests.Last();
+        file.Url.GetLeftPart(UriPartial.Path).Should().Be("https://acme.zendesk.com/hc/article_attachments/1/x.png");
+        file.Headers.Should().ContainKey("Authorization");
+        zendesk.Requests.Should().NotContain(r => r.Url.Host == "help.acme.example");
+    }
+
     [Fact]
     public async Task ABrandWhoseUrlIsNotAZendeskHost_IsNotACredentialDestination()
     {

@@ -1,6 +1,8 @@
 using System.ComponentModel;
+using System.Globalization;
 using System.Net;
 using System.Text.Json.Nodes;
+using System.Text.RegularExpressions;
 using Microsoft.AspNetCore.Authorization;
 using ModelContextProtocol.Server;
 
@@ -12,11 +14,13 @@ namespace ZendeskMcp.Tools;
 /// this account's own brands — the base URL decides where the agent's Zendesk token is sent.
 /// </summary>
 [McpServerToolType]
-public static class HelpCenterArticlesTools
+public static partial class HelpCenterArticlesTools
 {
+    private const int MaxSearchPageSize = 50;
+
     [Authorize(Policy = "zendesk:read")]
     [McpServerTool(Name = "Search_help_center_articles", Title = "Search Help Center articles", ReadOnly = true, Destructive = false, Idempotent = true, OpenWorld = false), Description(
-        "Search Help Center articles using Zendesk's Unified Search API. Returns matching articles with id, title, locale, html_url, brand_url, updated_at and a snippet when Zendesk provides one. Supports filtering by locale, brand, category and section. " +
+        "Search Help Center articles using Zendesk's Unified Search API. Returns matching articles with id, title, locale, html_url, brand_url and updated_at. Supports filtering by locale, brand, category and section. " +
         "This tool does NOT return the article body, nor who can view each article: for an article's audience (user_segment_ids) use Get_help_center_article, or Export_help_center_articles for a whole section. " +
         "For multi-brand accounts, pass each result's brand_url to Get_help_center_article / Export_help_center_articles to fetch articles from non-default brands. " +
         "Results are paginated: when pagination_info.has_more is true, call again with after_cursor set to pagination_info.next_cursor.")]
@@ -27,18 +31,23 @@ public static class HelpCenterArticlesTools
         [Description("Comma-separated brand ids to limit the search to (e.g. '123,456'). If omitted, all brands are searched.")] string? brand_ids = null,
         [Description("Comma-separated category ids to limit the search to (e.g. '789,012').")] string? category_ids = null,
         [Description("Comma-separated section ids to limit the search to (e.g. '345,678').")] string? section_ids = null,
-        [Description("Results per page (1-100, default 100).")] int? page_size = null,
+        [Description("Results per page (1-50, default 50).")] int? page_size = null,
         [Description("Cursor for the next page: pagination_info.next_cursor from a previous Search_help_center_articles response.")] string? after_cursor = null,
         CancellationToken cancellationToken = default)
     {
         var localeList = HelpCenterJson.LocaleList(locales, "locales");
         HelpCenterJson.Text(query, "query", 500);
-        var pageSize = ToolJson.PageSize(page_size);
+        // Unified Search refuses a page size above 50 ("expected integer less than or equal to 50").
+        var pageSize = ToolJson.PageSize(page_size, MaxSearchPageSize);
+        if (pageSize > MaxSearchPageSize)
+        {
+            throw new ArgumentException($"page_size must be between 1 and {MaxSearchPageSize} (got {pageSize}).");
+        }
 
-        // Unverified against the live API: the filter parameter names, that filter[locales] and the id
-        // filters take comma-separated lists, and the result field names (title, locale, html_url,
-        // updated_at, snippet). The Unified Search API is the one documented for cross-brand article
-        // search with cursor pagination.
+        // Confirmed against the live API: filter[locales] is required, and it and the brand, category
+        // and section filters take comma-separated lists. Each result carries only title, type
+        // ('ARTICLE'), updated_at and url (the article's Help Center page), so id, locale, html_url and
+        // brand_url are read from that url.
         var request = HelpCenterJson.PageQuery(pageSize, after_cursor,
             ("filter[locales]", localeList),
             ("query", string.IsNullOrWhiteSpace(query) ? null : query.Trim()),
@@ -59,8 +68,17 @@ public static class HelpCenterArticlesTools
                 continue;
             }
 
-            var shaped = ToolJson.Pick(item, "id", "title", "locale", "html_url", "updated_at", "snippet");
-            shaped["brand_url"] = BrandUrlOf(item);
+            var htmlUrl = ToolJson.String(item?["html_url"]) ?? ToolJson.String(item?["url"]);
+            var (id, locale) = ArticleUrlParts(htmlUrl);
+            var shaped = new JsonObject
+            {
+                ["id"] = item?["id"]?.DeepClone() ?? (id is { } articleId ? JsonValue.Create(articleId) : null),
+                ["title"] = item?["title"]?.DeepClone(),
+                ["locale"] = item?["locale"]?.DeepClone() ?? (locale is null ? null : JsonValue.Create(locale)),
+                ["html_url"] = htmlUrl,
+                ["updated_at"] = item?["updated_at"]?.DeepClone(),
+                ["brand_url"] = BrandUrlOf(item, htmlUrl),
+            };
             results.Add(shaped);
         }
 
@@ -91,7 +109,7 @@ public static class HelpCenterArticlesTools
         var id = HelpCenterJson.Id(article_id);
 
         // Unverified against the live API: that the locale-less path answers in the Help Center's
-        // default locale.
+        // default locale. The validation account's Help Center has one locale, so it could not tell.
         var response = await zendesk.GetAsync($"{HelpCenterJson.Root(validLocale)}/articles/{id}", brandUrl: brand_url, cancellationToken: cancellationToken);
         var article = response["article"] ?? throw new HttpRequestException($"Zendesk returned no article for id {article_id}.");
         var result = HelpCenterJson.Article(article, includeBody: true);
@@ -127,8 +145,7 @@ public static class HelpCenterArticlesTools
         JsonArray? translations = null;
         if (all)
         {
-            // Unverified against the live API: that the translations list follows cursor pagination;
-            // if it does not, the first page (Zendesk's default size) is what comes back.
+            // The translations list follows cursor pagination (confirmed against the live API).
             var pages = await zendesk.GetAllPagesAsync($"/api/v2/help_center/articles/{id}/translations", null, "translations", maxItems: 500, brandUrl: brand_url, cancellationToken: cancellationToken);
             translations = [];
             foreach (var translation in pages.Items)
@@ -366,7 +383,7 @@ public static class HelpCenterArticlesTools
     // A search result's brand base URL, so it can be passed straight back as brand_url. Unverified
     // against the live API: whether results carry brand_url themselves; otherwise the origin of the
     // article's html_url is the brand's Help Center host (its subdomain or host mapping).
-    private static string? BrandUrlOf(JsonNode? item)
+    private static string? BrandUrlOf(JsonNode? item, string? htmlUrl)
     {
         var explicitUrl = ToolJson.String(item?["brand_url"]);
         if (!string.IsNullOrWhiteSpace(explicitUrl))
@@ -374,10 +391,27 @@ public static class HelpCenterArticlesTools
             return explicitUrl;
         }
 
-        return Uri.TryCreate(ToolJson.String(item?["html_url"]), UriKind.Absolute, out var uri) && uri.Scheme == Uri.UriSchemeHttps
+        return Uri.TryCreate(htmlUrl, UriKind.Absolute, out var uri) && uri.Scheme == Uri.UriSchemeHttps
             ? $"https://{uri.Host}"
             : null;
     }
+
+    /// <summary>The article id and locale in a Help Center article URL (<c>…/hc/{locale}/articles/{id}-{slug}</c>).</summary>
+    private static (long? Id, string? Locale) ArticleUrlParts(string? url)
+    {
+        if (!Uri.TryCreate(url, UriKind.Absolute, out var uri))
+        {
+            return (null, null);
+        }
+
+        var match = ArticlePath().Match(uri.AbsolutePath);
+        return match.Success && long.TryParse(match.Groups["id"].Value, NumberStyles.None, CultureInfo.InvariantCulture, out var id)
+            ? (id, match.Groups["locale"].Value)
+            : (null, null);
+    }
+
+    [GeneratedRegex(@"/hc/(?<locale>[A-Za-z]{2,3}(?:-[A-Za-z0-9]{2,8})*)/articles/(?<id>[0-9]+)(?:-|/|$)", RegexOptions.CultureInvariant)]
+    private static partial Regex ArticlePath();
 
     private static JsonArray? Labels(string[]? labels)
     {

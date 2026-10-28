@@ -46,8 +46,8 @@ public class HelpCenterArticlesToolsTests
         using var fake = TestHelpers.CreateFakeZendesk(_ => FakeResponse.Json("""
         {
           "results": [
-            { "id": 42, "type": "article", "title": "Reset", "locale": "en-gb", "html_url": "https://support.other.example/hc/en-gb/articles/42", "updated_at": "2026-01-01T00:00:00Z", "snippet": "…reset…", "body": "<p>secret</p>" },
-            { "id": 99, "type": "post", "title": "Community post" }
+            { "title": "Reset", "type": "ARTICLE", "updated_at": "2026-01-01T00:00:00Z", "url": "https://support.other.example/hc/en-gb/articles/42-Reset-your-password", "body": "<p>secret</p>" },
+            { "title": "Community post", "type": "POST", "url": "https://support.other.example/hc/en-gb/community/posts/99-Community-post" }
           ],
           "meta": { "has_more": true, "after_cursor": "abc" }
         }
@@ -69,8 +69,11 @@ public class HelpCenterArticlesToolsTests
 
         var articles = json["articles"]!.AsArray();
         articles.Should().ContainSingle();
+        // The live result carries only title, type, updated_at and url; the rest is read from the url.
+        articles[0]!["id"]!.GetValue<long>().Should().Be(42);
+        articles[0]!["locale"]!.GetValue<string>().Should().Be("en-gb");
+        articles[0]!["html_url"]!.GetValue<string>().Should().Be("https://support.other.example/hc/en-gb/articles/42-Reset-your-password");
         articles[0]!["brand_url"]!.GetValue<string>().Should().Be("https://support.other.example");
-        articles[0]!["snippet"]!.GetValue<string>().Should().Be("…reset…");
         articles[0]!.AsObject().ContainsKey("body").Should().BeFalse("search never returns the body");
         json["pagination_info"]!["has_more"]!.GetValue<bool>().Should().BeTrue();
         json["pagination_info"]!["next_cursor"]!.GetValue<string>().Should().Be("abc");
@@ -82,6 +85,7 @@ public class HelpCenterArticlesToolsTests
     [InlineData("en-gb", "1,abc", null)]
     [InlineData("not a locale", null, null)]
     [InlineData("en-gb", null, 0)]
+    [InlineData("en-gb", null, 51)]
     public async Task Search_RejectsInvalidInputWithoutCallingZendesk(string locales, string? brandIds, int? pageSize)
     {
         using var fake = TestHelpers.CreateFakeZendesk(_ => FakeResponse.Json("{}"));

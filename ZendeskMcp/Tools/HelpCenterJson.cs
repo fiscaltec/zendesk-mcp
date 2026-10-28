@@ -148,8 +148,8 @@ public static partial class HelpCenterJson
     /// <remarks>
     /// Zendesk added <c>user_segment_ids</c> to articles when an article could be given several segments;
     /// <c>user_segment_id</c> remains and shows at most one. Prefer the list, and fall back to the
-    /// single id for an account or response that predates it.
-    /// Unverified against the live API: that every article response carries <c>user_segment_ids</c>.
+    /// single id for an account or response that predates it. Live, the validation account's article
+    /// responses carry only <c>user_segment_id</c> (none of 100 had the list), so the fallback is needed.
     /// </remarks>
     public static JsonArray UserSegmentIds(JsonNode? article)
     {
