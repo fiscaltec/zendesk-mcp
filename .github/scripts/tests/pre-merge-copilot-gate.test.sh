@@ -99,6 +99,10 @@ new_case; expect_deny "another repo" "gh api -X PUT repos/other/widget/pulls/7/m
 new_case; expect_deny "--hostname" "$REST --hostname example.com" "cross-repo or cross-host"
 new_case; expect_deny "--input body" "gh api -X PUT repos/{owner}/{repo}/pulls/7/merge --input body.json" "--input"
 new_case; expect_deny "GraphQL merge mutation" "gh api graphql -f query=mutation{mergePullRequest}" "GraphQL mutation"
+new_case; expect_deny "GraphQL query from a file" "gh api graphql -F query=@merge.graphql -F id=PR_x" "from a file"
+new_case; expect_deny "GraphQL body from --input" "gh api graphql --input merge.json" "from a file"
+new_case; expect_allow "inline GraphQL read (not a merge)" "gh api graphql -f query={viewer{login}}"
+new_case; expect_allow "REST read with an @ in a field" "gh api repos/acme/widget/issues -f body=see@example.com"
 
 # --- the pin --------------------------------------------------------------------------------------
 new_case; expect_deny "REST merge without sha" "gh api -X PUT repos/{owner}/{repo}/pulls/7/merge -f merge_method=squash" "add -f sha=$HEAD_SHA"

@@ -166,7 +166,14 @@ public static class ZendeskUploadEndpoints
                 var result = await zendesk.PostBinaryAsync("/api/v2/uploads", query,
                     new ArraySegment<byte>(buffer.GetBuffer(), 0, (int)total), "application/binary", ctx.RequestAborted);
                 var uploadNode = result["upload"];
-                var attachment = uploadNode?["attachment"];
+                if (uploadNode?["token"] is null)
+                {
+                    // A 2xx without a token would read as success and hand back nothing to attach.
+                    return Results.Json(new { error = "Zendesk accepted the upload but returned no upload token; request a new slot and try again." },
+                        statusCode: StatusCodes.Status502BadGateway);
+                }
+
+                var attachment = uploadNode["attachment"];
                 return Results.Json(new JsonObject
                 {
                     ["upload_token"] = uploadNode?["token"]?.DeepClone(),

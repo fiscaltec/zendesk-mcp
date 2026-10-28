@@ -425,13 +425,28 @@ public sealed class HelpCenterArticlesToolsTests : IDisposable
 
         var json = JsonNode.Parse(await HelpCenterArticlesTools.UpdateArticleTranslation(zendesk, 42, "fr", title: "T", body: "<p>x</p>"))!;
 
-        var put = fake.Requests.Single();
+        var put = fake.Requests.Single(r => r.Method == HttpMethod.Put);
         put.Path.Should().Be("/api/v2/help_center/articles/42/translations/fr");
         var translation = JsonNode.Parse(put.Body!)!["translation"]!.AsObject();
         translation["title"]!.GetValue<string>().Should().Be("T");
         translation["body"]!.GetValue<string>().Should().Be("<p>x</p>");
         translation["draft"]!.GetValue<bool>().Should().BeTrue();
         json["created"]!.GetValue<bool>().Should().BeFalse();
+    }
+
+    [Fact]
+    public async Task UpdateTranslation_DraftOverAPublishedTranslation_NeedsThePublishingSwitch()
+    {
+        // Saving a draft over a live translation unpublishes it from the public Help Center.
+        using var fake = TestHelpers.CreateFakeZendesk(r => r.Method == HttpMethod.Get
+            ? FakeResponse.Json("""{"translation":{"id":1,"locale":"fr","title":"Live","draft":false}}""")
+            : FakeResponse.Json("""{"translation":{"id":1,"locale":"fr","title":"T","draft":true}}"""));
+        var zendesk = TestHelpers.BuildZendeskService(fake.Client);
+
+        var act = () => HelpCenterArticlesTools.UpdateArticleTranslation(zendesk, 42, "fr", title: "T");
+
+        await act.Should().ThrowAsync<UnauthorizedAccessException>().WithMessage("*AllowArticlePublishing*");
+        fake.Requests.Should().OnlyContain(r => r.Method == HttpMethod.Get);
     }
 
     [Fact]

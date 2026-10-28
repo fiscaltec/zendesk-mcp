@@ -232,8 +232,12 @@ public sealed class ZendeskCredentialProvider(
         return await connectLinks.CreateAsync(objectId, CallerIdentity.TryGetSignInName(User), PublicBaseUrl(), cancellationToken);
     }
 
-    /// <summary>Revokes the caller's grant at Zendesk and forgets it. Returns false when there was nothing to remove.</summary>
-    public async Task<bool> DisconnectAsync(CancellationToken cancellationToken = default)
+    /// <summary>
+    /// Revokes the caller's grant at Zendesk and forgets it here. An expired access token is
+    /// refreshed first, because Zendesk answers 401 to revoking an expired token — which would read
+    /// as success while the refresh token, and so the grant, stayed live.
+    /// </summary>
+    public async Task<DisconnectOutcome> DisconnectAsync(CancellationToken cancellationToken = default)
     {
         var objectId = RequireObjectId();
 
@@ -246,12 +250,26 @@ public sealed class ZendeskCredentialProvider(
             var token = await store.GetAsync(objectId, cancellationToken);
             if (token is null)
             {
-                return false;
+                return DisconnectOutcome.NotConnected;
             }
 
-            await oauthClient.RevokeAsync(token.AccessToken, cancellationToken);
+            if (token.ExpiresAt is { } expiresAt && expiresAt <= _time.GetUtcNow() && !string.IsNullOrWhiteSpace(token.RefreshToken))
+            {
+                try
+                {
+                    token = await RefreshHeldAsync(objectId, token, cancellationToken);
+                }
+                catch (ZendeskConnectionRequiredException)
+                {
+                    // Zendesk refused the refresh token: the grant is already dead there, and the
+                    // refresh path has forgotten it here.
+                    return DisconnectOutcome.Disconnected;
+                }
+            }
+
+            var revoked = await oauthClient.RevokeAsync(token.AccessToken, cancellationToken);
             await store.RemoveAsync(objectId, cancellationToken);
-            return true;
+            return revoked ? DisconnectOutcome.Disconnected : DisconnectOutcome.ForgottenButNotRevoked;
         }
         finally
         {
@@ -295,4 +313,17 @@ public sealed class ZendeskCredentialProvider(
         var request = httpContextAccessor?.HttpContext?.Request;
         return request is null ? string.Empty : $"{request.Scheme}://{request.Host}";
     }
+}
+
+/// <summary>What <see cref="ZendeskCredentialProvider.DisconnectAsync"/> achieved.</summary>
+public enum DisconnectOutcome
+{
+    /// <summary>There was no stored grant.</summary>
+    NotConnected,
+
+    /// <summary>Revoked at Zendesk (or already dead there) and forgotten here.</summary>
+    Disconnected,
+
+    /// <summary>Forgotten here, but Zendesk did not confirm the revocation: the grant may still be live there.</summary>
+    ForgottenButNotRevoked,
 }

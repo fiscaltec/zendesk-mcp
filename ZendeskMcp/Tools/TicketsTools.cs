@@ -367,6 +367,7 @@ public static class TicketsTools
             ["channel"] = channel,
         };
 
+        string? logFallback = null;
         if (channel is not null && TicketConversationHelpers.MessagingChannels.Contains(channel))
         {
             try
@@ -388,9 +389,14 @@ public static class TicketsTools
                     return result.ToJsonString();
                 }
             }
-            catch (HttpRequestException)
+            catch (HttpRequestException ex)
             {
-                // No log for this ticket (or not on this plan): the comments are the record.
+                // No log for this ticket, or none on this plan (404/403): the comments are the record.
+                // Anything else is a failure, not an absence, so the fallback says so.
+                if (ex.StatusCode is not (System.Net.HttpStatusCode.NotFound or System.Net.HttpStatusCode.Forbidden))
+                {
+                    logFallback = "The messaging conversation log could not be read, so this is the ticket's comment record, which can miss messaging content. Try again to read the full log.";
+                }
             }
         }
 
@@ -408,6 +414,11 @@ public static class TicketsTools
         }
 
         result["source"] = "comments";
+        if (logFallback is not null)
+        {
+            result["source_note"] = logFallback;
+        }
+
         result["entry_count"] = entries.Count;
         result["entries"] = entries;
         if (comments.HasMore)
@@ -762,15 +773,18 @@ public static class TicketsTools
             var incidents = await zendesk.GetAllPagesAsync($"/api/v2/tickets/{Id(ticket_id)}/incidents", null, "tickets",
                 maxItems: 1000, cancellationToken: cancellationToken);
             var unsolved = incidents.Items.Count(i => ToolJson.String(i["status"]) is not ("solved" or "closed"));
-            if (unsolved > 0 && solve_incidents != true)
+
+            // A list cut short says nothing about the incidents past the cut, so it is never read as
+            // "none unsolved": confirmation is required whenever the read was incomplete.
+            if ((unsolved > 0 || incidents.HasMore) && solve_incidents != true)
             {
                 throw new ArgumentException(
                     $"Ticket {ticket_id} is a problem ticket with {unsolved}{(incidents.HasMore ? " or more" : string.Empty)} unsolved linked incident(s). Solving it also solves every linked incident and copies the solving comment to each of them (publicly, emailing their requesters, if the comment is public). Confirm with the person, then call again with solve_incidents: true.");
             }
 
-            if (unsolved > 0)
+            if (unsolved > 0 || incidents.HasMore)
             {
-                warnings.Add($"Solving this problem ticket also solves its {unsolved} unsolved linked incident(s).");
+                warnings.Add($"Solving this problem ticket also solves its {unsolved}{(incidents.HasMore ? " or more" : string.Empty)} unsolved linked incident(s).");
             }
         }
 

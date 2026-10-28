@@ -56,6 +56,10 @@ elif [[ "$cmd" =~ (^|[[:space:]])gh[[:space:]]+api([[:space:]]|$) ]]; then
 	# A GraphQL merge mutation is a merge by another route: refuse it rather than parse it.
 	[[ "$cmd" =~ (mergePullRequest|enablePullRequestAutoMerge) ]] \
 		&& deny "merging through a GraphQL mutation is not gated; use the REST form: gh api -X PUT repos/{owner}/{repo}/pulls/<n>/merge -f merge_method=squash -f sha=<head> (failing closed)"
+	# A GraphQL query read from a file (-F query=@file) or a body (--input) is invisible here, so
+	# it could carry that mutation unseen: refuse it rather than allow what cannot be read.
+	[[ "$cmd" =~ (^|[[:space:]])graphql([[:space:]]|$) ]] && [[ "$cmd" =~ (=@|[[:space:]]--input([[:space:]=]|$)) ]] \
+		&& deny "a GraphQL request whose query comes from a file or --input cannot be checked for a merge mutation; pass the query inline (failing closed)"
 	[[ "$cmd" =~ pulls/[^[:space:]]*/merge ]] && form="rest-merge"
 fi
 [ -n "$form" ] || allow

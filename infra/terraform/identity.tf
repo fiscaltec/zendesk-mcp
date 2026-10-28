@@ -34,7 +34,7 @@ resource "azurerm_role_assignment" "mi_kv_secrets_officer" {
 }
 
 # Runtime: pull the container image from the shared registry (acr.tf). AcrPull is registry-wide, so
-# this also reads Vitally's images; reading them is not the risk — the Contributor grant below is.
+# this also reads Vitally's images; reading them is not the risk — the import grant below is.
 resource "azurerm_role_assignment" "mi_acr_pull" {
   scope                = data.azurerm_container_registry.acr.id
   role_definition_name = "AcrPull"
@@ -88,15 +88,32 @@ resource "azurerm_federated_identity_credential" "github_actions_staging" {
 }
 
 # Deploy: `az acr import` the built image into the private ACR. AcrPush does NOT include the
-# importImage action, so the deploy identity needs Contributor on the registry.
+# importImage action, and built-in Contributor would also let this identity delete or reconfigure the
+# registry — which is the Vitally estate's (acr.tf). So a custom role grants exactly what the import
+# needs: read the registry, and trigger an import. Scoped to that one registry.
 #
-# ⚠️ The registry is SHARED with the Vitally MCP estate, so this is Contributor over Vitally's images
-# too — see acr.tf for what that exposes and why it was accepted. Creating it needs the applying
-# principal to be able to assign roles on the Vitally estate's registry.
-resource "azurerm_role_assignment" "mi_acr_contributor" {
-  scope                = data.azurerm_container_registry.acr.id
-  role_definition_name = "Contributor"
-  principal_id         = azurerm_user_assigned_identity.app.principal_id
+# ⚠️ What remains: an import with --force can still overwrite any tag in the shared registry,
+# Vitally's included (acr.tf). Creating this role and assignment needs the applying principal to
+# hold role-administration rights over the Vitally estate's registry.
+resource "azurerm_role_definition" "acr_importer" {
+  name        = "Zendesk MCP ACR importer"
+  scope       = data.azurerm_container_registry.acr.id
+  description = "Import images into the shared registry (az acr import) and nothing else. Assigned to the Zendesk MCP identity."
+
+  permissions {
+    actions = [
+      "Microsoft.ContainerRegistry/registries/read",
+      "Microsoft.ContainerRegistry/registries/importImage/action",
+    ]
+  }
+
+  assignable_scopes = [data.azurerm_container_registry.acr.id]
+}
+
+resource "azurerm_role_assignment" "mi_acr_importer" {
+  scope              = data.azurerm_container_registry.acr.id
+  role_definition_id = azurerm_role_definition.acr_importer.role_definition_resource_id
+  principal_id       = azurerm_user_assigned_identity.app.principal_id
 }
 
 # Deploy: roll the Container App to the new revision (`az containerapp update`).

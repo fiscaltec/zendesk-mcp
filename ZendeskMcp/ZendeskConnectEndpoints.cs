@@ -117,7 +117,7 @@ public static class ZendeskConnectEndpoints
             {
                 identity = await oauthClient.GetIdentityAsync(token.AccessToken, ctx.RequestAborted);
             }
-            catch (Exception ex) when (ex is ZendeskOAuthException or HttpRequestException or System.Text.Json.JsonException)
+            catch (Exception ex) when (ex is not OperationCanceledException)
             {
                 // A token whose owner could not be checked is never stored, and is revoked straight
                 // away like a refused one, rather than left live at Zendesk.
@@ -141,13 +141,32 @@ public static class ZendeskConnectEndpoints
             // cannot land after this and overwrite the new connection with the old one renewed.
             var gate = ZendeskCredentialProvider.LockFor(attempt.ObjectId);
             await gate.WaitAsync(ctx.RequestAborted);
+            ZendeskUserToken? replaced;
             try
             {
+                replaced = await store.GetAsync(attempt.ObjectId, ctx.RequestAborted);
                 await store.SaveAsync(attempt.ObjectId, oauthClient.ToUserToken(token, identity), ctx.RequestAborted);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                // Not persisted, so not kept: revoke it rather than leave a live grant nobody holds.
+                // (The store cached it before the write failed; revoked, a call with it meets a 401
+                // and is handed a fresh connect link.)
+                await oauthClient.RevokeAsync(token.AccessToken, ctx.RequestAborted);
+                logger.LogError("Could not store the Zendesk connection for {UserObjectId} ({FailureType}); the new grant was revoked",
+                    attempt.ObjectId, ex.GetType().Name);
+                return Page(StatusCodes.Status503ServiceUnavailable, "Connection not completed",
+                    "Your Zendesk account could not be saved. Open your connect link again in a few minutes.");
             }
             finally
             {
                 gate.Release();
+            }
+
+            // A reconnect replaces the previous grant; revoke it so it does not stay live at Zendesk.
+            if (replaced is not null && replaced.AccessToken != token.AccessToken)
+            {
+                await oauthClient.RevokeAsync(replaced.AccessToken, ctx.RequestAborted);
             }
 
             await links.RedeemAsync(attempt.Ticket, ctx.RequestAborted);

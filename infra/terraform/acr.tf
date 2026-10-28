@@ -3,14 +3,18 @@
 # a private endpoint into this VNet, and grants this estate's identity the roles it needs on it.
 # Images live in their own repository, `zendesk-mcp`, beside Vitally's `vitally-mcp`.
 #
-# ⚠️ THE COST OF SHARING, accepted with the decision: `az acr import` needs Contributor on the
-# REGISTRY (AcrPush lacks importImage, and ACR cannot scope that action to one repository), so this
-# estate's identity — the apps' runtime identity as well as the deploy identity — can overwrite
-# Vitally's tags. A Container App re-resolves its tag when a replica starts, and Vitally's staging
-# scales to zero, so an overwritten `vitally-mcp` tag would be served at its next cold start. A
-# compromise of this estate's identity therefore reaches the Vitally MCP server's code. The
-# alternative is a Premium registry of this estate's own (about £40 a month); acr.tf in git history
-# before this change built one, with CMK, and could be restored as it was.
+# ⚠️ THE COST OF SHARING, accepted with the decision: deploying runs `az acr import --force`, and that
+# import right cannot be limited to one repository, so this estate's identity — the apps' runtime
+# identity as well as the deploy identity — can overwrite Vitally's tags. It holds only a custom
+# role that reads the registry and triggers imports (identity.tf), not Contributor, so it cannot
+# delete or reconfigure the registry. A Container App re-resolves its tag when a replica starts,
+# and Vitally's staging scales to zero, so an overwritten `vitally-mcp` tag would be served at its
+# next cold start: a compromise of this estate's identity therefore reaches the Vitally MCP
+# server's code. The alternative is a Premium registry of this estate's own (about £40 a month);
+# acr.tf in git history before this change built one, with CMK, and could be restored as it was.
+#
+# This estate's import and login events land in the Vitally estate's Log Analytics workspace, where
+# that registry's diagnostic setting sends them, not in this estate's.
 #
 # Vitally's Terraform owns the registry itself, its CMK, its diagnostics and its own private
 # endpoint. None of what is added here is an attribute of the registry resource, so neither

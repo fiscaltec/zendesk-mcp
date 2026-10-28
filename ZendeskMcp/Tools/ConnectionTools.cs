@@ -76,10 +76,23 @@ public static class ConnectionTools
             throw new ArgumentException("This server uses a development API token, so there is nothing to disconnect.");
         }
 
-        var removed = await zendesk.Credentials.DisconnectAsync(cancellationToken);
-        return new JsonObject
+        var outcome = await zendesk.Credentials.DisconnectAsync(cancellationToken);
+        var result = new JsonObject
         {
-            ["result"] = removed ? "disconnected" : "not_connected",
-        }.ToJsonString();
+            ["result"] = outcome switch
+            {
+                DisconnectOutcome.Disconnected => "disconnected",
+                DisconnectOutcome.ForgottenButNotRevoked => "forgotten_not_revoked",
+                _ => "not_connected",
+            },
+        };
+
+        if (outcome == DisconnectOutcome.ForgottenButNotRevoked)
+        {
+            result["note"] = "This server no longer holds the connection, but Zendesk did not confirm that it revoked the grant. "
+                + "The person should remove this app's access in Zendesk (their profile's OAuth tokens, or ask a Zendesk administrator).";
+        }
+
+        return result.ToJsonString();
     }
 }

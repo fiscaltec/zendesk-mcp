@@ -418,7 +418,7 @@ public class MacrosToolsTests
         fake.Requests.Should().NotContain(r => r.Method == HttpMethod.Put);
 
         var result = Parse(await MacrosTools.ApplyMacro(zendesk, cache, ticket_id: 42, macro_id: 10, solve_incidents: true));
-        result["warnings"]!.AsArray().Select(w => (string)w!).Should().Contain(w => w.Contains("1 incident"));
+        result["warnings"]!.AsArray().Select(w => (string)w!).Should().Contain(w => w.Contains("1 unsolved incident"));
     }
 
     [Fact]

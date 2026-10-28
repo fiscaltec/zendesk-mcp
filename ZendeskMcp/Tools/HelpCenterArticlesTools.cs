@@ -339,6 +339,28 @@ public static partial class HelpCenterArticlesTools
         translation["draft"] = draft;
 
         var id = HelpCenterJson.Id(article_id);
+
+        // Saving a draft over a PUBLISHED translation takes it off the public Help Center — as much a
+        // change to what customers see as publishing is — so it needs the same switch. Read the
+        // translation first to know; a missing one (404) is created as a draft, which changes nothing live.
+        if (draft && !zendesk.Options.Features.AllowArticlePublishing)
+        {
+            JsonNode? existing = null;
+            try
+            {
+                existing = await zendesk.GetAsync($"/api/v2/help_center/articles/{id}/translations/{ZendeskService.Segment(validLocale)}",
+                    brandUrl: brand_url, cancellationToken: cancellationToken);
+            }
+            catch (HttpRequestException ex) when (ex.StatusCode == HttpStatusCode.NotFound)
+            {
+            }
+
+            if (existing?["translation"]?["draft"] is { } liveDraft && MacroSupport.ParseBool(liveDraft) == false)
+            {
+                ToolJson.RequireFeature(false, "AllowArticlePublishing", "Saving a draft over a published translation, which unpublishes it");
+            }
+        }
+
         JsonNode response;
         var created = false;
         try

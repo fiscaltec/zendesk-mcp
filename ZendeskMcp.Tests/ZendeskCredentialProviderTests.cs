@@ -228,9 +228,9 @@ public class ZendeskCredentialProviderTests
         using var zendesk = TestHelpers.CreateFakeZendesk(_ => FakeResponse.WithStatus(HttpStatusCode.NoContent, string.Empty));
         var (service, store) = TestHelpers.BuildUserZendeskService(zendesk.Client, TestHelpers.SampleToken("to-revoke"));
 
-        var removed = await service.Credentials.DisconnectAsync();
+        var outcome = await service.Credentials.DisconnectAsync();
 
-        removed.Should().BeTrue();
+        outcome.Should().Be(DisconnectOutcome.Disconnected);
         var revoke = zendesk.Requests.Single();
         revoke.Method.Should().Be(HttpMethod.Delete);
         revoke.Path.Should().Be("/api/v2/oauth/tokens/current.json");
@@ -254,6 +254,39 @@ public class ZendeskCredentialProviderTests
 
     // A fixed clock; this repo avoids Microsoft.Extensions.TimeProvider.Testing for one overridden
     // method, as GraphGroupPermissionResolverTests does.
+    [Fact]
+    public async Task Disconnect_OfAnExpiredToken_RefreshesFirst_SoTheRevocationReachesALiveGrant()
+    {
+        // Zendesk answers 401 to revoking an expired token, which would read as success while the
+        // refresh token stayed live.
+        var time = new FixedClock(Now);
+        using var zendesk = TestHelpers.CreateFakeZendesk(request => request.Path switch
+        {
+            "/oauth/tokens" => FakeResponse.Json("{\"access_token\":\"renewed\",\"refresh_token\":\"r2\",\"expires_in\":7200}"),
+            _ => FakeResponse.WithStatus(HttpStatusCode.NoContent, string.Empty),
+        });
+        var (service, store) = TestHelpers.BuildUserZendeskService(zendesk.Client,
+            TestHelpers.SampleToken("expired", expiresAt: Now.AddHours(-1), refreshToken: "r1"), timeProvider: time);
+
+        var outcome = await service.Credentials.DisconnectAsync();
+
+        outcome.Should().Be(DisconnectOutcome.Disconnected);
+        zendesk.Requests.Last().Headers["Authorization"].Should().Be("Bearer renewed");
+        (await store.GetAsync(TestHelpers.TestObjectId)).Should().BeNull();
+    }
+
+    [Fact]
+    public async Task Disconnect_WhenZendeskDoesNotConfirmTheRevocation_ForgetsTheToken_ButSaysSo()
+    {
+        using var zendesk = TestHelpers.CreateFakeZendesk(_ => FakeResponse.WithStatus(HttpStatusCode.ServiceUnavailable, string.Empty));
+        var (service, store) = TestHelpers.BuildUserZendeskService(zendesk.Client, TestHelpers.SampleToken("to-revoke"));
+
+        var outcome = await service.Credentials.DisconnectAsync();
+
+        outcome.Should().Be(DisconnectOutcome.ForgottenButNotRevoked);
+        (await store.GetAsync(TestHelpers.TestObjectId)).Should().BeNull();
+    }
+
     private sealed class FixedClock(DateTimeOffset now) : TimeProvider
     {
         public override DateTimeOffset GetUtcNow() => now;

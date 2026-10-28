@@ -45,6 +45,11 @@ does not change.
 
 ### Create
 
+> The production client exists: `fiscal_zendesk_mcp`, created on 2026-10-28 and set as
+> `zendesk_oauth_client_id`'s default. These steps are for recreating it, or for a separate
+> development client; `infra/terraform/README.md` step 0 lists what to change on the existing one
+> before the first apply.
+
 1. Admin Centre → Apps and integrations → APIs → **OAuth clients** → Add OAuth client.
    - **Name**: `FISCAL Zendesk MCP`. Agents see this name on the consent screen and in their
      authorised apps list.

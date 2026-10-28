@@ -41,6 +41,19 @@ public class ZendeskUploadsTests
     }
 
     [Fact]
+    public async Task ASuccessWithoutAnUploadToken_IsAnError_NotAnEmptySuccess()
+    {
+        using var factory = new Factory { UploadResponse = "{\"upload\":{}}" };
+        using var client = factory.CreateClient();
+        var slot = await factory.IssueSlotAsync("invoice.pdf", 5, inline: false);
+
+        var response = await client.PutAsync($"/uploads/{slot}", new ByteArrayContent("hello"u8.ToArray()));
+
+        response.StatusCode.Should().Be(HttpStatusCode.BadGateway);
+        (await response.Content.ReadAsStringAsync()).Should().Contain("no upload token");
+    }
+
+    [Fact]
     public async Task AnInlineImage_IsMarkedInline()
     {
         using var factory = new Factory();
@@ -150,6 +163,9 @@ public class ZendeskUploadsTests
     {
         private readonly List<RecordedRequest> _requests = [];
 
+        /// <summary>The body Zendesk answers an upload with.</summary>
+        public string UploadResponse { get; set; } = "{\"upload\":{\"token\":\"tok-1\",\"attachment\":{\"id\":9,\"file_name\":\"f\",\"content_type\":\"application/pdf\",\"size\":5}}}";
+
         public IReadOnlyList<RecordedRequest> ZendeskRequests
         {
             get
@@ -193,8 +209,7 @@ public class ZendeskUploadsTests
                         new Dictionary<string, string>()));
                 }
 
-                const string json = "{\"upload\":{\"token\":\"tok-1\",\"attachment\":{\"id\":9,\"file_name\":\"f\",\"content_type\":\"application/pdf\",\"size\":5}}}";
-                return new HttpResponseMessage(HttpStatusCode.Created) { Content = new StringContent(json, Encoding.UTF8, "application/json") };
+                return new HttpResponseMessage(HttpStatusCode.Created) { Content = new StringContent(owner.UploadResponse, Encoding.UTF8, "application/json") };
             }
         }
     }

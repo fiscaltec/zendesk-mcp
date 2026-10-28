@@ -51,7 +51,7 @@ cite `vitally-mcp#NNN` where a lesson was learned there.
   (`sg-zendesk-readers` / `-editors` / `-admins`) whose ids feed `Authorization__*GroupId`.
 - **No registry of its own.** Images go into the Vitally estate's private ACR, `vitallyproducruksouth`
   (repository `zendesk-mcp`), through a second private endpoint from this VNet. `acr.tf` sets out the
-  cost: the deploy identity's Contributor on that registry can overwrite Vitally's images.
+  cost: the deploy identity's import right (a custom role, `identity.tf`) can overwrite Vitally's tags.
 - Its **own** Log Analytics + Application Insights behind AMPLS, NAT egress, flow logs,
   and a weekly Key Vault expiry scanner posting to Teams. The scanner skips per-person token secrets
   (tag `kind=zendesk-user-token`): their expiry is the refresh token's and heals itself — the person
@@ -139,7 +139,7 @@ terraform plan -out=foundation.tfplan \
   -target=azurerm_private_endpoint.acr \
   -target=azurerm_private_endpoint.kv \
   -target=azurerm_role_assignment.mi_acr_pull \
-  -target=azurerm_role_assignment.mi_acr_contributor \
+  -target=azurerm_role_assignment.mi_acr_importer \
   -target=azurerm_role_assignment.mi_kv_secrets_officer \
   -target=azurerm_federated_identity_credential.github_actions_prod \
   -target=azurerm_federated_identity_credential.github_actions_staging
@@ -159,8 +159,8 @@ identity and its roles, and the Entra objects.
   az keyvault secret set --vault-name zendesk-prod-kv-uksouth --name zendesk-oauth-client-secret \
     --value '…' --expires <yyyy-mm-ddT00:00:00Z>
   ```
-  The vault's data plane is reachable only through its private endpoint. Run these from inside the
-  VNet, or open it briefly to your own address
+  The vault's data plane is reachable only through its private endpoint, and nothing in this
+  estate can run commands inside the VNet, so open it briefly to your own address
   (`az keyvault update -n zendesk-prod-kv-uksouth --public-network-access Enabled --default-action Deny`,
   `az keyvault network-rule add -n zendesk-prod-kv-uksouth --ip-address <ip>/32`) and close it again
   straight afterwards (`--public-network-access Disabled`, `network-rule remove`). You also need a
@@ -181,8 +181,11 @@ Set `image_tag` and `staging_image_tag` to `$tag`. If the GHCR package was creat
 grant the repository write access to it (package settings → Manage Actions access) so `deploy.yml`
 can push later.
 
-**4. The full apply.** `terraform plan`, read it — the Container Apps, scanner Job, monitoring,
-AMPLS, flow logs and role assignments should be the only creates — then `terraform apply`. From now
+**4. The full apply.** `terraform plan`, read it, then `terraform apply`. Everything step 1 did not
+target should be a create, and nothing should change or be destroyed: the Container Apps
+environment and both apps, the scanner Job, Log Analytics and Application Insights, AMPLS and its
+DNS zones, flow logs, the NAT gateway and its public IP, the private DNS VNet links, the Key Vault
+diagnostic setting and the remaining role assignments. From now
 on Terraform ignores the apps' image; `deploy.yml` owns it.
 
 **5. Graph permission for the managed identity.** Gate 2 reads `sg-zendesk-*` membership with the

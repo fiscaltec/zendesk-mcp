@@ -485,14 +485,16 @@ public static class MacrosTools
         {
             var incidents = await zendesk.GetAllPagesAsync($"/api/v2/tickets/{Id(ticket_id)}/incidents", null, "tickets", maxItems: 1000, cancellationToken: cancellationToken);
             var unsolved = incidents.Items.Count(t => ToolJson.String(t["status"]) is not ("solved" or "closed"));
-            if (unsolved > 0)
+
+            // An incomplete read is never "none unsolved" (see Update_ticket).
+            if (unsolved > 0 || incidents.HasMore)
             {
                 if (solve_incidents != true)
                 {
-                    throw new ArgumentException($"This macro solves problem ticket {ticket_id}, which has {unsolved} unsolved incident(s); Zendesk solves them too. Confirm with solve_incidents true if that is intended.");
+                    throw new ArgumentException($"This macro solves problem ticket {ticket_id}, which has {unsolved}{(incidents.HasMore ? " or more" : string.Empty)} unsolved incident(s); Zendesk solves them too. Confirm with solve_incidents true if that is intended.");
                 }
 
-                warnings.Add($"Zendesk also solves the {unsolved} incident(s) linked to this problem ticket.");
+                warnings.Add($"Zendesk also solves the {unsolved}{(incidents.HasMore ? " or more" : string.Empty)} unsolved incident(s) linked to this problem ticket.");
             }
         }
 

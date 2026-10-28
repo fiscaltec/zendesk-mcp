@@ -113,25 +113,30 @@ public sealed class ZendeskOAuthClient(
     }
 
     /// <summary>
-    /// Revokes a token at Zendesk. Best effort: a token Zendesk already considers invalid is the
-    /// outcome wanted, so a 401 counts as success, and any other failure is logged and swallowed so
-    /// that disconnecting locally still happens.
+    /// Revokes a token at Zendesk. Returns whether the token is now known to be unusable: a token
+    /// Zendesk already refuses (401) counts, since that is the outcome wanted. Any other failure is
+    /// logged and reported as false rather than thrown, so a caller can still forget the token
+    /// locally — and must then say the revocation did not happen rather than claim it did.
     /// </summary>
-    public async Task RevokeAsync(string accessToken, CancellationToken cancellationToken)
+    public async Task<bool> RevokeAsync(string accessToken, CancellationToken cancellationToken)
     {
         try
         {
             using var request = new HttpRequestMessage(HttpMethod.Delete, $"{_options.BaseUrl}/api/v2/oauth/tokens/current.json");
             request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", accessToken);
             using var response = await Client().SendAsync(request, cancellationToken);
-            if (!response.IsSuccessStatusCode && (int)response.StatusCode != 401)
+            if (response.IsSuccessStatusCode || (int)response.StatusCode == 401)
             {
-                logger.LogWarning("Zendesk token revocation returned {StatusCode}", (int)response.StatusCode);
+                return true;
             }
+
+            logger.LogWarning("Zendesk token revocation returned {StatusCode}", (int)response.StatusCode);
+            return false;
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             logger.LogWarning("Zendesk token revocation failed: {FailureType}", ex.GetType().Name);
+            return false;
         }
     }
 

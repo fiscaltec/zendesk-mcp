@@ -772,6 +772,23 @@ public class TicketsToolsTests
     }
 
     [Fact]
+    public async Task UpdateTicket_SolvingAProblemWhoseIncidentListWasCutShort_NeedsConfirmation()
+    {
+        // Every incident read is solved, but the read stopped at the page cap: the rest are unknown,
+        // so "none unsolved" must not be assumed.
+        const string problem = """{"ticket":{"id":101,"type":"problem","status":"open","updated_at":"u"}}""";
+        using var fake = UpdateFake(problem, r => r.Path == "/api/v2/tickets/101/incidents"
+            ? Json("""{"tickets":[{"id":2,"status":"solved"}],"meta":{"has_more":true,"after_cursor":"next"}}""")
+            : null);
+        var zendesk = TestHelpers.BuildZendeskService(fake.Client, maxAutoPageFetches: 1);
+
+        var act = () => TicketsTools.UpdateTicket(zendesk, 101, status: "solved");
+
+        await act.Should().ThrowAsync<ArgumentException>().WithMessage("*0 or more unsolved linked incident*solve_incidents*");
+        fake.Requests.Should().NotContain(r => r.Method == HttpMethod.Put);
+    }
+
+    [Fact]
     public async Task UpdateTicket_SolvingViaCustomStatusIsAlsoChecked()
     {
         const string problem = """{"ticket":{"id":101,"type":"problem","status":"open","updated_at":"u"}}""";
