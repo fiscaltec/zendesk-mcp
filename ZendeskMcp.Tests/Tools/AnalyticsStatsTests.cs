@@ -405,4 +405,21 @@ public class AnalyticsStatsTests
         queue.DueWithin1h.Should().Be(1);
         queue.DueWithin4h.Should().Be(2);
     }
+
+    [Fact]
+    public void RankQueue_ATargetMetLateIsNotOverdue()
+    {
+        // Live, a target met after its breach reads stage 'achieved' and keeps its breach_at.
+        var now = At("2026-03-10T12:00:00Z");
+        var tickets = new List<JsonObject>
+        {
+            QueueTicket(1, ("first_reply_time", "achieved", now.AddHours(-5)), ("agent_work_time", "active", now.AddMinutes(45))),
+        };
+
+        var queue = AnalyticsSla.RankQueue(tickets, now);
+
+        queue.Overdue.Should().Be(0);
+        queue.Ranked.Single().Urgency.Should().Be("due");
+        queue.Ranked.Single().Metric.Should().Be("agent_work_time");
+    }
 }

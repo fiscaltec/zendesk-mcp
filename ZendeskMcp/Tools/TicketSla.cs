@@ -22,13 +22,20 @@ namespace ZendeskMcp.Tools;
 /// and stands in for the events entirely when Zendesk returns none.
 /// </para>
 /// <para>
-/// Unverified against the live API: that the <c>include=metric_events</c> sideload is keyed by metric
+/// Confirmed against the live API: the <c>include=metric_events</c> sideload is keyed by metric
 /// (<c>reply_time</c>, <c>resolution_time</c>, <c>agent_work_time</c>, <c>pausable_update_time</c>,
-/// <c>periodic_update_time</c>, <c>requester_wait_time</c>) and sits beside <c>ticket</c> (a flat array, or
-/// one inside the ticket, is accepted too); that <c>reply_time</c> instance 1 is the first reply and later
-/// instances are next replies; that <c>resolution_time</c> is the total_resolution_time target; that
-/// <c>apply_sla.sla</c> is <c>{target (minutes), business_hours, policy {id, title, description}}</c>; and
-/// the <c>policy_metrics</c> shape (<c>{breach_at, stage, metric, hours, minutes, days, business_hours}</c>).
+/// <c>periodic_update_time</c>, <c>requester_wait_time</c>) and arrives <i>inside</i> the ticket, beside
+/// <c>slas</c> (one beside <c>ticket</c> or a flat array is still accepted); <c>reply_time</c> instance 1
+/// carries the first-reply target; <c>apply_sla.sla</c> is <c>{target (minutes), target_in_seconds,
+/// business_hours, policy {id, title, description}}</c>; and <c>policy_metrics</c> entries are
+/// <c>{breach_at, stage, metric}</c> plus one of <c>minutes</c>/<c>hours</c>/<c>days</c> (no
+/// <c>business_hours</c>). Note that a breached target that was later met reads <c>stage: achieved</c>
+/// there, which is why the events, not the stage, decide <c>breached</c>.
+/// </para>
+/// <para>
+/// Unverified against the live API: that later <c>reply_time</c> instances are next replies, and that
+/// an <c>apply_sla</c> on <c>resolution_time</c> is the total_resolution_time target — the validation
+/// account's policy sets neither target, so no such event was available.
 /// </para>
 /// </remarks>
 public static class TicketSla
@@ -151,6 +158,12 @@ public static class TicketSla
     /// The sla object from <c>slas.policy_metrics</c> alone (the running targets Zendesk lists on a
     /// ticket). Used when there are no metric events and by the queue's fast ranking. Null when empty.
     /// </summary>
+    /// <remarks>
+    /// Live, an entry's <c>minutes</c>/<c>hours</c>/<c>days</c> is the time left until <c>breach_at</c>
+    /// (negative once overdue), not the target, so no target length is reported from here. A met target
+    /// reads <c>stage: achieved</c> whether or not it was met in time; <c>breach_at</c> stays set only
+    /// when it was breached.
+    /// </remarks>
     public static JsonNode? FromPolicyMetrics(JsonArray? policyMetrics, DateTimeOffset now)
     {
         if (policyMetrics is null || policyMetrics.Count == 0)
@@ -167,14 +180,10 @@ public static class TicketSla
                 continue;
             }
 
-            var minutes = (AnalyticsStats.Number(entry?["days"]) ?? 0) * 1440
-                + (AnalyticsStats.Number(entry?["hours"]) ?? 0) * 60
-                + (AnalyticsStats.Number(entry?["minutes"]) ?? 0);
             var breachAt = AnalyticsStats.Moment(entry?["breach_at"]);
             var stage = ToolJson.String(entry?["stage"])?.ToLowerInvariant();
             var target = new Target(metric, null)
             {
-                TargetMinutes = minutes > 0 ? minutes : null,
                 BusinessHours = entry?["business_hours"] is JsonValue bh && bh.TryGetValue<bool>(out var b) ? b : null,
                 BreachAt = breachAt,
             };
@@ -185,7 +194,7 @@ public static class TicketSla
                     target.Status = "paused";
                     break;
                 case "achieved":
-                    target.Status = "achieved";
+                    target.Status = breachAt is null ? "achieved" : "breached";
                     break;
                 default:
                     if (breachAt is { } due && due <= now)

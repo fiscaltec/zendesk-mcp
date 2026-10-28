@@ -253,9 +253,12 @@ public class SlaEvaluatorTests
     public void NoEvents_FallsBackToPolicyMetrics()
     {
         var policy = new JsonArray(
-            new JsonObject { ["metric"] = "first_reply_time", ["stage"] = "active", ["breach_at"] = "2026-03-10T11:30:00Z", ["hours"] = 1, ["minutes"] = 0, ["days"] = 0, ["business_hours"] = true },
+            // The live shape: minutes/hours/days is the time left until breach_at, not the target.
+            new JsonObject { ["metric"] = "first_reply_time", ["stage"] = "active", ["breach_at"] = "2026-03-10T11:30:00Z", ["minutes"] = -30 },
             new JsonObject { ["metric"] = "requester_wait_time", ["stage"] = "paused", ["breach_at"] = null },
-            new JsonObject { ["metric"] = "agent_work_time", ["stage"] = "active", ["breach_at"] = "2026-03-10T15:00:00Z" });
+            new JsonObject { ["metric"] = "agent_work_time", ["stage"] = "active", ["breach_at"] = "2026-03-10T15:00:00Z", ["hours"] = 3 },
+            new JsonObject { ["metric"] = "periodic_update_time", ["stage"] = "achieved", ["breach_at"] = null },
+            new JsonObject { ["metric"] = "pausable_update_time", ["stage"] = "achieved", ["breach_at"] = "2026-03-09T10:00:00Z", ["days"] = -1 });
 
         var sla = TicketSla.Evaluate(OpenTicket(policy), null, Now);
 
@@ -263,9 +266,11 @@ public class SlaEvaluatorTests
         var targets = sla["targets"]!.AsArray();
         targets[0]!["status"]!.GetValue<string>().Should().Be("breached");
         targets[0]!["minutes_late"]!.GetValue<long>().Should().Be(30);
-        targets[0]!["target_minutes"]!.GetValue<long>().Should().Be(60);
-        targets[0]!["business_hours"]!.GetValue<bool>().Should().BeTrue();
+        targets[0]!["target_minutes"].Should().BeNull("the time left until breach is not the target");
         targets[1]!["status"]!.GetValue<string>().Should().Be("paused");
+        targets.Single(t => t!["metric"]!.GetValue<string>() == "periodic_update_time")!["status"]!.GetValue<string>().Should().Be("achieved");
+        targets.Single(t => t!["metric"]!.GetValue<string>() == "pausable_update_time")!["status"]!.GetValue<string>()
+            .Should().Be("breached", "an achieved target that keeps its breach_at was met late");
         sla["next_breach_metric"]!.GetValue<string>().Should().Be("agent_work_time");
     }
 

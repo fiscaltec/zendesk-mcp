@@ -200,8 +200,10 @@ public static class AnalyticsSla
 
             withSla++;
             var targets = (sla["targets"] as JsonArray ?? []).OfType<JsonObject>().ToList();
+            // A target met late reads breached with no minutes_late (policy_metrics has no completion
+            // time); only one still running past its breach is overdue.
             var late = targets
-                .Where(t => ToolJson.String(t["status"]) == "breached" && t["completed_at"] is null)
+                .Where(t => ToolJson.String(t["status"]) == "breached" && t["completed_at"] is null && t["minutes_late"] is not null)
                 .OrderByDescending(t => AnalyticsStats.Long(t["minutes_late"]) ?? 0)
                 .FirstOrDefault();
             if (late is not null)
