@@ -522,7 +522,8 @@ az network private-endpoint show -g "$RG" -n "$PE_AMPLS" -o none 2>/dev/null \
   || az network private-endpoint create -g "$RG" -n "$PE_AMPLS" -l "$LOC" --vnet-name "$VNET" --subnet "$SNET_PE_MON" \
        --private-connection-resource-id "$AMPLS_ID" --group-id azuremonitor --connection-name "$PE_AMPLS-conn" -o none
 set -- $DNS_MONITOR
-az network private-endpoint dns-zone-group show -g "$RG" --endpoint-name "$PE_AMPLS" -n ampls-dns-group -o none 2>/dev/null \
+# list, not show: `dns-zone-group show` answers {} with exit 0 for a group that does not exist.
+[ "$(az network private-endpoint dns-zone-group list -g "$RG" --endpoint-name "$PE_AMPLS" --query "length([?name=='ampls-dns-group'])" -o tsv)" = 1 ] \
   || az network private-endpoint dns-zone-group create -g "$RG" --endpoint-name "$PE_AMPLS" -n ampls-dns-group \
        --zone-name "$1" --private-dns-zone "$(az network private-dns zone show -g "$RG" -n "$1" --query id -o tsv)" -o none
 for z in $DNS_MONITOR; do
@@ -590,7 +591,8 @@ KV_ID=$(az keyvault show -g "$RG" -n "$KV" --query id -o tsv)
 az network private-endpoint show -g "$RG" -n "$PE_KV" -o none 2>/dev/null \
   || az network private-endpoint create -g "$RG" -n "$PE_KV" -l "$LOC" --vnet-name "$VNET" --subnet "$SNET_PE" \
        --private-connection-resource-id "$KV_ID" --group-id vault --connection-name kv-conn -o none
-az network private-endpoint dns-zone-group show -g "$RG" --endpoint-name "$PE_KV" -n kv-zg -o none 2>/dev/null \
+# list, not show: `dns-zone-group show` answers {} with exit 0 for a group that does not exist.
+[ "$(az network private-endpoint dns-zone-group list -g "$RG" --endpoint-name "$PE_KV" --query "length([?name=='kv-zg'])" -o tsv)" = 1 ] \
   || az network private-endpoint dns-zone-group create -g "$RG" --endpoint-name "$PE_KV" -n kv-zg \
        --zone-name "$DNS_VAULT" --private-dns-zone "$(az network private-dns zone show -g "$RG" -n "$DNS_VAULT" --query id -o tsv)" -o none
 
@@ -737,7 +739,8 @@ ACR_ID=$(az acr show -g "$ACR_RG" -n "$ACR" --query id -o tsv)
 az network private-endpoint show -g "$RG" -n "$PE_ACR" -o none 2>/dev/null \
   || az network private-endpoint create -g "$RG" -n "$PE_ACR" -l "$LOC" --vnet-name "$VNET" --subnet "$SNET_PE" \
        --private-connection-resource-id "$ACR_ID" --group-id registry --connection-name acr-conn -o none
-az network private-endpoint dns-zone-group show -g "$RG" --endpoint-name "$PE_ACR" -n acr-zg -o none 2>/dev/null \
+# list, not show: `dns-zone-group show` answers {} with exit 0 for a group that does not exist.
+[ "$(az network private-endpoint dns-zone-group list -g "$RG" --endpoint-name "$PE_ACR" --query "length([?name=='acr-zg'])" -o tsv)" = 1 ] \
   || az network private-endpoint dns-zone-group create -g "$RG" --endpoint-name "$PE_ACR" -n acr-zg \
        --zone-name "$DNS_ACR" --private-dns-zone "$(az network private-dns zone show -g "$RG" -n "$DNS_ACR" --query id -o tsv)" -o none
 )
@@ -1794,6 +1797,11 @@ the first suspects if a block fails:
 - `az containerapp env certificate list --managed-certificates-only` reporting
   `properties.subjectName`/`provisioningState` as queried.
 - `gh variable get` (needs a recent `gh`; Cloud Shell's should have it).
+
+Found by running it (2026-10-28, #3): `az network private-endpoint dns-zone-group show` answers `{}`
+with exit 0 for a group that does not exist, so a `show … || create …` guard never creates it.
+The three zone-group steps guard with `list` instead. Every other `show` used as a guard here was
+checked against a missing name and fails as it should (exit 1 or 3).
 
 Settled from the `az` 2.91 source, so no longer in doubt: `flow-log create` resolves the watcher from
 `--location` and puts the flow log in its resource group (`NetworkWatcherRG`), and `--retention 30`
