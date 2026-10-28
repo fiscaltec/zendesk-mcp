@@ -53,8 +53,11 @@ public static class HelpCenterMediaTools
             throw new ArgumentException($"file_size must be between 1 and {MaxImageBytes} bytes (got {file_size}).");
         }
 
-        // Unverified against the live API: the request body ({content_type, file_size}) and the
-        // response shape ({upload_url: {asset_upload_id, url, headers}}).
+        // Unverified against the live API (docs-checked, not live-tested): the request body
+        // ({content_type, file_size}) matches the documentation, but the documentation gives the
+        // response two ways: its prose puts headers beside upload_url as an object, its example puts
+        // them inside upload_url as a JSON-encoded string. Both are read, and an upload whose headers
+        // cannot be read is refused rather than handed out without them (the URL is signed over them).
         var response = await zendesk.PostAsync(
             "/api/v2/guide/medias/upload_url",
             new JsonObject { ["content_type"] = content_type, ["file_size"] = file_size },
@@ -67,7 +70,8 @@ public static class HelpCenterMediaTools
 
         var headers = new JsonObject();
         var command = new StringBuilder("curl -sS -X PUT");
-        if (upload["headers"] is JsonObject given)
+        var given = UploadHeaders(upload["headers"] ?? response["headers"]);
+        if (given is not null)
         {
             foreach (var (name, value) in given)
             {
@@ -112,7 +116,9 @@ public static class HelpCenterMediaTools
         HelpCenterJson.Text(alt_text, "alt_text", 500);
         var alt = string.IsNullOrWhiteSpace(alt_text) ? validFilename : alt_text;
 
-        // Unverified against the live API: the request body and that the answer is {media: {id, url, ...}}.
+        // Unverified against the live API (docs-checked, not live-tested): the request body
+        // {asset_upload_id, filename} and the answer {media: {id, url, name, content_type, size, ...}}
+        // match the documentation.
         var response = await zendesk.PostAsync(
             "/api/v2/guide/medias",
             new JsonObject { ["asset_upload_id"] = uploadId, ["filename"] = validFilename },
@@ -131,6 +137,34 @@ public static class HelpCenterMediaTools
             ["img_tag"] = url is null ? null : $"<img src=\"{WebUtility.HtmlEncode(url)}\" alt=\"{WebUtility.HtmlEncode(alt)}\">",
         };
         return result.ToJsonString();
+    }
+
+    /// <summary>The upload headers as an object, whether Zendesk sent an object or a JSON-encoded string.</summary>
+    private static JsonObject? UploadHeaders(JsonNode? headers)
+    {
+        switch (headers)
+        {
+            case null:
+                return null;
+            case JsonObject given:
+                return given;
+            case JsonValue value when value.TryGetValue<string>(out var text):
+                try
+                {
+                    if (JsonNode.Parse(text) is JsonObject parsed)
+                    {
+                        return parsed;
+                    }
+                }
+                catch (System.Text.Json.JsonException)
+                {
+                    // Falls through to the refusal below.
+                }
+
+                break;
+        }
+
+        throw new HttpRequestException("Zendesk returned the upload headers in a form this server cannot read, so the upload URL cannot be used.");
     }
 
     private static string Filename(string? filename)

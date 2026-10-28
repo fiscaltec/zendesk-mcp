@@ -594,7 +594,9 @@ public static class TicketsTools
 
         // Copied attachments are re-uploaded on every call, so a retry carries different upload tokens
         // and Zendesk would not treat it as the same request; the key is only sent when it can hold.
-        // Unverified against the live API: how Zendesk answers a reused key with a different body.
+        // Unverified against the live API (docs-checked, not live-tested): Zendesk documents a reused key
+        // with a different body as 400 IdempotentRequestError ("Request parameters don't match the
+        // given idempotency key"), surfaced to the caller as is, and keys as expiring after two hours.
         Dictionary<string, string>? headers = null;
         if (attachment_ids is not { Length: > 0 })
         {

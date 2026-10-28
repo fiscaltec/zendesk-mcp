@@ -52,6 +52,31 @@ public class HelpCenterMediaToolsTests
         fake.Requests.Should().BeEmpty();
     }
 
+    [Theory]
+    // The two forms Zendesk's documentation gives: headers beside upload_url, and inside it as a JSON string.
+    [InlineData("""{"headers":{"Content-Type":"image/png","X-Amz-Server-Side-Encryption":"AES256"},"upload_url":{"url":"https://uploads.example-storage.com/abc","asset_upload_id":"up-1"}}""")]
+    [InlineData("""{"upload_url":{"asset_upload_id":"up-1","headers":"{\"Content-Type\":\"image/png\",\"X-Amz-Server-Side-Encryption\":\"AES256\"}","url":"https://uploads.example-storage.com/abc"}}""")]
+    public async Task RequestUpload_ReadsEitherDocumentedHeaderForm(string response)
+    {
+        using var fake = TestHelpers.CreateFakeZendesk(_ => FakeResponse.Json(response));
+        var zendesk = TestHelpers.BuildZendeskService(fake.Client);
+
+        var json = JsonNode.Parse(await HelpCenterMediaTools.RequestHelpCenterImageUpload(zendesk, "a.png", "image/png", 10))!;
+
+        json["headers"]!["X-Amz-Server-Side-Encryption"]!.GetValue<string>().Should().Be("AES256");
+        json["upload_command"]!.GetValue<string>().Should().Contain("-H 'X-Amz-Server-Side-Encryption: AES256'");
+    }
+
+    [Fact]
+    public async Task RequestUpload_UnreadableHeaders_AreRefused()
+    {
+        using var fake = TestHelpers.CreateFakeZendesk(_ => FakeResponse.Json("""{"upload_url":{"asset_upload_id":"up-1","headers":"not json","url":"https://uploads.example-storage.com/abc"}}"""));
+        var zendesk = TestHelpers.BuildZendeskService(fake.Client);
+
+        await FluentActions.Awaiting(() => HelpCenterMediaTools.RequestHelpCenterImageUpload(zendesk, "a.png", "image/png", 10))
+            .Should().ThrowAsync<HttpRequestException>();
+    }
+
     [Fact]
     public async Task RequestUpload_ForeignBrandUrl_IsRefused()
     {

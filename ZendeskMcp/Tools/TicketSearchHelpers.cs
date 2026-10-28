@@ -257,7 +257,8 @@ public static class TicketSearchHelpers
         foreach (var key in customObjectKeys)
         {
             // Unverified against the live API: the filter[external_ids] filter on List Custom Object
-            // Records, and the custom_object_records / custom_object_fields response shape.
+            // Records, and the custom_object_records / custom_object_fields response shape. Both match
+            // the documentation; the validation account has no custom objects to try them on.
             foreach (var batch in Batches(ticketIds))
             {
                 var page = await zendesk.GetAsync($"/api/v2/custom_objects/{ZendeskService.Segment(key)}/records",
