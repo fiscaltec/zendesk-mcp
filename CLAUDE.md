@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 A Model Context Protocol (MCP) server in C# giving FISCAL staff access to Zendesk Support and the Help Center. It is built to the standard of [fiscaltec/vitally-mcp](https://github.com/fiscaltec/vitally-mcp) — the same host, OAuth façade, RBAC, audit, telemetry, CI/CD and Azure shape, ported rather than reinvented — and reproduces the functionality of Swifteq's hosted Zendesk MCP server.
 
-**Status: built, not deployed.** The Azure estate in `infra/terraform/` is greenfield and has not been applied (it passes `terraform validate`; it has never been planned). The Zendesk endpoints were written from the API documentation; on 2026-10-28 every **read** tool was run against the live account with a development token in read-only mode, and what that showed was fixed (PR #1). The same day every write tool was exercised against throwaway records (all since deleted): test tickets, an inactive personal macro, draft articles, a test category and section, and a test end user and organisations; every feature-switch refusal was confirmed. That found and fixed `Update_ticket` silently dropping tag changes, `Add_user_to_organization` moving people out of their organisation without `replace_existing`, and a rename reporting the old name. A public reply on an existing ticket was sent too, notifying only the test agent. Not exercised: a reused idempotency key with a different body, per-user OAuth, refresh and the audit trail. Code marks each remaining uncertainty `// Unverified against the live API` — writes checked against the documentation only say "docs-checked, not live-tested". See *Staging validation* before trusting any tool against production.
+**Status: built, not deployed.** The Azure estate in `infra/terraform/` is greenfield and has not been applied (it passes `terraform validate`; it has never been planned — #3). The Zendesk endpoints were written from the API documentation; on 2026-10-28 every **read** tool was run against the live account with a development token in read-only mode, and what that showed was fixed (PR #1). The same day every write tool was exercised against throwaway records (all since deleted): test tickets, an inactive personal macro, draft articles, a test category and section, and a test end user and organisations; every feature-switch refusal was confirmed. That found and fixed `Update_ticket` silently dropping tag changes, `Add_user_to_organization` moving people out of their organisation without `replace_existing`, and a rename reporting the old name. A public reply on an existing ticket was sent too, notifying only the test agent. Not exercised: per-user OAuth and refresh (#4) and the audit trail (#5), both of which need staging (#3); reads as an ordinary agent rather than an admin (#6); and eight shapes the account could not show, among them a reused idempotency key with a different body (#7). Read the open issues rather than trusting this paragraph: it describes 2026-10-28. Code marks each remaining uncertainty `// Unverified against the live API` — writes checked against the documentation only say "docs-checked, not live-tested". See *Staging validation* before trusting any tool against production.
 
 **Provenance.** Issue references written `vitally-mcp#NNN` point at fiscaltec/vitally-mcp, where the lesson was learnt; the design and the code that carries it came across together. vitally-mcp's own `CLAUDE.md` holds the full history — dates, measurements, incident write-ups — behind the rules stated here more briefly. When this file and that one disagree about a shared component, check the code here.
 
@@ -90,7 +90,20 @@ FISCAL staff point their MCP client at `https://zendesk-mcp.fiscaltec.com/mcp` (
 
 Track non-trivial work as GitHub issues via the `gh` CLI. Trivial one-off changes don't need an
 issue — use judgement. This mirrors the flow used in `searledan/rosetechnologies.co.uk`,
-`searledan/dansearle.co.uk` and `searledan/spendy`; the labels below were created here to match.
+`searledan/dansearle.co.uk` and `searledan/spendy`; the labels below were copied from vitally-mcp on
+2026-10-28 (`gh label clone fiscaltec/vitally-mcp --repo fiscaltec/zendesk-mcp`), so names, colours
+and descriptions match there.
+
+⚠️ **In a Claude Code cloud session, `gh issue create` fails** with `HTTP 403: GitHub GraphQL is not
+available from Claude Code sessions` — it is GraphQL underneath, and the session's GitHub proxy serves
+REST only. Create issues through REST instead (`gh api -X POST repos/fiscaltec/zendesk-mcp/issues
+--input body.json`, with `title`, `body` and `labels` in the JSON). `gh issue edit` and `gh issue view`
+fail the same way (checked 2026-10-28); use `gh api -X PATCH …/issues/<n>` and `gh api …/issues/<n>`.
+Hit when #2–#9 were raised. The same limit means the Copilot merge gate below cannot pass from a cloud
+session: `.claude/hooks/pre-merge-copilot-gate.sh` reads the PR through `gh pr view` and
+`gh api graphql`, both refused there, so it fails closed and denies every merge — verified 2026-10-28
+by feeding it a synthetic payload for PR #1, which it denied at its first step (*"could not resolve the
+current repo (failing closed)"*). That is the safe direction; merge from a local session.
 
 **Why it matters here:** each issue is normally picked up in a *fresh* session, often in a worktree or
 via a subagent. The issue body and this file are the only context that new session gets, so an issue
@@ -125,7 +138,7 @@ that assumes prior conversation is an issue that cannot be worked.
 6. If work stalls, swap the status for `status: blocked` and comment what's blocking.
 
 **What actually gates a merge** — the `Secure branches` ruleset as vitally-mcp runs it (verified
-there 2026-08-18). ⚠️ **This repository needs that ruleset applied before the first merge to `main`**;
+there 2026-08-18). ⚠️ **This repository needs that ruleset applied before the first merge to `main`** (#2);
 until then nothing below is enforced by GitHub, only by the hook. In vitally-mcp:
 `required_approving_review_count` is **0** — no approving review is needed. What is required is all
 review threads resolved, the branch up to date with `main` (`strict_required_status_checks_policy`),
@@ -174,7 +187,7 @@ cannot run `git` or `az`, which is exactly what makes the briefs below work.
 
 ⚠️ **These ship in a plugin, not in this repo** — there is no `.claude/agents/` here. A session
 without that plugin cannot follow this section, and should say so rather than skipping the step
-silently.
+silently. The session that validated PR #1 did not have it, and said so in #9.
 
 ⚠️ **Do not skip this for a documentation-only change**, which is the opposite of what a reader
 arriving from `searledan/spendy` will expect. Its *Pre-commit Checklist* skips step 1 for
@@ -559,7 +572,7 @@ Dropped from Swifteq's set: `get_usage` and `submit_mcp_feedback` (Swifteq billi
 
 xUnit v3 on **Microsoft.Testing.Platform** (not VSTest): `global.json` selects the runner, the test project is an `Exe`, and VSTest-only flags (`--filter "FullyQualifiedName~…"`, `--logger`, `--collect`) are rejected — use `--filter-class` / `--filter-method`, `--report-trx`, `--coverage`.
 
-⚠️ **Run the tests in a shell without the dev-mode variables.** The host-based tests build the app with `WebApplicationFactory`, which reads environment variables, so `OAuth__NoAuth`, `Authorization__ReadOnly`, `Zendesk__DevelopmentAccessToken` and friends left over from running the server locally override the tests' own configuration — about 100 tests fail for that reason alone. CI does not set them. Clear them first, e.g. `env -u OAuth__NoAuth -u Authorization__ReadOnly -u Zendesk__DevelopmentAccessToken -u Zendesk__Subdomain -u ASPNETCORE_ENVIRONMENT dotnet test --solution ZendeskMcp.sln -c Debug`.
+⚠️ **Run the tests in a shell without the dev-mode variables.** The host-based tests build the app with `WebApplicationFactory`, which reads environment variables, so `OAuth__NoAuth`, `Authorization__ReadOnly`, `Zendesk__DevelopmentAccessToken` and friends left over from running the server locally override the tests' own configuration — about 100 tests fail for that reason alone. CI does not set them. Clear them first, e.g. `env -u OAuth__NoAuth -u Authorization__ReadOnly -u Zendesk__DevelopmentAccessToken -u Zendesk__Subdomain -u ASPNETCORE_ENVIRONMENT dotnet test --solution ZendeskMcp.sln -c Debug`. #8 makes the tests immune and removes this paragraph.
 
 | Area | Tests |
 |---|---|
@@ -606,3 +619,22 @@ Before production, on staging against the real Zendesk account, with `Authorizat
 4. Confirm refresh: leave a connection past its access-token expiry and call again.
 5. Confirm the audit records in `AppEvents` (`AppRoleName` separates staging) carry the expected ids.
 6. Disconnect, and confirm the token is revoked in Zendesk and the secret reads as a tombstone.
+
+Where each step stands, mapped to its issue (2026-10-28):
+
+| Step | State | Issue |
+|---|---|---|
+| Staging itself | not applied; blocked on decisions recorded in the issue | #3 |
+| 1 — sign-in, connect, mismatched login refused and revoked | not exercised; becomes a standing runbook, `docs/runbooks/zendesk-oauth-staging-validation.md`, modelled on vitally-mcp's `entra-cutover-staging-validation.md` | #4 |
+| 2 — every read and write tool | **done live** with a development token (PR #1), as an **admin**; repeating the reads as an ordinary agent is open | #6 |
+| 3 — `Unverified` markers | read-side settled; eight remain that need data the account lacks | #7 |
+| 4 — refresh | not exercised | #4 |
+| 5 — audit records in `AppEvents` | not exercised | #5 |
+| 6 — disconnect, revoke, tombstone | not exercised | #4 |
+
+⚠️ **There is one Zendesk account and no sandbox**, as vitally-mcp has one Vitally tenant: staging
+writes reach real customers. Lift `Authorization__ReadOnly` only for the write checks, with
+vitally-mcp's two independent restores (a shell trap plus a detached failsafe that reads the guard back
+off the revision actually serving traffic). Creating a ticket also fires the *Notify all agents of
+received request* trigger, which emails every agent. PR #1's write tests paused that trigger for the
+seconds around each create; #4 records how staging should handle it.
