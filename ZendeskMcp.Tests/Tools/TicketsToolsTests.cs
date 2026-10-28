@@ -683,7 +683,7 @@ public class TicketsToolsTests
         using var fake = UpdateFake(Ticket101);
         var zendesk = TestHelpers.BuildZendeskService(fake.Client, configure: o => o.Features.AllowPublicReplies = true);
 
-        var result = JsonNode.Parse(await TicketsTools.UpdateTicket(zendesk, 101, priority: "low", additional_tags: ["b"], remove_tags: ["c"],
+        var result = JsonNode.Parse(await TicketsTools.UpdateTicket(zendesk, 101, priority: "low", additional_tags: ["b", "LOGIN"], remove_tags: ["c"],
             additional_ccs: ["42"], remove_ccs: ["43"]))!;
 
         var put = fake.Requests.Single(r => r.Method == HttpMethod.Put);
@@ -691,12 +691,26 @@ public class TicketsToolsTests
         body["safe_update"]!.GetValue<bool>().Should().BeTrue();
         body["updated_stamp"]!.GetValue<string>().Should().Be("2026-01-02T10:00:00Z");
         body["priority"]!.GetValue<string>().Should().Be("low");
-        body["additional_tags"]![0]!.GetValue<string>().Should().Be("b");
-        body["remove_tags"]![0]!.GetValue<string>().Should().Be("c");
+        // Live, the single-ticket PUT ignores additional_tags/remove_tags, so the full list is sent.
+        body["tags"]!.AsArray().Select(t => t!.GetValue<string>()).Should().Equal("login", "b");
+        body["additional_tags"].Should().BeNull();
+        body["remove_tags"].Should().BeNull();
         body["email_ccs"]!.ToJsonString().Should().Be("""[{"user_id":42,"action":"put"},{"user_id":43,"action":"delete"}]""");
         body["comment"].Should().BeNull();
         result["ticket"]!["id"]!.GetValue<long>().Should().Be(101);
         NoDeletes(fake);
+    }
+
+    [Fact]
+    public async Task UpdateTicket_RemoveTags_DropsThemFromTheFullList()
+    {
+        using var fake = UpdateFake(Ticket101);
+        var zendesk = TestHelpers.BuildZendeskService(fake.Client);
+
+        await TicketsTools.UpdateTicket(zendesk, 101, remove_tags: ["Login"]);
+
+        var body = JsonNode.Parse(fake.Requests.Single(r => r.Method == HttpMethod.Put).Body!)!["ticket"]!;
+        body["tags"]!.AsArray().Should().BeEmpty();
     }
 
     [Fact]

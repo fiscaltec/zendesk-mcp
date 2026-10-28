@@ -797,14 +797,17 @@ public static class TicketsTools
             ticket["custom_fields"] = TicketWriteHelpers.CustomFields(custom_fields);
         }
 
-        if (addTags is not null)
+        // additional_tags/remove_tags are the bulk-update format: the single-ticket PUT ignores them
+        // without an error (seen live), so the full new list is sent instead. safe_update above
+        // refuses the write if the tags changed since they were read.
+        if (addTags is not null || dropTags is not null)
         {
-            ticket["additional_tags"] = addTags;
-        }
-
-        if (dropTags is not null)
-        {
-            ticket["remove_tags"] = dropTags;
+            var remove = (dropTags ?? []).Select(t => ToolJson.String(t)!).ToHashSet(StringComparer.OrdinalIgnoreCase);
+            var tags = (current["tags"] as JsonArray ?? []).Select(ToolJson.String).OfType<string>()
+                .Concat((addTags ?? []).Select(t => ToolJson.String(t)!))
+                .Where(t => !remove.Contains(t))
+                .Distinct(StringComparer.OrdinalIgnoreCase);
+            ticket["tags"] = new JsonArray(tags.Select(t => (JsonNode)t).ToArray());
         }
 
         if (addCcs.Length > 0 || removeCcs.Length > 0)
