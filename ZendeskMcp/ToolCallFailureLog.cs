@@ -7,7 +7,7 @@ namespace ZendeskMcp;
 
 /// <summary>
 /// The server-side record of a failed <c>tools/call</c> (vitally-mcp#94). Until this existed the error-surfacing
-/// filter in <c>Program.cs</c> handed a surfaceable failure — a Vitally error, a rejected argument —
+/// filter in <c>Program.cs</c> handed a surfaceable failure — a Zendesk error, a rejected argument —
 /// to the client and logged nothing, so those left no server-side trace at all. (A non-surfaceable
 /// exception, such as a Key Vault failure, was already logged by the MCP SDK itself; this adds the
 /// correlation id that joins it to the audit record.)
@@ -91,14 +91,17 @@ public static class ToolCallFailureLog
     }
 
     /// <summary>
-    /// The level an upstream status earns. <b>Error</b> for what is ours or Vitally's to fix — a 5xx,
-    /// a 401/403 (the shared key is bad or revoked), a 429 (the request budget) or no response at all.
+    /// The level an upstream status earns. <b>Error</b> for what is ours or Zendesk's to fix — a 5xx,
+    /// a 401/403, a 429 (the account's request budget) or no response at all. A 401 from Zendesk is the
+    /// caller's own token being refused, which ZendeskService turns into a reconnect link before this
+    /// sees it; a 403 is Zendesk refusing the agent, which is worth seeing if it starts happening at a
+    /// rate.
     /// <b>Warning</b> for any other 4xx, which is the caller's input: a wrong id from the model is
     /// routine, and logging it at Error would bury a real outage once vitally-mcp#159 alerts on that level.
     /// </summary>
     /// <remarks>
     /// 407 and 408 are infrastructure conditions despite sitting in the 4xx range, so they are Error
-    /// too. ⚠️ Known blind spot: a 4xx on a request the caller did not shape — Vitally renaming an
+    /// too. ⚠️ Known blind spot: a 4xx on a request the caller did not shape — Zendesk renaming an
     /// endpoint, or rejecting a parameter this server adds itself — is logged at Warning, so an
     /// Error-only alert would not see it. The rate of Warnings is the signal there.
     /// </remarks>
@@ -138,7 +141,7 @@ public static class ToolCallFailureLog
             case UnauthorizedAccessException:
                 return;
 
-            // The caller's input was rejected before anything reached Vitally. Worth seeing — a tool
+            // The caller's input was rejected before anything reached Zendesk. Worth seeing — a tool
             // description that keeps producing bad arguments is a content defect — but not a fault.
             // The PLAIN type only: that is what this code throws for bad input and what the SDK throws
             // for a missing parameter, whereas an ArgumentOutOfRange/ArgumentNull is almost always a

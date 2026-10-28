@@ -1,7 +1,7 @@
 namespace ZendeskMcp;
 
 /// <summary>
-/// Server-side authorisation policy for Vitally tool calls. Maps the HTTP verb of each Vitally API
+/// Server-side authorisation policy for Zendesk tool calls. Maps the HTTP verb of each Zendesk API
 /// call to a required permission, then resolves whether the caller holds it — from their live Entra
 /// group membership when <see cref="LiveGroupCheck"/> is on (every deployed target), and from the
 /// token's claims only when it is off. This is the hard backstop behind the advisory
@@ -52,7 +52,7 @@ public class ToolAuthorizationOptions
     /// this value is never read and no claim can grant access.
     /// See <see cref="ToolAuthorizer"/>.
     /// </remarks>
-    public string CustomPermissionsClaim { get; set; } = "https://vitally.fiscaltec.com/permissions";
+    public string CustomPermissionsClaim { get; set; } = "https://zendesk-mcp.fiscaltec.com/permissions";
 
     /// <summary>
     /// When true, permissions are resolved from the caller's <b>live</b> Entra group membership

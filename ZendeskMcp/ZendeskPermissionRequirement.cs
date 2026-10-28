@@ -3,7 +3,7 @@ using Microsoft.AspNetCore.Authorization;
 namespace ZendeskMcp;
 
 /// <summary>
-/// Authorisation requirement carrying one <c>vitally:*</c> permission. Exists so the MCP SDK's
+/// Authorisation requirement carrying one <c>zendesk:*</c> permission. Exists so the MCP SDK's
 /// <c>AddAuthorizationFilters()</c> can evaluate tool-level <c>[Authorize]</c> attributes through the
 /// standard ASP.NET Core policy pipeline while still resolving permissions through
 /// <c>ToolAuthorizer.HasEffectivePermissionAsync</c>, so discovery filtering and the

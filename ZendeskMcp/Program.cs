@@ -31,8 +31,9 @@ var builder = WebApplication.CreateBuilder(args);
 // ⚠️ vitally-mcp#143 raised this as a PII control, and that premise was WRONG. Recorded rather than quietly
 // dropped, because the mistaken version is the intuitive one and will be re-derived otherwise.
 //
-// The claim was that these categories log the outbound URI including its query string, so a
-// `Search_users` / `Search_admins` term — potentially a name or email — would reach the logs.
+// The claim (made of vitally-mcp's Search_users / Search_admins, and equally true of Search_tickets
+// here) was that these categories log the outbound URI including its query string, so a search
+// term — potentially a name or email — would reach the logs.
 // **.NET redacts query VALUES by default**: the logged form is
 // `GET https://<subdomain>.zendesk.com/api/v2/search/export?*`, and the `?*` is the redaction marker,
 // not a truncation. Verified twice — by a probe that drove a request carrying a marker through a

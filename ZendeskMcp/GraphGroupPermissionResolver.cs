@@ -8,7 +8,7 @@ using Microsoft.Extensions.Options;
 namespace ZendeskMcp;
 
 /// <summary>
-/// Resolves live Vitally permissions from Microsoft Graph group membership. Uses the server's
+/// Resolves live Zendesk MCP permissions from Microsoft Graph group membership. Uses the server's
 /// managed identity (<see cref="TokenCredential"/>) to check, for each configured group, whether
 /// the user is a member — by listing the group's <b>transitive</b> members filtered to that user
 /// id, so membership via a nested (department) group counts, not just direct membership. Checking
@@ -194,7 +194,7 @@ public class GraphGroupPermissionResolver : IGroupPermissionResolver
     // Determine which of the configured groups the user belongs to, checking from the group side
     // (list a group's transitive members filtered to this user id). transitiveMembers expands
     // nested groups, so a user who is in a department group that is itself a member of an
-    // sg-vitally-* group is resolved correctly — not only users assigned to the sg-vitally-* group
+    // sg-zendesk-* group is resolved correctly — not only users assigned to the sg-zendesk-* group
     // directly. Listing group members needs only GroupMember.Read.All — unlike
     // POST /users/{id}/checkMemberGroups, which also requires reading the user object
     // (User.ReadBasic.All).

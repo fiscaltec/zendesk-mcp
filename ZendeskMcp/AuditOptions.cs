@@ -1,10 +1,11 @@
 namespace ZendeskMcp;
 
 /// <summary>
-/// Controls the per-user audit trail. Because all users share one Vitally API key, Vitally's own
-/// audit log can't attribute actions to individual FISCAL users — so the server emits its own
-/// structured audit record (authenticated user + verb + resource + outcome) at the single point
-/// every Vitally call funnels through.
+/// Controls the per-user audit trail. Every Zendesk call is made with the person's own Zendesk token,
+/// so Zendesk's audit log attributes each change to the agent — but Zendesk records changes, not
+/// reads, and knows nothing of the Entra identity or the tool call behind a request. So the server
+/// emits its own structured audit record (Entra object id + tool + verb + resource + outcome) at the
+/// single point every Zendesk call funnels through.
 /// <para>
 /// ⚠️ <b>Where these records go depends on one setting.</b>
 /// <list type="bullet">
@@ -46,15 +47,15 @@ public class AuditOptions
 
     public const string SectionName = "Audit";
 
-    /// <summary>When true, emit an audit record for each Vitally action. Defaults to true.</summary>
+    /// <summary>When true, emit an audit record for each Zendesk action. Defaults to true.</summary>
     public bool Enabled { get; set; } = true;
 
     /// <summary>
     /// When true, read operations (HTTP GET) are also audited. <b>Defaults to true</b>, and the
-    /// default is the point: this is the only record of who accessed which customer record, and
-    /// reads are 56 of the 93 tools, so a deployment that does not audit them has no meaningful
-    /// trail at all. It defaulted to false until 2026-09-17, and because no deployed target ever
-    /// set it, no read had ever been recorded.
+    /// default is the point: Zendesk logs changes, not reads, so this is the only record of who read
+    /// which ticket, and most tools are reads — a deployment that does not audit them has no meaningful
+    /// trail at all. (In vitally-mcp it defaulted to false until vitally-mcp#139, and because no deployed
+    /// target ever set it, no read had ever been recorded there.)
     /// <para>Left configurable rather than removed so ingest volume stays controllable — reads are
     /// genuinely the high-volume path. Turning it off is a deliberate cost decision that trades away
     /// the attribution this class exists to provide; mutations and denials are recorded either way.

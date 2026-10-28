@@ -1,7 +1,7 @@
 namespace ZendeskMcp;
 
 /// <summary>
-/// Resolves the set of Vitally permissions a user currently holds from their <b>live</b> Entra
+/// Resolves the set of Zendesk MCP permissions a user currently holds from their <b>live</b> Entra
 /// group membership, decoupling enforcement from the (frozen) token claim so group changes take
 /// effect promptly. Implementations cache results briefly per user.
 /// </summary>

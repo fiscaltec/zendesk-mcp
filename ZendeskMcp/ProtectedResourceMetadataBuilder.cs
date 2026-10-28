@@ -46,7 +46,7 @@ public static class ProtectedResourceMetadataBuilder
             AuthorizationServers = [authorizationServer ?? string.Empty],
             BearerMethodsSupported = ["header"],
             ScopesSupported = [.. ScopesFor(oauth)],
-            ResourceName = "Vitally MCP"
+            ResourceName = "Zendesk MCP"
         };
     }
 }

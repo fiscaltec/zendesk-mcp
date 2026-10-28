@@ -1,7 +1,7 @@
 namespace ZendeskMcp;
 
 /// <summary>
-/// OAuth / OIDC configuration for the Vitally MCP server. Provider-agnostic — works with any
+/// OAuth / OIDC configuration for the Zendesk MCP server. Provider-agnostic — works with any
 /// OIDC-compliant authorization server (Microsoft Entra, Keycloak, Okta, ...).
 /// </summary>
 public class OAuthOptions
@@ -108,7 +108,7 @@ public class OAuthOptions
 
     /// <summary>
     /// Canonical public origin of this server (scheme + host, no trailing path), e.g.
-    /// <c>https://vitally.fiscaltec.com</c>. When set, the <c>/.well-known/*</c> metadata documents
+    /// <c>https://zendesk-mcp.fiscaltec.com</c>. When set, the <c>/.well-known/*</c> metadata documents
     /// and the OAuth proxy's own callback URL are built from this value instead of the request's
     /// <c>Host</c> header. Set it in production so a spoofed/forwarded <c>Host</c> can never steer a
     /// client's <c>authorization_endpoint</c>/<c>token_endpoint</c> at an attacker. Leave empty in
@@ -124,7 +124,7 @@ public class OAuthOptions
     /// provider's own DCR endpoint, if it has one.
     /// </summary>
     /// <remarks>
-    /// Under Entra this is the <c>Vitally MCP</c> app registration, which is <b>both</b> the OAuth
+    /// Under Entra this is the <c>Zendesk MCP</c> app registration, which is <b>both</b> the OAuth
     /// client and the API resource — hence its appearing in <see cref="ValidAudiences"/>. Its
     /// redirect URIs are the fixed <c>/oauth/callback</c> of each origin, not the clients' own
     /// loopback URIs: the proxy substitutes its own and reverses the substitution at the callback,
@@ -144,7 +144,7 @@ public class OAuthOptions
 
     /// <summary>
     /// Scope value that names this server's own API to the upstream provider — under Entra the App
-    /// ID URI plus the exposed scope, e.g. <c>https://vitally.fiscaltec.com/mcp.access</c>. Empty by
+    /// ID URI plus the exposed scope, e.g. <c>https://zendesk-mcp.fiscaltec.com/mcp.access</c>. Empty by
     /// default.
     /// </summary>
     /// <remarks>

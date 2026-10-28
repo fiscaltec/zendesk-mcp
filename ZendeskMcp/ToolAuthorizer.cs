@@ -7,10 +7,11 @@ namespace ZendeskMcp;
 
 /// <summary>
 /// Enforces <see cref="ToolAuthorizationOptions"/> against the authenticated caller. Called from
-/// <see cref="ZendeskService.SendAsync"/> — the single point every Vitally API call funnels
-/// through — so all 93 tools are covered without per-tool annotation. Because every read
-/// (including search) is a GET and every mutation is a POST/PUT/DELETE, the HTTP verb is a
-/// faithful proxy for the tool's read/write/delete tier.
+/// <see cref="ZendeskService.SendAsync"/> — the single point every Zendesk API call funnels
+/// through — so every tool is covered without per-tool annotation. Because every read (search and
+/// macro preview included) is a GET and every mutation is a POST/PUT/DELETE, the HTTP verb is a
+/// faithful proxy for the tool's read/write/delete tier. Tools are written to keep it that way: a
+/// write tool never issues a DELETE, so the write tier never needs the delete tier.
 ///
 /// Permission resolution has two modes, chosen by
 /// <see cref="ToolAuthorizationOptions.LiveGroupCheck"/> and never mixed:
@@ -255,7 +256,7 @@ public class ToolAuthorizer
     }
 
     /// <summary>
-    /// Every Vitally permission the principal's claims assert, for the audit record. Mirrors the
+    /// Every Zendesk MCP permission the principal's claims assert, for the audit record. Mirrors the
     /// sources <see cref="HasPermission"/> consults, so the recorded tier cannot claim something the
     /// decision would have refused.
     /// </summary>
@@ -276,7 +277,7 @@ public class ToolAuthorizer
         }
 
         // Keep only the permissions this server governs, so an OIDC scope like `openid` is not
-        // recorded as a tier. Compared against the CONFIGURED names rather than a `vitally:` prefix:
+        // recorded as a tier. Compared against the CONFIGURED names rather than a `zendesk:` prefix:
         // the three are settable and only validated as non-empty, so a deployment may legitimately
         // use unprefixed names — and filtering on the prefix would let `HasPermission` authorise a
         // call while the record claimed the caller held nothing.

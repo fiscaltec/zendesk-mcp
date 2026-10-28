@@ -3,8 +3,8 @@ namespace ZendeskMcp;
 /// <summary>What one tool call touched, gathered from every upstream call it made.</summary>
 /// <param name="Truncated">
 /// <c>true</c> when the bounded auto-pager stopped before exhausting the result set, which makes the
-/// number of <i>matching</i> records unknowable — Vitally's envelope exposes only <c>next</c>, so
-/// there is no total. Deliberately <b>not</b> the same as the id list being capped.
+/// number of <i>matching</i> records unknowable — Zendesk's cursor pagination exposes only
+/// <c>has_more</c>, so there is no total. Deliberately <b>not</b> the same as the id list being capped.
 /// </param>
 public readonly record struct ToolCallAuditSummary(
     IReadOnlyList<string> Ids,
@@ -75,7 +75,7 @@ public sealed class ToolCallAuditContext
     }
 
     /// <summary>
-    /// Records that the bounded auto-pager gave up at <c>Vitally:MaxAutoPageFetches</c>. Separate from
+    /// Records that the bounded auto-pager gave up at <c>Zendesk:MaxAutoPageFetches</c>. Separate from
     /// the id cap on purpose: one says the total is unknown, the other says the list was shortened
     /// while the count stayed true.
     /// </summary>

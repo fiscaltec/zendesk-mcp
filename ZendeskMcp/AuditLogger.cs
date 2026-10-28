@@ -6,7 +6,7 @@ using Microsoft.Extensions.Options;
 namespace ZendeskMcp;
 
 /// <summary>
-/// Emits per-user audit records for Vitally actions, using structured logging so the named properties
+/// Emits per-user audit records for Zendesk actions, using structured logging so the named properties
 /// are shaped as queryable dimensions. Every record is keyed on the caller's identity as
 /// <see cref="ResolveUserId(ClaimsPrincipal?)"/> resolves it — Entra <b>object id</b> first (see
 /// <see cref="CallerIdentity"/>), then the raw <c>sub</c>, then <c>NameIdentifier</c>, then
