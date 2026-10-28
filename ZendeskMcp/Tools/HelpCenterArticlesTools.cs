@@ -1,9 +1,12 @@
 using System.ComponentModel;
 using System.Globalization;
 using System.Net;
+using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json.Nodes;
 using System.Text.RegularExpressions;
 using Microsoft.AspNetCore.Authorization;
+using Microsoft.Extensions.Caching.Memory;
 using ModelContextProtocol.Server;
 
 namespace ZendeskMcp.Tools;
@@ -17,6 +20,10 @@ namespace ZendeskMcp.Tools;
 public static partial class HelpCenterArticlesTools
 {
     private const int MaxSearchPageSize = 50;
+
+    // How long a created article is remembered, so a retried call returns it rather than a duplicate
+    // draft. The same window Zendesk gives ticket idempotency keys.
+    private static readonly TimeSpan RecentCreateWindow = TimeSpan.FromHours(2);
 
     [Authorize(Policy = "zendesk:read")]
     [McpServerTool(Name = "Search_help_center_articles", Title = "Search Help Center articles", ReadOnly = true, Destructive = false, Idempotent = true, OpenWorld = false), Description(
@@ -181,9 +188,11 @@ public static partial class HelpCenterArticlesTools
         "Create a new Help Center article in a section. Articles are created as drafts by default; publishing (draft=false) must be allowed in this server's settings (an administrator switch). " +
         "Use List_help_center_sections to find section_id, List_permission_groups for permission_group_id (if omitted and the Help Center has exactly one permission group, that one is used) and List_user_segments for user_segment_id. " +
         "If user_segment_id is omitted the article is visible to everyone once it is published; while it is a draft only agents who can manage it see it. " +
-        "For multi-brand accounts, pass brand_url when the section belongs to a non-default brand. " + HelpCenterJson.UntrustedContentWarning)]
+        "For multi-brand accounts, pass brand_url when the section belongs to a non-default brand. " +
+        "Safe to repeat: an identical call by the same person within two hours returns the article it already created (result 'already_created') rather than a second draft, unless that article has since been deleted; pass create_again true to create a duplicate on purpose. Returns result ('created' or 'already_created') with the article. " + HelpCenterJson.UntrustedContentWarning)]
     public static async Task<string> CreateHelpCenterArticle(
         ZendeskService zendesk,
+        IMemoryCache cache,
         [Description("The id of the section to create the article in. Use List_help_center_sections to find it.")] long section_id,
         [Description("Locale code for the article (e.g. 'en-us', 'fr').")] string locale,
         [Description("Title of the article. Max 500 characters.")] string title,
@@ -194,6 +203,7 @@ public static partial class HelpCenterArticlesTools
         [Description("The user segment that controls who can view the article once published. Use List_user_segments. If omitted, everyone can view it once published.")] long? user_segment_id = null,
         [Description("Position of the article within the section. Lower numbers appear first.")] int? position = null,
         [Description(HelpCenterJson.BrandUrlDescription)] string? brand_url = null,
+        [Description("true creates the article even if an identical one was created through this server by the same person in the last two hours. Default false.")] bool? create_again = null,
         CancellationToken cancellationToken = default)
     {
         ToolJson.PositiveId(section_id, "section_id");
@@ -213,6 +223,34 @@ public static partial class HelpCenterArticlesTools
         }
 
         HelpCenterJson.RequirePublishingAllowed(zendesk, draft);
+
+        // The repeat guard is what makes a retried call safe: a model that lost the first response must
+        // not leave a second draft. It is in-process and per person, so it covers retries, not a second
+        // server instance or a different agent creating the same article.
+        var arguments = new JsonObject
+        {
+            ["section_id"] = section_id, ["locale"] = validLocale, ["title"] = validTitle, ["body"] = body, ["draft"] = draft,
+            ["label_names"] = labels?.DeepClone(), ["permission_group_id"] = permission_group_id, ["user_segment_id"] = user_segment_id,
+            ["position"] = position, ["brand_url"] = brand_url,
+        };
+        var callerKey = await MacroSupport.CallerKeyAsync(zendesk, cancellationToken);
+        var cacheKey = "zendesk-mcp:create-article:" + Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes($"{zendesk.BaseUrl}\n{callerKey}\n{arguments.ToJsonString()}")));
+        if (create_again != true && cache.TryGetValue<long>(cacheKey, out var earlierId))
+        {
+            try
+            {
+                var earlier = await zendesk.GetAsync($"/api/v2/help_center/articles/{HelpCenterJson.Id(earlierId)}", brandUrl: brand_url, cancellationToken: cancellationToken);
+                var existing = HelpCenterJson.Article(earlier["article"], includeBody: false);
+                existing["result"] = "already_created";
+                existing["visible_to"] = user_segment_id is null ? "everyone once published" : "members of user_segment_id once published";
+                return existing.ToJsonString();
+            }
+            catch (HttpRequestException ex) when (ex.StatusCode == HttpStatusCode.NotFound)
+            {
+                // Deleted since: this call creates it again.
+                cache.Remove(cacheKey);
+            }
+        }
 
         var groupId = permission_group_id ?? await SinglePermissionGroupAsync(zendesk, brand_url, cancellationToken);
 
@@ -249,6 +287,12 @@ public static partial class HelpCenterArticlesTools
             cancellationToken: cancellationToken);
 
         var created = HelpCenterJson.Article(response["article"], includeBody: false);
+        if (ToolJson.Long(response["article"]?["id"]) is { } createdId)
+        {
+            cache.Set(cacheKey, createdId, RecentCreateWindow);
+        }
+
+        created["result"] = "created";
         created["visible_to"] = user_segment_id is null ? "everyone once published" : "members of user_segment_id once published";
         return created.ToJsonString();
     }

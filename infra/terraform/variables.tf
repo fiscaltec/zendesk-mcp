@@ -100,6 +100,12 @@ variable "zendesk_allow_article_publishing" {
   default     = false
 }
 
+variable "zendesk_allow_help_center_structure_changes" {
+  type        = bool
+  description = "Production: allow creating and changing Help Center categories and sections, which are public as soon as they exist."
+  default     = false
+}
+
 variable "zendesk_allow_macro_changes" {
   type        = bool
   description = "Production: allow creating, editing, activating and deactivating macros."
@@ -118,6 +124,11 @@ variable "staging_zendesk_allow_public_replies" {
 }
 
 variable "staging_zendesk_allow_article_publishing" {
+  type    = bool
+  default = false
+}
+
+variable "staging_zendesk_allow_help_center_structure_changes" {
   type    = bool
   default = false
 }

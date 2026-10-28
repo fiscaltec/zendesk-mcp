@@ -231,6 +231,12 @@ public class ZendeskFeatureOptions
     /// <summary>Allow publishing Help Center articles and translations rather than saving drafts.</summary>
     public bool AllowArticlePublishing { get; set; }
 
+    /// <summary>
+    /// Allow creating and changing Help Center categories and sections. They have no draft state, so
+    /// they are part of the public Help Center as soon as they exist.
+    /// </summary>
+    public bool AllowHelpCenterStructureChanges { get; set; }
+
     /// <summary>Allow creating, editing, activating and deactivating macros.</summary>
     public bool AllowMacroChanges { get; set; }
 

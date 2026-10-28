@@ -18,12 +18,34 @@ public class HelpCenterStructureToolsTests
     };
 
     [Fact]
+    public async Task StructureChanges_AreRefusedWhenTheSwitchIsOff_BeforeAnyRequest()
+    {
+        // Categories and sections have no draft state: they are public as soon as they exist.
+        using var fake = TestHelpers.CreateFakeZendesk(_ => FakeResponse.Json("{}"));
+        var zendesk = TestHelpers.BuildZendeskService(fake.Client);
+
+        var calls = new Func<Task<string>>[]
+        {
+            () => HelpCenterStructureTools.CreateHelpCenterCategory(zendesk, "N", "en-gb"),
+            () => HelpCenterStructureTools.UpdateHelpCenterCategory(zendesk, 5, position: 1),
+            () => HelpCenterStructureTools.CreateHelpCenterSection(zendesk, 5, "N", "en-gb"),
+            () => HelpCenterStructureTools.UpdateHelpCenterSection(zendesk, 7, position: 1),
+        };
+        foreach (var call in calls)
+        {
+            await FluentActions.Awaiting(call).Should().ThrowAsync<UnauthorizedAccessException>().WithMessage("*AllowHelpCenterStructureChanges*");
+        }
+
+        fake.Requests.Should().BeEmpty();
+    }
+
+    [Fact]
     public async Task ListCategories_BuildsLocalisedPathWithSortingAndPaging()
     {
         using var fake = TestHelpers.CreateFakeZendesk(_ => FakeResponse.Json("""
         {"categories":[{"id":5,"name":"Billing","description":"d","locale":"en-gb","position":0,"html_url":"u","url":"api"}],"meta":{"has_more":true,"after_cursor":"c2"}}
         """));
-        var zendesk = TestHelpers.BuildZendeskService(fake.Client);
+        var zendesk = TestHelpers.BuildZendeskService(fake.Client, configure: o => o.Features.AllowHelpCenterStructureChanges = true);
 
         var json = JsonNode.Parse(await HelpCenterStructureTools.ListHelpCenterCategories(zendesk, locale: "en-gb", sort_by: "updated_at", sort_order: "desc", page_size: 50, after_cursor: "c1"))!;
 
@@ -42,7 +64,7 @@ public class HelpCenterStructureToolsTests
     public async Task ListCategories_RejectsUnknownSort()
     {
         using var fake = TestHelpers.CreateFakeZendesk(_ => FakeResponse.Json("{}"));
-        var zendesk = TestHelpers.BuildZendeskService(fake.Client);
+        var zendesk = TestHelpers.BuildZendeskService(fake.Client, configure: o => o.Features.AllowHelpCenterStructureChanges = true);
 
         await FluentActions.Awaiting(() => HelpCenterStructureTools.ListHelpCenterCategories(zendesk, sort_by: "title"))
             .Should().ThrowAsync<ArgumentException>().WithMessage("*sort_by*");
@@ -54,7 +76,7 @@ public class HelpCenterStructureToolsTests
     public async Task ListCategories_ForeignBrandUrl_IsRefusedWithoutContactingIt()
     {
         using var fake = TestHelpers.CreateFakeZendesk(Echo);
-        var zendesk = TestHelpers.BuildZendeskService(fake.Client);
+        var zendesk = TestHelpers.BuildZendeskService(fake.Client, configure: o => o.Features.AllowHelpCenterStructureChanges = true);
 
         await FluentActions.Awaiting(() => HelpCenterStructureTools.ListHelpCenterCategories(zendesk, brand_url: "https://evil.example"))
             .Should().ThrowAsync<ArgumentException>();
@@ -65,7 +87,7 @@ public class HelpCenterStructureToolsTests
     public async Task CreateCategory_PostsBody()
     {
         using var fake = TestHelpers.CreateFakeZendesk(Echo);
-        var zendesk = TestHelpers.BuildZendeskService(fake.Client);
+        var zendesk = TestHelpers.BuildZendeskService(fake.Client, configure: o => o.Features.AllowHelpCenterStructureChanges = true);
 
         var json = JsonNode.Parse(await HelpCenterStructureTools.CreateHelpCenterCategory(zendesk, "Billing", "en-GB", description: "All about bills", position: 1, brand_url: "https://otherbrand.zendesk.com"))!;
 
@@ -83,7 +105,7 @@ public class HelpCenterStructureToolsTests
     public async Task CreateCategory_ValidatesLimits()
     {
         using var fake = TestHelpers.CreateFakeZendesk(Echo);
-        var zendesk = TestHelpers.BuildZendeskService(fake.Client);
+        var zendesk = TestHelpers.BuildZendeskService(fake.Client, configure: o => o.Features.AllowHelpCenterStructureChanges = true);
 
         await FluentActions.Awaiting(() => HelpCenterStructureTools.CreateHelpCenterCategory(zendesk, new string('x', 256), "en-gb"))
             .Should().ThrowAsync<ArgumentException>().WithMessage("*name*255*");
@@ -98,7 +120,7 @@ public class HelpCenterStructureToolsTests
     public async Task UpdateCategory_PositionAndTranslationAreSeparatePuts()
     {
         using var fake = TestHelpers.CreateFakeZendesk(Echo);
-        var zendesk = TestHelpers.BuildZendeskService(fake.Client);
+        var zendesk = TestHelpers.BuildZendeskService(fake.Client, configure: o => o.Features.AllowHelpCenterStructureChanges = true);
 
         var json = JsonNode.Parse(await HelpCenterStructureTools.UpdateHelpCenterCategory(zendesk, 5, position: 3, name: "N", description: "D", locale: "en-gb"))!;
 
@@ -121,7 +143,7 @@ public class HelpCenterStructureToolsTests
         using var fake = TestHelpers.CreateFakeZendesk(r => r.Path.EndsWith("/translations/en-gb", StringComparison.Ordinal)
             ? FakeResponse.Json("""{"translation":{"id":9,"locale":"en-gb","title":"New name","body":"New description"}}""")
             : FakeResponse.Json("""{"category":{"id":5,"name":"Old name","description":"Old description","locale":"en-gb","position":3}}"""));
-        var zendesk = TestHelpers.BuildZendeskService(fake.Client);
+        var zendesk = TestHelpers.BuildZendeskService(fake.Client, configure: o => o.Features.AllowHelpCenterStructureChanges = true);
 
         var json = JsonNode.Parse(await HelpCenterStructureTools.UpdateHelpCenterCategory(zendesk, 5, position: 3, name: "New name", description: "New description", locale: "en-gb"))!;
 
@@ -134,7 +156,7 @@ public class HelpCenterStructureToolsTests
     public async Task UpdateCategory_ValidatesArguments()
     {
         using var fake = TestHelpers.CreateFakeZendesk(Echo);
-        var zendesk = TestHelpers.BuildZendeskService(fake.Client);
+        var zendesk = TestHelpers.BuildZendeskService(fake.Client, configure: o => o.Features.AllowHelpCenterStructureChanges = true);
 
         await FluentActions.Awaiting(() => HelpCenterStructureTools.UpdateHelpCenterCategory(zendesk, 5))
             .Should().ThrowAsync<ArgumentException>().WithMessage("*at least one*");
@@ -147,7 +169,7 @@ public class HelpCenterStructureToolsTests
     public async Task ListSections_ByCategoryNeedsLocale()
     {
         using var fake = TestHelpers.CreateFakeZendesk(_ => FakeResponse.Json("""{"sections":[{"id":7,"name":"Invoices","category_id":5}],"meta":{"has_more":false}}"""));
-        var zendesk = TestHelpers.BuildZendeskService(fake.Client);
+        var zendesk = TestHelpers.BuildZendeskService(fake.Client, configure: o => o.Features.AllowHelpCenterStructureChanges = true);
 
         await FluentActions.Awaiting(() => HelpCenterStructureTools.ListHelpCenterSections(zendesk, category_id: 5))
             .Should().ThrowAsync<ArgumentException>().WithMessage("*locale*");
@@ -162,7 +184,7 @@ public class HelpCenterStructureToolsTests
     public async Task ListSections_WithoutFiltersUsesSectionsPath()
     {
         using var fake = TestHelpers.CreateFakeZendesk(_ => FakeResponse.Json("""{"sections":[],"meta":{"has_more":false}}"""));
-        var zendesk = TestHelpers.BuildZendeskService(fake.Client);
+        var zendesk = TestHelpers.BuildZendeskService(fake.Client, configure: o => o.Features.AllowHelpCenterStructureChanges = true);
 
         await HelpCenterStructureTools.ListHelpCenterSections(zendesk);
 
@@ -173,7 +195,7 @@ public class HelpCenterStructureToolsTests
     public async Task CreateSection_PostsIntoCategory()
     {
         using var fake = TestHelpers.CreateFakeZendesk(Echo);
-        var zendesk = TestHelpers.BuildZendeskService(fake.Client);
+        var zendesk = TestHelpers.BuildZendeskService(fake.Client, configure: o => o.Features.AllowHelpCenterStructureChanges = true);
 
         var json = JsonNode.Parse(await HelpCenterStructureTools.CreateHelpCenterSection(zendesk, 5, "Invoices", "en-gb", position: 0))!;
 
@@ -188,7 +210,7 @@ public class HelpCenterStructureToolsTests
     public async Task UpdateSection_MovesAndRenames()
     {
         using var fake = TestHelpers.CreateFakeZendesk(Echo);
-        var zendesk = TestHelpers.BuildZendeskService(fake.Client);
+        var zendesk = TestHelpers.BuildZendeskService(fake.Client, configure: o => o.Features.AllowHelpCenterStructureChanges = true);
 
         var json = JsonNode.Parse(await HelpCenterStructureTools.UpdateHelpCenterSection(zendesk, 7, position: 3, category_id: 6, description: "D", locale: "en-gb"))!;
 
@@ -205,7 +227,7 @@ public class HelpCenterStructureToolsTests
     public async Task UpdateSection_RequiresAChange()
     {
         using var fake = TestHelpers.CreateFakeZendesk(Echo);
-        var zendesk = TestHelpers.BuildZendeskService(fake.Client);
+        var zendesk = TestHelpers.BuildZendeskService(fake.Client, configure: o => o.Features.AllowHelpCenterStructureChanges = true);
 
         await FluentActions.Awaiting(() => HelpCenterStructureTools.UpdateHelpCenterSection(zendesk, 7))
             .Should().ThrowAsync<ArgumentException>().WithMessage("*at least one*");
@@ -217,7 +239,7 @@ public class HelpCenterStructureToolsTests
         using var fake = TestHelpers.CreateFakeZendesk(r => r.Query("page[after]") is null
             ? FakeResponse.Json("""{"user_segments":[{"id":1,"name":"Signed-in users","user_type":"signed_in_users","built_in":true,"group_ids":[],"organization_ids":[],"tags":[],"or_tags":[]}],"meta":{"has_more":true,"after_cursor":"p2"}}""")
             : FakeResponse.Json("""{"user_segments":[{"id":2,"name":"Agents","user_type":"staff","built_in":true}],"meta":{"has_more":false}}"""));
-        var zendesk = TestHelpers.BuildZendeskService(fake.Client);
+        var zendesk = TestHelpers.BuildZendeskService(fake.Client, configure: o => o.Features.AllowHelpCenterStructureChanges = true);
 
         var json = JsonNode.Parse(await HelpCenterStructureTools.ListUserSegments(zendesk))!;
 
@@ -231,7 +253,7 @@ public class HelpCenterStructureToolsTests
     public async Task ListPermissionGroups_ShapesGroups()
     {
         using var fake = TestHelpers.CreateFakeZendesk(_ => FakeResponse.Json("""{"permission_groups":[{"id":3,"name":"Admins","edit":[1],"publish":[2],"built_in":true,"url":"x"}],"meta":{"has_more":false}}"""));
-        var zendesk = TestHelpers.BuildZendeskService(fake.Client);
+        var zendesk = TestHelpers.BuildZendeskService(fake.Client, configure: o => o.Features.AllowHelpCenterStructureChanges = true);
 
         var json = JsonNode.Parse(await HelpCenterStructureTools.ListPermissionGroups(zendesk))!;
 

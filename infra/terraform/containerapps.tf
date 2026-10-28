@@ -48,6 +48,7 @@ locals {
 
     "Zendesk__Features__AllowPublicReplies"              = tostring(var.zendesk_allow_public_replies)
     "Zendesk__Features__AllowArticlePublishing"          = tostring(var.zendesk_allow_article_publishing)
+    "Zendesk__Features__AllowHelpCenterStructureChanges" = tostring(var.zendesk_allow_help_center_structure_changes)
     "Zendesk__Features__AllowMacroChanges"               = tostring(var.zendesk_allow_macro_changes)
     "Zendesk__Features__AllowUserAndOrganizationChanges" = tostring(var.zendesk_allow_user_and_organization_changes)
   })

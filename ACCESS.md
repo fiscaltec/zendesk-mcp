@@ -73,17 +73,18 @@ Tiers are cumulative. You need only the highest tier you require. Your client is
 your tier permits.
 
 **Zendesk still decides what your agent can do.** An editor whose Zendesk role cannot edit macros,
-or cannot see a group's tickets, gets Zendesk's refusal through this server. Four account-wide
+or cannot see a group's tickets, gets Zendesk's refusal through this server. Five account-wide
 switches also apply to everyone, whatever their tier:
 
 | Switch | Covers |
 |---|---|
 | Public replies | public comments, CCs and public macro replies (they email customers) |
 | Article publishing | publishing Help Center articles and translations rather than saving drafts |
+| Help Center structure changes | creating and changing Help Center categories and sections, which are public as soon as they exist |
 | Macro changes | creating, editing, activating and deactivating macros |
 | User and organisation changes | creating end users from an email address, organisation memberships |
 
-All four are **off** until the Infrastructure team turns them on (`Zendesk__Features__*`).
+All five are **off** until the Infrastructure team turns them on (`Zendesk__Features__*`).
 
 Group object ids (filled in from Terraform outputs once created):
 

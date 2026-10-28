@@ -1,12 +1,19 @@
 using System.Net;
 using System.Text.Json.Nodes;
 using FluentAssertions;
+using Microsoft.Extensions.Caching.Memory;
 using ZendeskMcp.Tools;
 
 namespace ZendeskMcp.Tests.Tools;
 
-public class HelpCenterArticlesToolsTests
+public sealed class HelpCenterArticlesToolsTests : IDisposable
 {
+    private readonly MemoryCache _cache = new(new MemoryCacheOptions());
+
+    private IMemoryCache Cache => _cache;
+
+    public void Dispose() => _cache.Dispose();
+
     internal const string BrandsJson = """
     {
       "brands": [
@@ -241,7 +248,7 @@ public class HelpCenterArticlesToolsTests
         using var fake = TestHelpers.CreateFakeZendesk(CreateRoute(OneGroup));
         var zendesk = TestHelpers.BuildZendeskService(fake.Client);
 
-        var json = JsonNode.Parse(await HelpCenterArticlesTools.CreateHelpCenterArticle(zendesk, 7, "en-GB", "New", body: "<p>Body</p>", label_names: ["a", "b"], position: 2))!;
+        var json = JsonNode.Parse(await HelpCenterArticlesTools.CreateHelpCenterArticle(zendesk, Cache, 7, "en-GB", "New", body: "<p>Body</p>", label_names: ["a", "b"], position: 2))!;
 
         var post = fake.Requests.Single(r => r.Method == HttpMethod.Post);
         var article = JsonNode.Parse(post.Body!)!["article"]!.AsObject();
@@ -258,13 +265,80 @@ public class HelpCenterArticlesToolsTests
         json["user_segment_ids"]!.AsArray().Should().BeEmpty();
     }
 
+    private static string Draft(string id) => "{\"article\":{\"id\":" + id + ",\"title\":\"New\",\"locale\":\"en-gb\",\"draft\":true,\"section_id\":7}}";
+
+    // A section to create into, articles that exist only once created, and a record of the POSTs.
+    private static Func<RecordedRequest, FakeResponse> CreateAndReadRoute(HashSet<long> existing)
+    {
+        var next = 600L;
+        return r =>
+        {
+            if (r.Method == HttpMethod.Post && r.Path == "/api/v2/help_center/en-gb/sections/7/articles")
+            {
+                var id = next++;
+                existing.Add(id);
+                return FakeResponse.Json(Draft(id.ToString(System.Globalization.CultureInfo.InvariantCulture)));
+            }
+
+            var match = System.Text.RegularExpressions.Regex.Match(r.Path, "^/api/v2/help_center/articles/(\\d+)$");
+            return match.Success && existing.Contains(long.Parse(match.Groups[1].Value, System.Globalization.CultureInfo.InvariantCulture))
+                ? FakeResponse.Json(Draft(match.Groups[1].Value))
+                : FakeResponse.NotFound();
+        };
+    }
+
+    [Fact]
+    public async Task Create_RepeatedIdenticalCall_ReturnsTheArticleAlreadyCreated()
+    {
+        var existing = new HashSet<long>();
+        using var fake = TestHelpers.CreateFakeZendesk(CreateAndReadRoute(existing));
+        var zendesk = TestHelpers.BuildZendeskService(fake.Client);
+
+        var first = JsonNode.Parse(await HelpCenterArticlesTools.CreateHelpCenterArticle(zendesk, Cache, 7, "en-gb", "New", permission_group_id: 3))!;
+        var second = JsonNode.Parse(await HelpCenterArticlesTools.CreateHelpCenterArticle(zendesk, Cache, 7, "en-gb", "New", permission_group_id: 3))!;
+
+        first["result"]!.GetValue<string>().Should().Be("created");
+        second["result"]!.GetValue<string>().Should().Be("already_created");
+        second["id"]!.GetValue<long>().Should().Be(first["id"]!.GetValue<long>());
+        fake.Requests.Count(r => r.Method == HttpMethod.Post).Should().Be(1, "a retried call must not leave a second draft");
+    }
+
+    [Fact]
+    public async Task Create_RepeatAfterTheArticleWasDeleted_CreatesItAgain()
+    {
+        var existing = new HashSet<long>();
+        using var fake = TestHelpers.CreateFakeZendesk(CreateAndReadRoute(existing));
+        var zendesk = TestHelpers.BuildZendeskService(fake.Client);
+
+        var first = JsonNode.Parse(await HelpCenterArticlesTools.CreateHelpCenterArticle(zendesk, Cache, 7, "en-gb", "New", permission_group_id: 3))!;
+        existing.Clear();
+        var second = JsonNode.Parse(await HelpCenterArticlesTools.CreateHelpCenterArticle(zendesk, Cache, 7, "en-gb", "New", permission_group_id: 3))!;
+
+        second["result"]!.GetValue<string>().Should().Be("created");
+        second["id"]!.GetValue<long>().Should().NotBe(first["id"]!.GetValue<long>());
+    }
+
+    [Fact]
+    public async Task Create_CreateAgainOrDifferentArguments_CreatesAnotherArticle()
+    {
+        var existing = new HashSet<long>();
+        using var fake = TestHelpers.CreateFakeZendesk(CreateAndReadRoute(existing));
+        var zendesk = TestHelpers.BuildZendeskService(fake.Client);
+
+        await HelpCenterArticlesTools.CreateHelpCenterArticle(zendesk, Cache, 7, "en-gb", "New", permission_group_id: 3);
+        await HelpCenterArticlesTools.CreateHelpCenterArticle(zendesk, Cache, 7, "en-gb", "New", permission_group_id: 3, create_again: true);
+        await HelpCenterArticlesTools.CreateHelpCenterArticle(zendesk, Cache, 7, "en-gb", "New", body: "<p>Different</p>", permission_group_id: 3);
+
+        fake.Requests.Count(r => r.Method == HttpMethod.Post).Should().Be(3);
+    }
+
     [Fact]
     public async Task Create_WithSeveralPermissionGroups_RefusesAndListsThem()
     {
         using var fake = TestHelpers.CreateFakeZendesk(CreateRoute(TwoGroups));
         var zendesk = TestHelpers.BuildZendeskService(fake.Client);
 
-        var act = () => HelpCenterArticlesTools.CreateHelpCenterArticle(zendesk, 7, "en-gb", "New");
+        var act = () => HelpCenterArticlesTools.CreateHelpCenterArticle(zendesk, Cache, 7, "en-gb", "New");
 
         (await act.Should().ThrowAsync<ArgumentException>()).WithMessage("*3 (Admins)*4 (Writers)*");
         fake.Requests.Should().NotContain(r => r.Method == HttpMethod.Post);
@@ -276,7 +350,7 @@ public class HelpCenterArticlesToolsTests
         using var fake = TestHelpers.CreateFakeZendesk(CreateRoute(TwoGroups));
         var zendesk = TestHelpers.BuildZendeskService(fake.Client);
 
-        await HelpCenterArticlesTools.CreateHelpCenterArticle(zendesk, 7, "en-gb", "New", permission_group_id: 4, user_segment_id: 11);
+        await HelpCenterArticlesTools.CreateHelpCenterArticle(zendesk, Cache, 7, "en-gb", "New", permission_group_id: 4, user_segment_id: 11);
 
         fake.Requests.Should().NotContain(r => r.Path == "/api/v2/guide/permission_groups");
         var article = JsonNode.Parse(fake.Requests.Single(r => r.Method == HttpMethod.Post).Body!)!["article"]!;
@@ -290,7 +364,7 @@ public class HelpCenterArticlesToolsTests
         using var fake = TestHelpers.CreateFakeZendesk(CreateRoute(OneGroup));
         var zendesk = TestHelpers.BuildZendeskService(fake.Client);
 
-        var act = () => HelpCenterArticlesTools.CreateHelpCenterArticle(zendesk, 7, "en-gb", "New", draft: false);
+        var act = () => HelpCenterArticlesTools.CreateHelpCenterArticle(zendesk, Cache, 7, "en-gb", "New", draft: false);
 
         (await act.Should().ThrowAsync<UnauthorizedAccessException>()).WithMessage("*AllowArticlePublishing*");
         fake.Requests.Should().BeEmpty();
@@ -302,7 +376,7 @@ public class HelpCenterArticlesToolsTests
         using var fake = TestHelpers.CreateFakeZendesk(CreateRoute(OneGroup));
         var zendesk = TestHelpers.BuildZendeskService(fake.Client, configure: o => o.Features.AllowArticlePublishing = true);
 
-        await HelpCenterArticlesTools.CreateHelpCenterArticle(zendesk, 7, "en-gb", "New", draft: false);
+        await HelpCenterArticlesTools.CreateHelpCenterArticle(zendesk, Cache, 7, "en-gb", "New", draft: false);
 
         JsonNode.Parse(fake.Requests.Single(r => r.Method == HttpMethod.Post).Body!)!["article"]!["draft"]!.GetValue<bool>().Should().BeFalse();
     }
@@ -313,15 +387,15 @@ public class HelpCenterArticlesToolsTests
         using var fake = TestHelpers.CreateFakeZendesk(CreateRoute(OneGroup));
         var zendesk = TestHelpers.BuildZendeskService(fake.Client);
 
-        await FluentActions.Awaiting(() => HelpCenterArticlesTools.CreateHelpCenterArticle(zendesk, 7, "en-gb", "T", label_names: Enumerable.Range(0, 21).Select(i => $"l{i}").ToArray()))
+        await FluentActions.Awaiting(() => HelpCenterArticlesTools.CreateHelpCenterArticle(zendesk, Cache, 7, "en-gb", "T", label_names: Enumerable.Range(0, 21).Select(i => $"l{i}").ToArray()))
             .Should().ThrowAsync<ArgumentException>().WithMessage("*label_names*20*");
-        await FluentActions.Awaiting(() => HelpCenterArticlesTools.CreateHelpCenterArticle(zendesk, 7, "en-gb", "T", label_names: [new string('x', 101)]))
+        await FluentActions.Awaiting(() => HelpCenterArticlesTools.CreateHelpCenterArticle(zendesk, Cache, 7, "en-gb", "T", label_names: [new string('x', 101)]))
             .Should().ThrowAsync<ArgumentException>().WithMessage("*100 characters*");
-        await FluentActions.Awaiting(() => HelpCenterArticlesTools.CreateHelpCenterArticle(zendesk, 7, "en-gb", new string('x', 501)))
+        await FluentActions.Awaiting(() => HelpCenterArticlesTools.CreateHelpCenterArticle(zendesk, Cache, 7, "en-gb", new string('x', 501)))
             .Should().ThrowAsync<ArgumentException>().WithMessage("*title*");
-        await FluentActions.Awaiting(() => HelpCenterArticlesTools.CreateHelpCenterArticle(zendesk, 7, "en-gb", "T", body: new string('x', 100_001)))
+        await FluentActions.Awaiting(() => HelpCenterArticlesTools.CreateHelpCenterArticle(zendesk, Cache, 7, "en-gb", "T", body: new string('x', 100_001)))
             .Should().ThrowAsync<ArgumentException>().WithMessage("*body*");
-        await FluentActions.Awaiting(() => HelpCenterArticlesTools.CreateHelpCenterArticle(zendesk, 7, "en-gb", "T", position: -1))
+        await FluentActions.Awaiting(() => HelpCenterArticlesTools.CreateHelpCenterArticle(zendesk, Cache, 7, "en-gb", "T", position: -1))
             .Should().ThrowAsync<ArgumentException>().WithMessage("*position*");
         fake.Requests.Should().BeEmpty();
     }
@@ -332,7 +406,7 @@ public class HelpCenterArticlesToolsTests
         using var fake = TestHelpers.CreateFakeZendesk(CreateRoute(OneGroup));
         var zendesk = TestHelpers.BuildZendeskService(fake.Client);
 
-        var act = () => HelpCenterArticlesTools.CreateHelpCenterArticle(zendesk, 7, "en-gb", "New", permission_group_id: 3, brand_url: "https://acme.zendesk.com.attacker.example");
+        var act = () => HelpCenterArticlesTools.CreateHelpCenterArticle(zendesk, Cache, 7, "en-gb", "New", permission_group_id: 3, brand_url: "https://acme.zendesk.com.attacker.example");
 
         await act.Should().ThrowAsync<ArgumentException>();
         fake.Requests.Should().NotContain(r => r.Method == HttpMethod.Post);

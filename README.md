@@ -52,7 +52,7 @@ Configuration comes from environment variables in deployed targets (double-under
 | `Zendesk:OAuthScopes` | No | `read write` | Scopes requested from Zendesk. |
 | `Zendesk:AccessTokenExpiresInSeconds` / `RefreshTokenExpiresInSeconds` | No | `7200` / `7776000` | Requests expiring Zendesk tokens with refresh; set the first to null for Zendesk's legacy non-expiring tokens. |
 | `Zendesk:RequireEmailMatch` | No | `true` | Refuse a Zendesk login whose email differs from the Entra sign-in name. This is what binds a Zendesk login to the right person — do not turn it off in a deployed target. |
-| `Zendesk:Features:*` | No | all `false` | `AllowPublicReplies`, `AllowArticlePublishing`, `AllowMacroChanges`, `AllowUserAndOrganizationChanges` — account-wide switches for the actions with the widest reach. |
+| `Zendesk:Features:*` | No | all `false` | `AllowPublicReplies`, `AllowArticlePublishing`, `AllowHelpCenterStructureChanges`, `AllowMacroChanges`, `AllowUserAndOrganizationChanges` — account-wide switches for the actions with the widest reach. |
 | `Zendesk:MaxAutoPageFetches` / `MaxAnalyticsTickets` / `MaxAttachmentBytes` | No | `10` / `2000` / 20 MB | Bounds on server-side paging, analytics fan-out and file size. |
 | `Zendesk:DevelopmentAccessToken` | Local only | — | A Zendesk OAuth access token used for every call. Refused at startup unless `OAuth:NoAuth=true`, no Key Vault is set and the environment is Development. (`DevelopmentEmail` + `DevelopmentApiToken` still work, but Zendesk is retiring API tokens.) |
 | `OAuth:*` | Yes | — | Entra sign-in to this server, exactly as in vitally-mcp: `Authority`, `Audience`, `Resource`, `UpstreamResourceScope`, `SharedClientId`, `SharedClientSecret`, `AllowedClientRedirectUris`, `PublicBaseUrl`, `NoAuth`. |

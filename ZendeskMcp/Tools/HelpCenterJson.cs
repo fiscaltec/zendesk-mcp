@@ -200,6 +200,10 @@ public static partial class HelpCenterJson
         return ToolJson.Pick(item, fields);
     }
 
+    /// <summary>Refuses category and section changes unless the account-wide switch allows them.</summary>
+    public static void RequireStructureChangesAllowed(ZendeskService zendesk, string action) =>
+        ToolJson.RequireFeature(zendesk.Options.Features.AllowHelpCenterStructureChanges, "AllowHelpCenterStructureChanges", action);
+
     /// <summary>
     /// Brings a category or section read before its translation was updated in line with that update,
     /// so one result never reports both the old and the new name. Only when the locales match: the

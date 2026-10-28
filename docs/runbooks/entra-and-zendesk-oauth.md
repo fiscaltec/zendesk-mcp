@@ -112,6 +112,6 @@ hold the old token, which is why revoking at Zendesk comes first.
   tools. Use it on staging whenever it is pointed at production Zendesk data and nobody is
   deliberately testing writes. See vitally-mcp's `read-only-and-rbac-rollout.md` for why this was
   the safest staging posture there.
-- `Zendesk__Features__AllowPublicReplies`, `AllowArticlePublishing`, `AllowMacroChanges` and
+- `Zendesk__Features__AllowPublicReplies`, `AllowArticlePublishing`, `AllowHelpCenterStructureChanges`, `AllowMacroChanges` and
   `AllowUserAndOrganizationChanges` are account-wide and default off. Turning one on is a decision
   to record in the PR or issue that does it, with who approved it.

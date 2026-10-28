@@ -40,7 +40,7 @@ public static class HelpCenterStructureTools
 
     [Authorize(Policy = "zendesk:write")]
     [McpServerTool(Name = "Create_help_center_category", Title = "Create Help Center category", ReadOnly = false, Destructive = true, Idempotent = false, OpenWorld = false), Description(
-        "Create a Help Center category. Categories have no draft state: they exist in the Help Center as soon as they are created, although Help Center themes usually hide categories that contain no published articles. " +
+        "Create a Help Center category. Categories have no draft state: they exist in the Help Center as soon as they are created, although Help Center themes usually hide categories that contain no published articles. Requires Help Center structure changes to be enabled in this server's settings (an administrator switch). " +
         "Creating categories requires the connected Zendesk user to be a Help Center manager. Use List_help_center_categories first to see the existing categories and their positions. " +
         "For multi-brand accounts, pass brand_url to create the category in a non-default brand's Help Center. " + HelpCenterJson.UntrustedContentWarning)]
     public static async Task<string> CreateHelpCenterCategory(
@@ -52,6 +52,7 @@ public static class HelpCenterStructureTools
         [Description(HelpCenterJson.BrandUrlDescription)] string? brand_url = null,
         CancellationToken cancellationToken = default)
     {
+        HelpCenterJson.RequireStructureChangesAllowed(zendesk, "Creating Help Center categories");
         var category = new JsonObject
         {
             ["name"] = HelpCenterJson.RequiredText(name, "name", HelpCenterJson.MaxNameLength),
@@ -66,7 +67,7 @@ public static class HelpCenterStructureTools
     [Authorize(Policy = "zendesk:write")]
     [McpServerTool(Name = "Update_help_center_category", Title = "Update Help Center category", ReadOnly = false, Destructive = true, Idempotent = true, OpenWorld = false), Description(
         "Update a Help Center category: change its position (to reorder categories) and/or its name or description in one locale. Provide at least one of position, name or description; locale is required with name or description. " +
-        "To reorder several categories, call this once per category with its new position. Name and description changes update only that locale's translation. " +
+        "To reorder several categories, call this once per category with its new position. Name and description changes update only that locale's translation. Requires Help Center structure changes to be enabled in this server's settings (an administrator switch). " +
         "Requires the connected Zendesk user to be a Help Center manager. For multi-brand accounts, pass brand_url for a non-default brand's category. " + HelpCenterJson.UntrustedContentWarning)]
     public static async Task<string> UpdateHelpCenterCategory(
         ZendeskService zendesk,
@@ -78,6 +79,7 @@ public static class HelpCenterStructureTools
         [Description(HelpCenterJson.BrandUrlDescription)] string? brand_url = null,
         CancellationToken cancellationToken = default)
     {
+        HelpCenterJson.RequireStructureChangesAllowed(zendesk, "Changing Help Center categories");
         ToolJson.PositiveId(category_id, "category_id");
         var translation = TranslationChange(name, description, locale, out var validLocale);
         HelpCenterJson.Position(position);
@@ -148,7 +150,7 @@ public static class HelpCenterStructureTools
 
     [Authorize(Policy = "zendesk:write")]
     [McpServerTool(Name = "Create_help_center_section", Title = "Create Help Center section", ReadOnly = false, Destructive = true, Idempotent = false, OpenWorld = false), Description(
-        "Create a section inside a Help Center category. Sections have no draft state: they exist as soon as they are created, although Help Center themes usually hide sections that contain no published articles. " +
+        "Create a section inside a Help Center category. Sections have no draft state: they exist as soon as they are created, although Help Center themes usually hide sections that contain no published articles. Requires Help Center structure changes to be enabled in this server's settings (an administrator switch). " +
         "Use List_help_center_categories to find category_id and List_help_center_sections to see the existing sections and their positions. " +
         "For multi-brand accounts, pass brand_url for a non-default brand's category. " + HelpCenterJson.UntrustedContentWarning)]
     public static async Task<string> CreateHelpCenterSection(
@@ -161,6 +163,7 @@ public static class HelpCenterStructureTools
         [Description(HelpCenterJson.BrandUrlDescription)] string? brand_url = null,
         CancellationToken cancellationToken = default)
     {
+        HelpCenterJson.RequireStructureChangesAllowed(zendesk, "Creating Help Center sections");
         ToolJson.PositiveId(category_id, "category_id");
         var section = new JsonObject
         {
@@ -175,7 +178,7 @@ public static class HelpCenterStructureTools
 
     [Authorize(Policy = "zendesk:write")]
     [McpServerTool(Name = "Update_help_center_section", Title = "Update Help Center section", ReadOnly = false, Destructive = true, Idempotent = true, OpenWorld = false), Description(
-        "Update a Help Center section: change its position (to reorder sections), move it to another category, and/or change its name or description in one locale. Provide at least one of position, category_id, name or description; locale is required with name or description. " +
+        "Update a Help Center section: change its position (to reorder sections), move it to another category, and/or change its name or description in one locale. Provide at least one of position, category_id, name or description; locale is required with name or description. Requires Help Center structure changes to be enabled in this server's settings (an administrator switch). " +
         "To reorder several sections, call this once per section with its new position. Name and description changes update only that locale's translation. " +
         "For multi-brand accounts, pass brand_url for a non-default brand's section. " + HelpCenterJson.UntrustedContentWarning)]
     public static async Task<string> UpdateHelpCenterSection(
@@ -189,6 +192,7 @@ public static class HelpCenterStructureTools
         [Description(HelpCenterJson.BrandUrlDescription)] string? brand_url = null,
         CancellationToken cancellationToken = default)
     {
+        HelpCenterJson.RequireStructureChangesAllowed(zendesk, "Changing Help Center sections");
         ToolJson.PositiveId(section_id, "section_id");
         var translation = TranslationChange(name, description, locale, out var validLocale);
         HelpCenterJson.Position(position);

@@ -20,8 +20,9 @@ public static class ZendeskServerInstructions
           Count_tickets (group_by for breakdowns). For KPI figures use Get_ticket_metrics_summary,
           Get_sla_summary and Get_sla_queue rather than fetching tickets one by one.
         - Before applying a macro, run Preview_macro and show the person what will change.
-        - Public replies, article publishing, macro changes and user/organisation changes can each be
-          switched off for the whole account; a refusal naming one of these is a setting, not a fault.
+        - Public replies, article publishing, Help Center category and section changes, macro changes and
+          user/organisation changes can each be switched off for the whole account; a refusal naming one
+          of these is a setting, not a fault.
         - Read-only deployments deny all writes and hide the create/update tools; a permission error
           means your Entra tier lacks the required permission, or Zendesk refused it for this agent.
         """;

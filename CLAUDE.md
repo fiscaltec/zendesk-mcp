@@ -507,7 +507,7 @@ Zendesk ──302──> /zendesk/callback?code&state ──> exchange code ─�
 
 ### Account-wide feature switches
 
-`Zendesk:Features` — `AllowPublicReplies`, `AllowArticlePublishing`, `AllowMacroChanges`, `AllowUserAndOrganizationChanges`, all **off** by default — guard the actions whose effect reaches beyond the agent: customers' inboxes, the public Help Center, every agent's macros, who can read an organisation's tickets. `ToolJson.RequireFeature` refuses with a message naming the setting so the model reports a setting rather than retrying. They sit on top of the Entra tier and the agent's Zendesk role; they do not replace either.
+`Zendesk:Features` — `AllowPublicReplies`, `AllowArticlePublishing`, `AllowHelpCenterStructureChanges`, `AllowMacroChanges`, `AllowUserAndOrganizationChanges`, all **off** by default — guard the actions whose effect reaches beyond the agent: customers' inboxes, the public Help Center (published articles, and categories and sections, which have no draft state), every agent's macros, who can read an organisation's tickets. `ToolJson.RequireFeature` refuses with a message naming the setting so the model reports a setting rather than retrying. They sit on top of the Entra tier and the agent's Zendesk role; they do not replace either.
 
 ### Untrusted content
 
