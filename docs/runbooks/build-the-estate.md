@@ -269,6 +269,9 @@ Admin Centre → Apps and integrations → APIs → OAuth clients →
 ```bash
 ( set -euo pipefail; source ~/zendesk-estate.env; assert_context
 az config set extension.use_dynamic_install=yes_without_prompt -o none
+# `az monitor app-insights` (Phases 2, 4, 9) is an extension, not core: install it here, so a missing
+# one fails pre-flight rather than half-way through Phase 2. Every other group used here is core.
+az extension show --name application-insights -o none 2>/dev/null || az extension add --name application-insights -o none
 # Resource providers the estate uses (Terraform's azurerm registers these itself).
 for ns in Microsoft.App Microsoft.Network Microsoft.KeyVault Microsoft.ManagedIdentity \
           Microsoft.OperationalInsights Microsoft.Insights Microsoft.Storage; do
@@ -283,6 +286,24 @@ gh api "repos/$GH_REPO" --silent || { echo "gh cannot reach $GH_REPO — run 'gh
 # git, not `gh repo clone`: that is GraphQL underneath, which cloud sessions refuse. The repo is public.
 [ -d "$REPO_DIR/.git" ] || git clone -q "https://github.com/$GH_REPO.git" "$REPO_DIR"
 git -C "$REPO_DIR" fetch -q origin main && git -C "$REPO_DIR" checkout -q main && git -C "$REPO_DIR" pull -q --ff-only
+)
+```
+
+**If `az extension add` cannot reach the extension index** (`aka.ms` refused, as from a Claude Code
+cloud session on 2026-10-28, #3): the wheels host `azcliprod.blob.core.windows.net` may still be
+reachable. Take the latest *stable* `application-insights` entry's `downloadUrl` and `sha256Digest`
+from Microsoft's index on GitHub (`Azure/azure-cli-extensions`, `src/index.json`), download the
+wheel, and install it only if the digest matches — `--source` skips the check `az` would otherwise
+make:
+
+```bash
+( set -euo pipefail
+v=1.2.3   # latest stable on 2026-10-28; read the index rather than trusting this
+want=c941c232d04366636e1354cfe00708521013f88a5b1e74740d8047ec46d90599
+w=/tmp/application_insights-$v-py2.py3-none-any.whl
+curl -fsS -o "$w" "https://azcliprod.blob.core.windows.net/cli-extensions/application_insights-$v-py2.py3-none-any.whl"
+[ "$(sha256sum "$w" | awk '{print $1}')" = "$want" ] || { echo "FAIL digest mismatch — not installed"; rm -f "$w"; exit 1; }
+az extension add --source "$w" --yes -o none && rm -f "$w" && echo "OK   application-insights $v installed"
 )
 ```
 
@@ -323,6 +344,7 @@ PY
 else
   echo "NOTE $RG exists: this is a re-run, so the greenfield checks are skipped"
 fi
+nonempty "application-insights extension version" "$(az extension show --name application-insights --query version -o tsv 2>/dev/null || true)"
 # Terraform's preconditions on the OAuth origins (entra.tf), so a mistyped env file fails here.
 expect "audience = production origin, no slash" "$PROD_ORIGIN" "$OAUTH_AUDIENCE"
 expect "production resource = origin + /" "$PROD_ORIGIN/" "$OAUTH_RESOURCE"
