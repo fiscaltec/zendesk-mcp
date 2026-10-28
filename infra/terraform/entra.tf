@@ -248,7 +248,7 @@ resource "azuread_group" "zendesk_admins" {
 #  * The tenant-wide admin consent grant (`openid profile email offline_access mcp.access`).
 #    `azuread_service_principal_delegated_permission_grant` could express it, but its drift
 #    detection is noisy for no operational gain; it is one `az ad app permission admin-consent`
-#    (README.md, apply procedure).
+#    (docs/runbooks/build-the-estate.md).
 #
 #  * Graph `GroupMember.Read.All` for the managed identity — see identity.tf.
 # ---------------------------------------------------------------------------------------------

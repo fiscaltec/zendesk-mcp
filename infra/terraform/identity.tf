@@ -59,7 +59,7 @@ resource "azurerm_role_assignment" "mi_monitoring_metrics_publisher" {
 # GroupMember.Read.All, for the live sg-zendesk-* membership check (Gate 2). Without it every tool
 # call is denied — the resolver never fails open. It is not granted here: an app-role grant on
 # Microsoft Graph needs a Privileged Role Administrator–level principal, which the identity running
-# routine applies should not hold. Grant it once, out-of-band (README.md, apply procedure), to the
+# routine applies should not hold. Grant it once, out-of-band (docs/runbooks/build-the-estate.md), to the
 # identity's principal id (output `managed_identity_principal_id`).
 
 # CI/CD (GitHub Actions OIDC): GitHub authenticates as this identity to deploy. The federated

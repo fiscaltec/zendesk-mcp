@@ -119,8 +119,8 @@ resource "azurerm_container_app" "app" {
     }
 
     # The custom domain (zendesk-mcp.fiscaltec.com) is bound to a FREE MANAGED certificate, which
-    # azurerm cannot create, so the binding is done out-of-band after the first apply (README.md,
-    # apply procedure).
+    # azurerm cannot create, so the binding is done out-of-band after the first apply (docs/runbooks/build-the-estate.md,
+    # Phase 11).
   }
 
   template {
@@ -185,7 +185,7 @@ resource "azurerm_container_app" "app" {
 
     precondition {
       condition     = var.oauth_shared_client_secret != null && var.oauth_shared_client_secret != ""
-      error_message = "oauth_shared_client_secret is required to create or update the Container Apps. Create the Entra client secret first (README.md, apply procedure step 2) and supply it as TF_VAR_oauth_shared_client_secret."
+      error_message = "oauth_shared_client_secret is required to create or update the Container Apps. Create the Entra client secret first (docs/runbooks/build-the-estate.md, Phase 7) and supply it as TF_VAR_oauth_shared_client_secret."
     }
   }
 }

@@ -53,7 +53,7 @@ resource "azurerm_container_app" "staging" {
     }
 
     # zendesk-mcp-staging.fiscaltec.com, bound to a free managed certificate out-of-band, as
-    # production is (README.md, apply procedure).
+    # production is (docs/runbooks/build-the-estate.md).
   }
 
   template {
@@ -126,7 +126,7 @@ resource "azurerm_container_app" "staging" {
 
     precondition {
       condition     = var.oauth_shared_client_secret != null && var.oauth_shared_client_secret != ""
-      error_message = "oauth_shared_client_secret is required to create or update the Container Apps. Create the Entra client secret first (README.md, apply procedure step 2) and supply it as TF_VAR_oauth_shared_client_secret."
+      error_message = "oauth_shared_client_secret is required to create or update the Container Apps. Create the Entra client secret first (docs/runbooks/build-the-estate.md, Phase 7) and supply it as TF_VAR_oauth_shared_client_secret."
     }
   }
 }

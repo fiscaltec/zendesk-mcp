@@ -41,7 +41,7 @@ dotnet run --project ZendeskMcp/ZendeskMcp.csproj
 
 `StartupGuards.EnsureDevelopmentTokenIsLocal` refuses the development token unless `OAuth:NoAuth=true`, no `Zendesk:KeyVaultUri` is set **and** the host runs in the `Development` environment (there is no `launchSettings.json`, so `dotnet run` alone starts in Production and refuses). Behind real sign-in it would turn a per-user server back into a shared service account, attributing everyone's changes to the token's owner. Do not weaken that guard.
 
-To exercise per-user OAuth locally instead, leave `NoAuth` off, set `Zendesk:OAuthClientId` and `Zendesk:DevelopmentOAuthClientSecret` (in-memory token store; nothing survives a restart), and add `http://localhost:5099/zendesk/callback` to the redirect URLs of a **separate development** Zendesk OAuth client — not `fiscal_zendesk_mcp`, which serves production and must list only the two deployed callbacks (`infra/terraform/README.md`, step 0).
+To exercise per-user OAuth locally instead, leave `NoAuth` off, set `Zendesk:OAuthClientId` and `Zendesk:DevelopmentOAuthClientSecret` (in-memory token store; nothing survives a restart), and add `http://localhost:5099/zendesk/callback` to the redirect URLs of a **separate development** Zendesk OAuth client — not `fiscal_zendesk_mcp`, which serves production and must list only the two deployed callbacks (`docs/runbooks/build-the-estate.md`, Phase 0).
 
 ### Smoke-testing the server
 

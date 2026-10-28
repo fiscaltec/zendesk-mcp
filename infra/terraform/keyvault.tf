@@ -10,7 +10,7 @@ data "azurerm_client_config" "current" {}
 #   zendesk-staging-user-{objectId} the same for staging (Zendesk__TokenSecretPrefix)
 #
 # None of these values is managed by Terraform — they would land in state, and the data plane is
-# private anyway. The first two are set out-of-band with an expiry (README.md, apply procedure);
+# private anyway. The first two are set out-of-band with an expiry (docs/runbooks/build-the-estate.md);
 # the per-person secrets are written by the app itself, which is why its identity holds Key Vault
 # Secrets Officer here rather than Secrets User (identity.tf explains the trade-off).
 resource "azurerm_key_vault" "secret" {

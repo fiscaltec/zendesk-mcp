@@ -66,7 +66,7 @@ variable "vnet_address_space" {
 # ---- Images ----
 # Used only when each Container App is CREATED. After that deploy.yml owns the image and the apps
 # ignore it (lifecycle.ignore_changes), so a later apply never rolls back a release. No default:
-# it must name the tag imported into the ACR during the first apply (README.md, step 3).
+# it must name the tag imported into the ACR during the first apply (docs/runbooks/build-the-estate.md, Phase 8).
 variable "image_tag" {
   type        = string
   description = "Image tag in the ACR the production Container App is created with (initial create only)."
@@ -246,7 +246,7 @@ variable "allowed_client_redirect_uri" {
 # trap). Rotation: docs/runbooks/entra-and-zendesk-oauth.md.
 #
 # Null by default ONLY so the first, targeted apply can create the Entra app before this secret can
-# exist (README.md, apply procedure). Both Container Apps carry a precondition that refuses to plan
+# exist (docs/runbooks/build-the-estate.md). Both Container Apps carry a precondition that refuses to plan
 # without it, so a full apply cannot run on the default.
 #
 # The hazard is a WRONG value, not a missing one: a stale secret boots fine, passes /health and the
