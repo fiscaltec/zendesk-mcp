@@ -72,6 +72,13 @@ jobs:
         if: ${{ !cancelled() }}
         run: bash .github/scripts/tests/check-serving-revisions.test.sh
 
+      # The pre-merge Copilot gate (.claude/hooks/) fails CLOSED on a refused call, but a logic
+      # regression in it fails OPEN — a merge the gate should have stopped goes through. Runs against
+      # stub `gh` and `git`; needs only bash and jq.
+      - name: Test the merge gate hook
+        if: ${{ !cancelled() }}
+        run: bash .github/scripts/tests/pre-merge-copilot-gate.test.sh
+
       - name: Upload test results
         if: always()
         uses: actions/upload-artifact@v7

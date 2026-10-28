@@ -48,7 +48,10 @@
       "WebFetch(domain:csharp.sdk.modelcontextprotocol.io)",
       "WebFetch(domain:support.zendesk.com)"
     ],
-    "deny": [],
+    "deny": [
+      "mcp__github__merge_pull_request",
+      "mcp__github__enable_pr_auto_merge"
+    ],
     "ask": []
   },
   "hooks": {
@@ -68,6 +71,14 @@
             "type": "command",
             "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/pre-merge-copilot-gate.sh\"",
             "if": "Bash(gh pr merge*)",
+            "shell": "bash",
+            "timeout": 30,
+            "statusMessage": "Checking Copilot merge gate…"
+          },
+          {
+            "type": "command",
+            "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/pre-merge-copilot-gate.sh\"",
+            "if": "Bash(gh api*)",
             "shell": "bash",
             "timeout": 30,
             "statusMessage": "Checking Copilot merge gate…"

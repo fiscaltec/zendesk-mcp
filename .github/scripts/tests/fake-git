@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+# Stub `git` for pre-merge-copilot-gate.test.sh. Supports only what the hook calls:
+#   git remote get-url origin          → $FAKE_ORIGIN (fails when unset)
+#   git ls-remote origin refs/pull/N/head → "$FAKE_HEAD<TAB>refs/pull/N/head" (nothing when unset)
+#   git rev-parse --abbrev-ref HEAD    → $FAKE_BRANCH (fails when unset)
+set -uo pipefail
+case "$*" in
+"remote get-url origin") [ -n "${FAKE_ORIGIN:-}" ] && echo "$FAKE_ORIGIN" ;;
+"ls-remote origin refs/pull/"*) [ -n "${FAKE_HEAD:-}" ] && printf '%s\t%s\n' "$FAKE_HEAD" "$3"; exit 0 ;;
+"rev-parse --abbrev-ref HEAD") [ -n "${FAKE_BRANCH:-}" ] && echo "$FAKE_BRANCH" ;;
+*) echo "fake-git: unsupported: $*" >&2; exit 2 ;;
+esac

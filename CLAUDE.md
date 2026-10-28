@@ -99,11 +99,11 @@ available from Claude Code sessions` — it is GraphQL underneath, and the sessi
 REST only. Create issues through REST instead (`gh api -X POST repos/fiscaltec/zendesk-mcp/issues
 --input body.json`, with `title`, `body` and `labels` in the JSON). `gh issue edit` and `gh issue view`
 fail the same way (checked 2026-10-28); use `gh api -X PATCH …/issues/<n>` and `gh api …/issues/<n>`.
-Hit when #2–#9 were raised. The same limit means the Copilot merge gate below cannot pass from a cloud
-session: `.claude/hooks/pre-merge-copilot-gate.sh` reads the PR through `gh pr view` and
-`gh api graphql`, both refused there, so it fails closed and denies every merge — verified 2026-10-28
-by feeding it a synthetic payload for PR #1, which it denied at its first step (*"could not resolve the
-current repo (failing closed)"*). That is the safe direction; merge from a local session.
+Hit when #2–#9 were raised. `gh pr merge` is GraphQL too, so merges use the REST endpoint instead
+(the merge step below), and the merge gate reads over REST since 2026-10-28 (#2). Before that it read
+through `gh pr view` and `gh api graphql`, so in a cloud session it denied every merge at its first
+step (*"could not resolve the current repo (failing closed)"*, verified by feeding it a synthetic
+payload for PR #1). This follows `searledan/spendy`, which made the same move in its #484.
 
 **Why it matters here:** each issue is normally picked up in a *fresh* session, often in a worktree or
 via a subagent. The issue body and this file are the only context that new session gets, so an issue
@@ -257,26 +257,31 @@ it. Two consequences, both of which have cost real time in this repo and its sib
       commit — compare the SHA.
       ```bash
       n=<PR>; head=$(git ls-remote origin "refs/pull/$n/head" | awk '{print $1}')
-      gh pr view "$n" --json reviewRequests \
-        --jq '[.reviewRequests[].login] | index("copilot-pull-request-reviewer") != null'   # false = not pending
-      gh api graphql -f owner=fiscaltec -f name=zendesk-mcp -F number="$n" \
-        -f query='query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){pullRequest(number:$number){reviews(last:100){nodes{author{login} commit{oid} submittedAt}}}}}' \
-        --jq '[.data.repository.pullRequest.reviews.nodes[] | select(.author.login=="copilot-pull-request-reviewer")] | sort_by(.submittedAt) | last | .commit.oid'
+      # Pending? Copilot's last request/removal/review event; review_requested = still pending.
+      gh api --paginate "repos/fiscaltec/zendesk-mcp/issues/$n/timeline?per_page=100" \
+        --jq '.[] | select(((.event=="review_requested" or .event=="review_request_removed") and ((.requested_reviewer.login // "") | test("^(Copilot|copilot-pull-request-reviewer(\\[bot\\])?)$"))) or (.event=="reviewed" and ((.user.login // "") | test("^(Copilot|copilot-pull-request-reviewer(\\[bot\\])?)$")))) | .event' | tail -1
+      # Copilot's latest submitted review: compare its commit with $head.
+      gh api --paginate "repos/fiscaltec/zendesk-mcp/pulls/$n/reviews?per_page=100" \
+        --jq '.[] | select(.submitted_at != null and ((.user.login // "") | test("^(Copilot|copilot-pull-request-reviewer(\\[bot\\])?)$"))) | "\(.submitted_at) \(.commit_id)"' | sort | tail -1
       ```
 
-      ⚠️ **Read the review commit from GraphQL, never from REST.** The REST reviews
-      collection (`…/pulls/N/reviews`) lags for this bot by hours, not seconds. Measured on
-      vitally-mcp#129 on 2026-09-15: REST reported Copilot's latest review as `ee1770c` submitted
-      `14:45:44Z` while GraphQL reported `1559962` at `18:43:14Z` — nine reviews and nearly
-      four hours apart, from the same `gh` session seconds apart. The earlier version of this
-      block used REST, so following it would have parked the PR indefinitely: the SHA never
-      matches, re-requesting does not help, and the obvious reading is "Copilot hasn't
-      reviewed the head yet" when it has. `.claude/hooks/pre-merge-copilot-gate.sh` had the
-      same defect and was fixed with it — a fail-closed gate reading a stale source is not
-      conservative, it is stuck, and a gate that cannot pass is a gate someone switches off.
+      Both are REST, so they work in a Claude Code cloud session as well as locally (run against
+      PR #1 on 2026-10-28, with a control showing the same filters return a review that exists).
+      Pending comes from the **timeline** because `requested_reviewers` never lists Copilot
+      (`searledan/spendy`'s `github.mjs` records the same).
 
-      ⚠️ **Take the head SHA from `refs/pull/$n/head`, never from `gh pr view --json headRefOid`,
-      in the seconds after a push.** The GraphQL field lags: on vitally-mcp#122 it still reported the previous
+      ⚠️ **The REST reviews collection can lag — read it anyway, for now.** On vitally-mcp#129
+      (2026-09-15) `…/pulls/N/reviews` reported Copilot's latest review as `ee1770c` submitted
+      `14:45:44Z` while GraphQL reported `1559962` at `18:43:14Z` — nine reviews and nearly four
+      hours apart. That is why this block and the hook used GraphQL until 2026-10-28; GraphQL is
+      refused in cloud sessions, so both now use REST (#2). A lagging list only ever names an
+      **older** commit, so it can make you wait for a review that has already landed, never merge
+      one that has not. If the head's review is visible in the GitHub UI but not here, wait and
+      re-check rather than switching the gate off: a gate that cannot pass gets switched off, and
+      that is worse than waiting.
+
+      ⚠️ **Take the head SHA from `refs/pull/$n/head`, never from the PR API's head field
+      (`head.sha` in REST, `headRefOid` in GraphQL), in the seconds after a push.** It lags: on vitally-mcp#122 it still reported the previous
       commit right after a push, so the comparison matched Copilot's *old* review and the gate read
       as passing. Two consequences, and the second is the expensive one: re-requesting in that
       window gets a review of the previous commit (that happened on vitally-mcp#122 too — a review arrived four
@@ -288,9 +293,9 @@ it. Two consequences, both of which have cost real time in this repo and its sib
       branch and has nothing unpushed, and merging a second PR from another branch is normal. The
       manual check and the hook must read the same source or they disagree exactly when it matters.
 
-      ⚠️ **"Not pending" alone is meaningless.** Copilot dequeues itself the moment it accepts a
-      request, so `reviewRequests` is empty within seconds of asking — long before it has reviewed
-      anything. Both conditions, always.
+      ⚠️ **"Not pending" alone is meaningless.** A request that has just been made can be followed
+      by a review of the *previous* commit, and an empty requested-reviewers list says nothing at
+      all about Copilot. Both conditions, always: not pending **and** the latest review on the head.
    2. A clean pass reports **`Findings: None`** in the review body and adds no threads.
       ⚠️ That string is the *current* format; the older *"reviewed N of N files … generated no new
       comments"* wording this file used to cite appears **zero times** across all 11 reviews on vitally-mcp#166,
@@ -338,42 +343,55 @@ it. Two consequences, both of which have cost real time in this repo and its sib
    blurb alleged "conflicting Application Insights guidance" that did not exist — so check each claim
    rather than acting on it or dismissing it wholesale.
 
-   **Pin the merge to the SHA you verified** — the hook requires it and denies without it — and
-   **write the PR number and the SHA out literally**:
+   **Merge through REST, pinned to the full SHA you verified** — the hook requires the pin and denies
+   without it — and **write the PR number and the SHA out literally**, with nothing quoted:
 
    ```bash
-   gh pr merge 129 --squash --match-head-commit 4384e311ed03c94e79134bd7a7435b62d2e124e9
+   gh api -X PUT repos/{owner}/{repo}/pulls/129/merge -f merge_method=squash -f sha=4384e311ed03c94e79134bd7a7435b62d2e124e9
    ```
 
-   ⚠️ **Not `"$n"` / `"$head"`.** The hook is a `PreToolUse` hook: it sees the command *text*,
-   before the shell expands anything. So it reads `"$n"` as the PR argument and fails to resolve a
-   PR from it, and `"$head"` as a non-hex pin — the variable form is denied outright. Verified by
-   feeding both forms to the hook: `could not resolve a PR from '"$n"'` versus a clean pass.
+   This is the form that works everywhere: `gh pr merge` is GraphQL underneath, so it cannot run in
+   a Claude Code cloud session at all. Locally it still works, and the hook still gates it (pinned
+   with `--match-head-commit`), but use one form so there is one thing to get right.
 
-   Everything checked above is true of *one moment*; `gh pr merge` runs after it, so a push landing
-   in that window merges a commit nothing verified. The hook cannot see that race — it has already
-   returned by then — so `--match-head-commit` hands the check to GitHub, which refuses the merge
-   outright if the head moved. Without it the gate is a snapshot, which is vitally-mcp#117's shape again.
+   ⚠️ **Not `$n` / `$head`, and no quotes.** The hook is a `PreToolUse` hook: it sees the command
+   *text*, before the shell expands anything, and it refuses any command containing quotes or shell
+   metacharacters because it cannot read those with certainty. `{owner}` and `{repo}` are `gh`'s own
+   placeholders, not shell syntax, so they need no quoting.
 
-**Mind the two spellings of the bot's login — both are correct, don't "align" them.** The suffix
-tracks *which API answered*, not which field you read. **REST** (`gh api …/pulls/N/reviews`,
+   Everything checked above is true of *one moment*; the merge runs after it, so a push landing in
+   that window merges a commit nothing verified. The hook cannot see that race — it has already
+   returned by then — so the `sha` field hands the check to GitHub, which refuses the merge outright
+   if the head moved. Without it the gate is a snapshot, which is vitally-mcp#117's shape again.
+
+**Mind the spellings of the bot's login — all are correct, don't "align" them.** The suffix tracks
+*which API answered*, not which field you read. **REST** (`gh api …/pulls/N/reviews`,
 `…/requested_reviewers`) uses `copilot-pull-request-reviewer[bot]`; **GraphQL** — and
-`gh pr view --json`, which is GraphQL underneath — reports `copilot-pull-request-reviewer` without it.
+`gh pr view --json`, which is GraphQL underneath — reports `copilot-pull-request-reviewer` without it;
+timeline events can also name it `Copilot`. The commands above and the hook accept all three.
 
 ⚠️ **Never `--auto` merge a human PR.** It fires the instant CI passes and beats a pending review.
 `--auto` is for Dependabot only, which carries no human review.
 
 **This is enforced mechanically, not just documented.** `.claude/hooks/pre-merge-copilot-gate.sh` is a
-`PreToolUse` hook (registered in `.claude/settings.json` under the `Bash` matcher with
-`if: "Bash(gh pr merge*)"`) that **denies** `gh pr merge` unless Copilot is not a requested reviewer,
-its latest review's `commit_id` equals the head, and unresolved threads are zero. It exempts
-Dependabot and **fails closed** — including if `jq`/`sed`/`awk` are missing or broken, so a damaged
-toolchain cannot wave a merge through. Ported from `searledan/dansearle.co.uk`; it needs no
-adaptation, resolving owner/repo at runtime.
+`PreToolUse` hook, registered in `.claude/settings.json` under the `Bash` matcher twice — with
+`if: "Bash(gh pr merge*)"` and with `if: "Bash(gh api*)"` — that **denies** a merge (`gh pr merge`, or
+`gh api` reaching `pulls/<n>/merge` with any method but GET) unless Copilot is not pending, its
+latest review's `commit_id` equals the head, and unresolved threads are zero. A GraphQL merge
+mutation is refused outright. It exempts Dependabot and **fails closed** — including if
+`jq`/`sed`/`awk` are missing or broken, so a damaged toolchain cannot wave a merge through. Ported
+from `searledan/dansearle.co.uk`, then moved to REST on 2026-10-28 (#2) after `searledan/spendy`'s
+#484: it resolves the repo from the `origin` remote, reads the PR, its timeline and its reviews over
+REST, and reads review threads from the cloud session's `ccr/review_threads` route when
+`CLAUDE_CODE_REMOTE` is set and through GraphQL locally (REST has no thread-resolution state).
+`.github/scripts/tests/pre-merge-copilot-gate.test.sh` runs it against stub `gh` and `git` in CI,
+the allow path included; deleting either the head-review or the pin check makes it fail.
 
 Caveats worth knowing before trusting it:
 
-- It guards **only Claude Code's own tool calls** — a merge from the GitHub UI is unaffected.
+- It guards **only Claude Code's own Bash calls** — a merge from the GitHub UI is unaffected. The
+  GitHub MCP connector's `merge_pull_request` and `enable_pr_auto_merge` would bypass it too, so
+  `.claude/settings.json` denies both outright.
 - **It resolves the head from `refs/pull/N/head` via `git ls-remote`, not from the PR API.**
   `headRefOid` lags after a push (see the warning above), and a gate that trusts it fails *open* —
   the stale value names the commit Copilot already reviewed. `ls-remote` reads the git server
@@ -383,16 +401,19 @@ Caveats worth knowing before trusting it:
   an earlier version had both, and the fallback compared an unrelated commit whenever a local branch
   shared a fork PR's branch name. If that ref cannot be read, the gate denies.
 - A newly added hook needs `/hooks` opened once (or a restart) to activate.
-- **It requires `--match-head-commit <verified sha>`** and denies a merge without one, with a
-  too-short abbreviation (under 7 characters), or with one naming a different commit. That is not
-  belt-and-braces: every other check here describes the moment the hook ran, and the merge happens
-  afterwards.
-- **Run `gh pr merge` as a standalone command — no pipes, no `;`, no `&&`.** The hook resolves the PR
-  by counting non-flag positional tokens after the subcommand, so a chained form turns every
-  following word into a candidate and the gate denies as ambiguous.
-- The `if` filter matches the command text, so *any* Bash call containing `gh pr merge` is gated —
-  including a test harness. Testing the hook means invoking it from a script file rather than inline.
+- **It requires the pin** — `-f sha=<full verified sha>` on the REST form, `--match-head-commit
+  <sha>` (seven characters or more) on `gh pr merge` — and denies a merge without one, given twice,
+  or naming a different commit. That is not belt-and-braces: every other check here describes the
+  moment the hook ran, and the merge happens afterwards.
+- **Run the merge as a standalone command — no pipes, no `;`, no `&&`, no quotes.** The hook refuses
+  anything with quotes or shell metacharacters, because it cannot read those with certainty.
+- The `if` filters match the command text, so *any* Bash call starting `gh api` or containing
+  `gh pr merge` runs the hook — including a heredoc that merely mentions one, which it then denies.
+  For a `gh api` call that is not a merge it allows at once, without a network call. Testing the hook
+  or editing text that quotes a merge command means doing it from a script file rather than inline.
   Over-matching is the safe direction; don't loosen it.
+- **The REST reviews list can lag** (above). The lag only makes the gate deny a merge it would allow;
+  wait and re-check.
 
 Verified on porting (2026-08-28) by running the hook against real PRs: it allows vitally-mcp#118, whose Copilot
 review was on the merged head, and **denies vitally-mcp#117** — *"Copilot's latest review (6808805…) is not on
