@@ -1,260 +1,157 @@
-# Vitally MCP Server
+# Zendesk MCP Server
 
-A [Model Context Protocol](https://modelcontextprotocol.io) server that exposes the [Vitally](https://vitally.io) customer success platform's REST API to MCP-compatible clients such as **Claude Desktop**, **Claude Code**, **VS Code**, and **Cursor**.
+A [Model Context Protocol](https://modelcontextprotocol.io) server that gives MCP clients — **Claude Desktop**, **claude.ai**, **Claude Code**, **VS Code**, **Cursor** — access to FISCAL's [Zendesk](https://www.zendesk.com) Support and Help Center.
 
-Built in C# on .NET 10 and the official `ModelContextProtocol` SDK, hosted as a **remote HTTP MCP server** secured with Microsoft Entra (OAuth 2.1 / RFC 9728). Users connect by URL — no install, no executable, no per-user secrets to distribute.
+It is built to the same standard as FISCAL's [Vitally MCP server](https://github.com/fiscaltec/vitally-mcp): C# on .NET 10 and the official `ModelContextProtocol` SDK, hosted as a **remote HTTP MCP server** behind Microsoft Entra (OAuth 2.1 / RFC 9728), with per-tier tool permissions, a per-user audit trail and an Azure Container Apps deployment. Its tool set covers the functionality of Swifteq's hosted Zendesk MCP server — tickets, conversations, SLA and KPI reporting, CSAT, macros, users and organisations, configuration and the Help Center.
 
-[![CI](https://github.com/fiscaltec/vitally-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/fiscaltec/vitally-mcp/actions/workflows/ci.yml)
+[![CI](https://github.com/fiscaltec/zendesk-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/fiscaltec/zendesk-mcp/actions/workflows/ci.yml)
+
+> **Status: built, not yet deployed.** The Azure estate in `infra/terraform/` is greenfield and has not been applied, and the Zendesk endpoints were implemented from the API documentation without a live tenant to test against. Staging validation against FISCAL's Zendesk is the next step — see [Before production](#before-production).
 
 ## Features
 
-- **Full CRUD coverage** of 16 Vitally resource types via 93 tools: accounts, organisations, users, conversations, messages, notes, projects, project templates, project categories, tasks, NPS responses, admins, custom objects (and instances), meetings (with participants and transcripts), custom traits, and custom surveys.
-- **Permission-aware tools** — every tool is annotated `ReadOnly` / `Destructive` / `Idempotent` / `OpenWorld` so MCP clients can enable or disable categories of operation in bulk and reason about retry safety. Beyond those advisory hints, `tools/list` is **filtered per caller**: a client is shown only the tools the signed-in user's permission tier permits.
-- **EU and US data centres** — defaults to EU (`rest.vitally-eu.io`); set `Vitally:Region=US` to point at `{subdomain}.rest.vitally.io`.
-- **Rate-limit-aware HTTP pipeline** — auto-retries on `429 Too Many Requests` honouring `Retry-After` and `X-RateLimit-Reset`, and logs a warning when remaining requests drop below threshold.
-- **Client-side field & trait filtering** — responses are trimmed before they reach the LLM, each resource type with sensible defaults that exclude heavy fields (rich text, transcripts, full traits objects).
-- **Streamable HTTP transport** (MCP 2026-07-28) in stateless mode — easy to scale horizontally, no sticky sessions required.
-- **OAuth 2.1 protection** against Microsoft Entra, directly on both deployed targets. `/.well-known/oauth-protected-resource` exposes the metadata document so clients discover the authorisation server automatically. The Vitally API key is fetched on demand from Azure Key Vault via the server's managed identity.
+- **About 45 tools** — tickets (search, count, read, create, update, conversation, attachments), KPI and SLA reporting (metrics summary, SLA summary, SLA queue, CSAT), macros (search, preview, apply, create, update, activate), users and organisations, ticket fields/forms/triggers/brands, and the Help Center (articles, translations, categories, sections, segments, permission groups, images, export). See [Tool catalogue](#tool-catalogue).
+- **Every call is made as you.** Each person connects their own Zendesk account once (per-user Zendesk OAuth). Ticket updates, comments and macro use are attributed to the agent who asked for them, and Zendesk's own role, group and brand restrictions apply on top of this server's permissions. There is no shared Zendesk service account.
+- **Two layers of permission.** Your Entra group decides which tools you see and may call (`zendesk:read` / `zendesk:write`); your Zendesk role decides what Zendesk lets that agent do. Account-wide switches (public replies, article publishing, macro changes, user and organisation changes) are off by default.
+- **Per-user audit trail** in Application Insights, keyed on your Entra object id — including reads, which Zendesk does not log.
+- **Prompt-injection guards.** Ticket and article content is untrusted: write tools say so to the model, `brand_url` and attachment URLs can only ever reach this account's own Zendesk hosts (so a URL planted in a ticket cannot carry your token away), and free-text search can only match words, never rewrite a filter.
+- **Rate-limit aware** — retries `429`s honouring `Retry-After` and warns as Zendesk's per-account budget runs low.
 
 ## Using the server (FISCAL users)
 
-Point your MCP client at:
+Point your MCP client at (proposed hostname, pending DNS):
 
 ```
-https://vitally.fiscaltec.com/mcp
+https://zendesk-mcp.fiscaltec.com/mcp
 ```
 
-The first time you connect, your client will redirect you to a Microsoft sign-in to authenticate. Once authenticated, the server proxies your tool calls to Vitally using a service-account API key it fetches from Azure Key Vault.
+1. **Sign in with Microsoft.** Your client opens the sign-in the first time you connect.
+2. **Connect your Zendesk account.** The first Zendesk tool you use replies with a one-time link. Open it, sign in to Zendesk as yourself and approve access. The Zendesk login must have the same email as your Microsoft account, and must be an agent or admin. You can check your connection at any time with *Get_zendesk_connection*, or remove it with *Disconnect_zendesk*.
 
-> **Access & groups:** authentication alone grants nothing — you must be in a `sg-vitally-*` Entra group for your access tier. See **[ACCESS.md](ACCESS.md)** for connecting, the group setup, and how access is granted or revoked.
+> **Access & groups:** signing in grants nothing by itself — you need to be in an `sg-zendesk-*` Entra group for a tier. See **[ACCESS.md](ACCESS.md)**.
 
-### Claude Desktop
+| Client | How to connect |
+|---|---|
+| Claude Desktop / claude.ai | Once published to the FISCAL workspace as an organisation connector: Connectors → Connect. Until then: Settings → Connectors → Add custom connector → paste the URL |
+| Claude Code | `claude mcp add --transport http fiscal-zendesk https://zendesk-mcp.fiscaltec.com/mcp` |
+| VS Code / Cursor / other | Add a streamable-HTTP MCP server entry pointing at the URL; the client handles sign-in |
 
-FISCAL users: the server is already published to the FISCAL Claude workspace as the organisation connector **FISCAL Vitally MCP** — Customize → Connectors → **FISCAL Vitally MCP** → Connect. (It is distinct from Vitally's own official connector, which is listed as **Vitally MCP** — the name this server's connector used before 2026-10-07; see [ACCESS.md](ACCESS.md#not-the-same-as-vitallys-official-connector).)
-
-Elsewhere: Settings → Connectors → Add custom connector → paste the URL above. Approve the Microsoft sign-in popup.
-
-### Claude Code
-
-```powershell
-claude mcp add --transport http fiscal-vitally https://vitally.fiscaltec.com/mcp
-```
-
-Run any MCP-using command (`claude` itself, or `/mcp`) and Claude Code will open the Microsoft sign-in flow on first use.
-
-### VS Code, Cursor, and other MCP-aware hosts
-
-Most modern MCP clients support the streamable HTTP transport. Add a server entry that points at the URL above; the client handles the OAuth flow automatically via the protected-resource metadata document.
+⚠️ This is **not** Swifteq's hosted Zendesk connector. If both are enabled, the two sets of tools have similar names; disable the one you are not using.
 
 ## Configuration
 
-The server reads its configuration from `appsettings.json`, `appsettings.{Environment}.json`, or environment variables (using the standard ASP.NET Core double-underscore separator for nested keys, e.g. `Vitally__Region`).
+Configuration comes from environment variables in deployed targets (double-underscore separator, e.g. `Zendesk__Subdomain`) — `appsettings.json` is deliberately excluded from the image. [`ZendeskMcp/appsettings.Example.json`](ZendeskMcp/appsettings.Example.json) shows every key.
 
 | Setting | Required | Default | Description |
 |---|---|---|---|
-| `Vitally:Region` | No | `EU` | Data centre: `EU` (single shared host `rest.vitally-eu.io`) or `US` (per-tenant `{subdomain}.rest.vitally.io`). Case-insensitive. |
-| `Vitally:Subdomain` | Only when `Region=US` | — | Vitally subdomain, e.g. `fiscaltec` from `fiscaltec.vitally.io`. Ignored on EU. |
-| `Vitally:KeyVaultUri` | Yes (prod) | — | Azure Key Vault URI, e.g. `https://kv-vitally-mcp.vault.azure.net/`. The server's managed identity must have **Key Vault Secrets User** on it. |
-| `Vitally:DefaultSecretRef` | No | `vitally-shared` | Key Vault secret name holding the Vitally API key. |
-| `Vitally:SecretCacheDuration` | No | `00:05:00` | In-memory TTL for the resolved API key. |
-| `Vitally:DevelopmentApiKey` | Yes (local) | — | Local-dev-only fallback API key, used when `KeyVaultUri` is not set. Never set this in production. |
-| `OAuth:Authority` | Yes | — | The provider's OIDC **issuer** identifier, e.g. `https://login.microsoftonline.com/{tenant-id}/v2.0`. The proxy's upstream endpoints are read from `{Authority}/.well-known/openid-configuration`, not built by appending paths to this value. |
-| `OAuth:Audience` | Yes | — | The API identifier the token's `aud` is validated against, e.g. `https://vitally.fiscaltec.com`. Must match the provider's identifier **exactly** — comparison is byte for byte and identifiers are immutable once created. It is not the only accepted value: when `OAuth:SharedClientId` is set it is also accepted as an audience, which is what an Entra **v2** access token actually carries (the appId GUID). See `OAuthOptions.ValidAudiences`. Note the trailing slash is provider-specific: Entra refuses to register one on `identifierUris`, while other providers permit it. **This is deliberately not the same value as `OAuth:Resource`** under Entra; see the divergence warning in [CLAUDE.md](CLAUDE.md). |
-| `OAuth:Resource` | No | — | Canonical resource identifier published in `/.well-known/oauth-protected-resource`. Falls back to `Audience` when blank; set explicitly when clients need the metadata `resource` to match the server's URL/origin (per RFC 9728 + RFC 8707 validators). |
-| `OAuth:UpstreamResourceScope` | Entra: **yes** | *(empty)* | The API scope the proxy names upstream, e.g. `https://vitally.fiscaltec.com/mcp.access`. Empty relays the RFC 8707 `resource` parameter verbatim, which is the spec default and what a conforming provider expects; set — as on both deployed targets — the proxy **terminates** `resource` and merges this scope into `scope` instead (the Entra posture, Entra being the outlier). One switch, because neither half works alone: Entra's v2 `/authorize` rejects any `resource` that does not match the requested scopes (`AADSTS9010010`), and dropping `resource` without a scope leaves the token bound to nothing. Must be a single whitespace-free token; validated at boot. |
-| `OAuth:PublicBaseUrl` | Recommended (prod) | — | Canonical public origin, e.g. `https://vitally.fiscaltec.com`. When set, the `/.well-known/*` metadata and the OAuth proxy callback are built from this value instead of the request `Host`, so a spoofed/forwarded `Host` can't redirect a client's `authorization_endpoint`/`token_endpoint` at an attacker. Leave empty in local dev. |
-| `Authorization:ReadOnly` | No | `false` | Deployment-wide kill switch: denies every create/update/delete regardless of tier, RBAC state or `NoAuth`, and hides the destructive tools from `tools/list`. Checked before the `Enabled`/`NoAuth` gate, and consults neither Microsoft Graph nor the token — so it holds when the identity layer does not. Its live use is guarding a staging deployment that shares the production Vitally key; see `docs/runbooks/read-only-and-rbac-rollout.md` for when it is and is not the right tool. |
-| `Authorization:Enabled` | No | `true` | Server-side RBAC enforcement. When `true`, every tool call is checked against the caller's effective permissions — resolved from live Entra group membership when `LiveGroupCheck` is on, from token claims when it is off (the hard backstop behind the advisory `ReadOnly`/`Destructive` flags). Set `false` only for local dev. |
-| `Authorization:ReadPermission` | No | `zendesk:read` | Permission required for read operations (list/get/search → HTTP GET). An internal tier name: with `LiveGroupCheck` on it is produced by mapping Entra group membership, not issued by any provider. |
-| `Authorization:WritePermission` | No | `zendesk:write` | Permission required for create/update operations (HTTP POST/PUT/PATCH). An internal tier name, as above. |
-| `Authorization:DeletePermission` | No | `zendesk:delete` | Permission required for delete operations (HTTP DELETE). An internal tier name, as above. Set equal to `WritePermission` to collapse to a two-tier read/write model. |
-| `Authorization:CustomPermissionsClaim` | No | `https://vitally.fiscaltec.com/permissions` | Optional namespaced claim also checked for permissions (alongside the standard `permissions` and `scope` claims). Use when the identity provider maps group membership to permissions via a custom claim. **Ignored entirely when `LiveGroupCheck` is `true`**, which is the case on every deployed target. Set empty to disable. |
-| `Authorization:LiveGroupCheck` | No | `false` | When `true`, permissions are resolved from the caller's **live** Entra group membership via Microsoft Graph (cached per `LiveGroupCacheSeconds`) instead of the frozen token claim — so group changes (grants/revocations) take effect within the cache window regardless of token age. Membership is evaluated **transitively** (Graph `transitiveMembers`), so users who inherit a tier via a nested group are authorised. **When `true`, the token claim is not consulted at all** — the order is fresh Graph → stale Graph (see `LiveGroupStaleSeconds`) → **deny**. It is a different mode, not a layer above the claim, so a Graph outage that outlasts the stale window denies rather than falling back. **Requires the server's managed identity to hold Microsoft Graph `GroupMember.Read.All`.** |
-| `Authorization:LiveGroupCacheSeconds` | No | `60` | TTL for the per-user live group-membership cache. Lower = faster propagation, more Graph calls. |
-| `Authorization:LiveGroupStaleSeconds` | No | `3600` | How long a successful lookup stays usable as a **fallback after a Graph call fails**, so an outage degrades to each caller's last known-good tier instead of denying everyone. `0` disables it and denies immediately. Distinct from `LiveGroupCacheSeconds`, which governs answering *without* asking Graph — lengthening that one instead would stop revocations propagating. |
-| `Authorization:ReaderGroupId` / `EditorGroupId` / `AdminGroupId` | When `LiveGroupCheck=true` | — | Entra security-group object ids mapped to the read / read+write / read+write+delete tiers. At least one required when live check is on. Membership is transitive — a user in a group nested inside one of these is granted the tier. |
-| `Audit:Enabled` | No | `true` | Emit a structured audit record per action (authenticated user + verb + resource + outcome), giving a per-user "who did what" trail despite the shared Vitally key. On FISCAL's deployments these records are exported to Application Insights `AppEvents` and are queryable (both targets, since 2026-09-25 — complete only while a release containing vitally-mcp#178 is serving; a release without it drops the records of unsampled requests under load); the console keeps only a customer-data-free breadcrumb. ⚠️ Staging is on-demand and the setting does not survive a recreate, so a staging app stood up without it keeps its records on stdout. |
-| `Audit:IncludeReads` | No | `true` | Also audit read operations (HTTP GET). **On by default** — reads are most of the traffic, and this is the only record of who accessed which customer record. Reads are the high-volume path, so this is the lever if ingest cost becomes a problem; mutations and denied attempts are recorded either way. |
-| `OAuth:SharedClientId` | No | — | Enables the OAuth proxy / DCR shim (see [OAuth proxy](#oauth-proxy) below). When set, every Dynamic Client Registration call returns this fixed client_id, and the server proxies `/oauth/authorize` and `/oauth/token` to the upstream issuer. Leave empty to fall through to the upstream's native DCR. |
-| `OAuth:SharedClientSecret` | No | — | Confidential-client secret for `SharedClientId`. Injected server-side on token exchange so the shared app registration can stay confidential without exposing the secret to MCP clients. |
-| `OAuth:AllowedClientRedirectUris` | No | `[]` | Allowlist of non-loopback `redirect_uri` values the OAuth proxy will accept. Loopback URIs (`http://localhost`, `127.0.0.1`, `[::1]`) on any port are always allowed per RFC 8252. Add cloud-hosted MCP callbacks here, e.g. `https://claude.ai/api/mcp/auth_callback`. |
-| `OAuth:NoAuth` | No | `false` | **Local development only.** Skips JWT validation entirely. Logs a warning at startup. |
-
-See [`ZendeskMcp/appsettings.Example.json`](ZendeskMcp/appsettings.Example.json) for the full layout.
+| `Zendesk:Subdomain` | Yes | — | `acme` for `https://acme.zendesk.com`. |
+| `Zendesk:KeyVaultUri` | Yes (deployed) | — | Vault holding the Zendesk OAuth client secret and one secret per connected person. The managed identity needs **Key Vault Secrets Officer** — it writes tokens. |
+| `Zendesk:OAuthClientId` | Yes (deployed) | — | The Zendesk OAuth client's unique identifier (Admin Centre → Apps and integrations → APIs → OAuth clients). |
+| `Zendesk:OAuthClientSecretRef` | No | `zendesk-oauth-client-secret` | Key Vault secret holding that client's secret. |
+| `Zendesk:TokenSecretPrefix` | No | `zendesk-user-` | Each person's token is stored as `{prefix}{Entra object id}`. Staging uses its own prefix. |
+| `Zendesk:OAuthScopes` | No | `read write` | Scopes requested from Zendesk. |
+| `Zendesk:AccessTokenExpiresInSeconds` / `RefreshTokenExpiresInSeconds` | No | `7200` / `7776000` | Requests expiring Zendesk tokens with refresh; set the first to null for Zendesk's legacy non-expiring tokens. |
+| `Zendesk:RequireEmailMatch` | No | `true` | Refuse a Zendesk login whose email differs from the Entra sign-in name. This is what binds a Zendesk login to the right person — do not turn it off in a deployed target. |
+| `Zendesk:Features:*` | No | all `false` | `AllowPublicReplies`, `AllowArticlePublishing`, `AllowMacroChanges`, `AllowUserAndOrganizationChanges` — account-wide switches for the actions with the widest reach. |
+| `Zendesk:MaxAutoPageFetches` / `MaxAnalyticsTickets` / `MaxAttachmentBytes` | No | `10` / `2000` / 20 MB | Bounds on server-side paging, analytics fan-out and file size. |
+| `Zendesk:DevelopmentEmail` + `DevelopmentApiToken` | Local only | — | A Zendesk API token used for every call. Refused at startup unless `OAuth:NoAuth=true` and no Key Vault is set. |
+| `OAuth:*` | Yes | — | Entra sign-in to this server, exactly as in vitally-mcp: `Authority`, `Audience`, `Resource`, `UpstreamResourceScope`, `SharedClientId`, `SharedClientSecret`, `AllowedClientRedirectUris`, `PublicBaseUrl`, `NoAuth`. |
+| `Authorization:*` | Yes | — | Tier enforcement: `LiveGroupCheck`, `ReaderGroupId`/`EditorGroupId`/`AdminGroupId`, `ReadOnly`, permission names. |
+| `Audit:*` | No | on, reads included | Audit trail switches. |
+| `ApplicationInsights:ConnectionString` | Deployed | — | Routes the audit records to `AppEvents`. |
 
 ## Running locally
-
-Prerequisites: .NET 10 SDK.
 
 ```powershell
 # Restore + build + run the test suite
 dotnet test ZendeskMcp.sln -c Debug
 
-# Start the server in dev mode (no identity provider, no Key Vault — uses DevelopmentApiKey from env)
+# Start the server in dev mode: no Entra, no Key Vault, every call made with your own Zendesk API token
 $env:OAuth__NoAuth = "true"
-$env:Vitally__Region = "EU"
-$env:Vitally__DevelopmentApiKey = "sk_live_your_key"
+$env:Zendesk__Subdomain = "your-subdomain"
+$env:Zendesk__DevelopmentEmail = "you@fiscaltec.com"
+$env:Zendesk__DevelopmentApiToken = "<a Zendesk API token>"
 $env:ASPNETCORE_URLS = "http://localhost:5099"
 dotnet run --project ZendeskMcp/ZendeskMcp.csproj
 ```
 
-Smoke test:
-
-```powershell
-# OAuth protected-resource metadata
-Invoke-RestMethod http://localhost:5099/.well-known/oauth-protected-resource
-
-# MCP initialise (returns capabilities + server info). Deliberately requests 2025-06-18: the
-# `initialize` handshake exists only in revisions up to 2025-11-25, since 2026-07-28 replaced it
-# with per-request `_meta` and headers. Do NOT substitute 2026-07-28 here — the call would error.
-$body = @{ jsonrpc='2.0'; id=1; method='initialize'; params=@{ protocolVersion='2025-06-18'; capabilities=@{}; clientInfo=@{ name='smoke'; version='0.0.1' } } } | ConvertTo-Json -Depth 10 -Compress
-Invoke-RestMethod -Method Post -Uri http://localhost:5099/mcp -ContentType 'application/json' -Headers @{ Accept='application/json, text/event-stream' } -Body $body
-```
-
-Then add the dev server to Claude Code:
-
-```powershell
-claude mcp add --transport http vitally-dev http://localhost:5099/mcp
-```
-
-## Self-host (replicators)
-
-Deploying your own instance for a different org or against a different Vitally tenant requires three things — none of which are in this repo, all of which are config:
-
-1. **An OIDC identity provider** that issues RS256-signed JWTs for your users. FISCAL uses Microsoft Entra directly; any compliant provider works (Entra, Keycloak, Okta, etc.). Register an Application with identifier URI matching your `OAuth:Audience` value, plus a delegated scope (e.g. `Tools.Access`) and public-client redirect URI `http://localhost` for MCP-client OAuth flows.
-2. **An Azure Key Vault** (or compatible secret store; see the swap notes in [CLAUDE.md](CLAUDE.md)) containing your Vitally API key as a secret. Default secret name is `vitally-shared`; change via `Vitally:DefaultSecretRef`.
-3. **A container host** that can run the published Docker image. Anywhere ASP.NET Core 10 runs (Azure Container Apps, AWS App Runner, GCP Cloud Run, plain Kubernetes) — Container Apps is what FISCAL uses.
-
-FISCAL's deployment uses Azure Container Apps + Azure Key Vault + Microsoft Entra, reached directly on both targets. See the [Deployment](CLAUDE.md#deployment) section in `CLAUDE.md` for the shape. Anyone replicating can swap Container Apps for App Service, ACR for GHCR, Entra for Keycloak, etc., without touching the application code. Bicep / `azd` templates aren't shipped in this repo — the surface is small enough that the README description is the contract.
+Use a sandbox or a token with the least access you can. Every tool call made in dev mode acts as the token's owner. Then point MCP Inspector (`npx @modelcontextprotocol/inspector`) or Claude Code at `http://localhost:5099/mcp`. The smoke commands in [CLAUDE.md](CLAUDE.md#smoke-testing-the-server) apply unchanged.
 
 ## Architecture
 
 ```
 ZendeskMcp/
-├── Program.cs                       # ASP.NET Core host, JwtBearer auth, MapMcp
-├── OAuthOptions.cs                  # Authority + Audience + Resource + NoAuth dev flag
-├── UpstreamOidcMetadata.cs          # Upstream endpoints from the provider's OIDC discovery document
-├── ZendeskServerOptions.cs          # Region, KeyVaultUri, secret config
-├── VitallyApiKeyProvider.cs         # Fetches the API key from Key Vault (cached)
-├── ZendeskService.cs                # HTTP client + client-side JSON filtering
-├── ZendeskRateLimitHandler.cs       # 429 retry + rate-limit warnings
-└── Tools/                           # One file per Vitally resource type
-    ├── AccountsTools.cs
-    ├── OrganizationsTools.cs
-    ├── UsersTools.cs
-    ├── ConversationsTools.cs
-    ├── MessagesTools.cs
-    ├── NotesTools.cs
-    ├── ProjectsTools.cs
-    ├── ProjectTemplatesTools.cs
-    ├── TasksTools.cs
-    ├── NpsResponsesTools.cs
-    ├── AdminsTools.cs
-    ├── CustomObjectsTools.cs
-    ├── MeetingsTools.cs
-    ├── CustomTraitsTools.cs
-    └── SurveysTools.cs
+├── Program.cs                     # Host, Entra JwtBearer, OAuth façade (/oauth/*), MCP wiring, filters
+├── ZendeskService.cs              # The one path to Zendesk: RBAC backstop, per-user credential, audit, errors
+├── ZendeskCredentialProvider.cs   # The caller's own Zendesk token (refreshed), or a connect link
+├── ZendeskOAuthClient.cs          # Zendesk OAuth: authorise URL (PKCE), code/refresh exchange, revoke
+├── ZendeskConnectEndpoints.cs     # /zendesk/connect and /zendesk/callback (identity check, CSRF cookie)
+├── ZendeskConnectLinks.cs         # One-shot connect links and per-attempt state
+├── ZendeskTokenStore.cs           # Key Vault store: one secret per person, tombstone on removal
+├── ZendeskUploads.cs              # One-shot PUT /uploads/{slot} for ticket attachments
+├── TicketSearchQuery.cs           # Shared ticket filters → validated Zendesk search query
+├── ZendeskRateLimitHandler.cs     # 429 retry + low-budget warnings
+├── ToolAuthorizer.cs, GraphGroupPermissionResolver.cs, AuditLogger.cs, …   # as in vitally-mcp
+└── Tools/                         # One class per area; see the catalogue
 ```
 
-The MCP server runs on the [`ModelContextProtocol.AspNetCore`](https://www.nuget.org/packages/ModelContextProtocol.AspNetCore) package using the streamable HTTP transport in stateless mode. `MapMcp("/mcp")` is gated by `RequireAuthorization()` — JWTs are validated against whichever provider is configured in `OAuth:Authority` / `OAuth:Audience`. On each tool call, `VitallyApiKeyProvider` fetches the `vitally-shared` secret from Key Vault (cached in-memory for 5 min, using the server's user-assigned managed identity), and `ZendeskService` uses it to call Vitally on behalf of all authenticated users.
+Two separate OAuth relationships are involved, and they never share a token, client or callback:
 
-### OAuth proxy
+| | Signs the person in to | Flow | Token used for |
+|---|---|---|---|
+| **Entra** (`/oauth/*`) | this server | MCP client ↔ the server's OAuth façade ↔ Entra, exactly as in vitally-mcp | every `/mcp` request (bearer JWT), and the Entra group lookup that decides the tier |
+| **Zendesk** (`/zendesk/*`) | Zendesk, as the server's delegate | a browser link handed out in a tool result → Zendesk authorise (PKCE) → `/zendesk/callback` | every Zendesk API call, as that agent |
 
-When `OAuth:SharedClientId` is set the server runs an OAuth 2.1 proxy in front of the upstream identity provider — it advertises `response_types_supported: ["code"]`, `grant_types_supported: ["authorization_code", "refresh_token"]` and `code_challenge_methods_supported: ["S256"]`, and offers no implicit or password grant. It serves:
-
-| Endpoint | Purpose |
-|---|---|
-| `GET /.well-known/oauth-protected-resource` | RFC 9728 protected-resource metadata — clients use it to discover the authorisation server. |
-| `GET /.well-known/oauth-authorization-server` | RFC 8414 authorisation-server metadata — declares this server's own origin as `issuer` and points `authorization_endpoint`, `token_endpoint` and `registration_endpoint` at the proxy. `jwks_uri` and `userinfo_endpoint` still point upstream, read from the provider's OIDC discovery document. |
-| `GET /oauth/authorize` | Captures the client's `redirect_uri`, swaps it for our fixed `/oauth/callback`, and 302s the user to the upstream `authorization_endpoint` named in the provider's discovery document. Validates the client `redirect_uri` against the loopback + allowlist rules before stashing. |
-| `GET /oauth/callback` | Receives the provider's redirect, looks up the original client `redirect_uri` from `state`, strips any upstream `iss` and appends our own, and 302s the user back to it with the code. |
-| `POST /oauth/token` | Forwards the code-exchange to the upstream `token_endpoint` from the discovery document and injects `SharedClientSecret` so the shared app stays confidential without exposing the secret to MCP clients. |
-| `POST /oauth/register` | RFC 7591 Dynamic Client Registration shim — always returns `SharedClientId`, regardless of what the caller requests, so every MCP client converges on a single first-party app registration. Echoes back only `redirect_uris` that the allowlist accepts. |
-
-This setup exists because MCP clients implement RFC 7591 (DCR) and RFC 8252 (loopback redirect with ephemeral ports), but a dynamically registered client typically triggers a per-session consent screen and providers do not natively accept arbitrary loopback ports. The proxy collapses everything onto one pre-registered first-party app, skipping the consent and accepting any loopback port (Claude Code, VS Code, Cursor, MCP Inspector all rotate ports between sessions). To support hosted MCP clients (e.g. Claude.ai), add their callback URL to `OAuth:AllowedClientRedirectUris`.
-
-The `ZendeskService` exposes two call patterns:
-1. **Standard envelope** (`GetResourcesAsync`, `GetResourceByIdAsync`, `CreateResourceAsync`, `UpdateResourceAsync`, `DeleteResourceAsync`) — for endpoints returning `{results, next}`. Applies client-side field and trait filtering with resource-specific defaults.
-2. **Raw passthrough** (`GetRawAsync`, `PostRawAsync`, `DeleteRawAsync`) — for endpoints whose response shape differs from the standard envelope (surveys' `{data}`, custom-fields' bare array) or for sub-resource sub-paths (meeting participants, meeting transcripts).
-
-All HTTP traffic flows through `ZendeskRateLimitHandler`, a `DelegatingHandler` registered via `AddHttpMessageHandler<>()` in `Program.cs`.
+The Zendesk grant is stored in Key Vault against the person's **Entra object id**. At the callback the server reads the new token's identity from `/api/v2/users/me` and stores it only when it is an agent or admin whose email matches the Entra sign-in name. Otherwise the token is revoked on the spot. That check, plus a browser-bound `state` cookie, is what stops a forwarded or planted connect link from attaching someone else's Zendesk account to your identity. Expiring tokens are refreshed once, under a per-person lock, because Zendesk rotates the refresh token. A Zendesk `401` forgets the token and hands back a fresh connect link.
 
 ## Tool catalogue
 
-The server publishes 93 MCP tools, mostly one per Vitally REST endpoint — though not strictly one-to-one, since `Get_organization_summary` is a read-only composite that fans out to four upstream calls. Each tool's `[McpServerTool]` attribute sets `ReadOnly = true` for list/get operations and `Destructive = true` for create/update/delete, so MCP clients can permission them in bulk, plus `Idempotent` and `OpenWorld` so they can reason about retry safety.
+Each tool carries `ReadOnly` / `Destructive` / `Idempotent` / `OpenWorld` hints and an `[Authorize]` tier, so `tools/list` shows a reader only the read tools. Version 1 has no delete tools; the `zendesk:delete` tier exists for parity and future use.
 
-**An individual caller will not see all 93.** Each tool also carries an `[Authorize]` policy matching its tier, and `tools/list` is filtered per caller — a reader sees the 56 read tools, an editor 81, an admin all 93. See [Security](#security).
+| Area | Read (`zendesk:read`) | Write (`zendesk:write`) |
+|---|---|---|
+| Connection | `Get_zendesk_connection`, `Get_zendesk_connect_link` | `Disconnect_zendesk` *(read tier — it only affects the caller's own connection)* |
+| Tickets | `Search_tickets`, `Count_tickets`, `Get_ticket`, `Get_ticket_conversation`, `Get_ticket_attachment` | `Create_ticket`, `Update_ticket`, `Request_ticket_attachment_upload` |
+| Reporting | `Get_ticket_metrics_summary`, `Get_sla_summary`, `Get_sla_queue`, `Get_satisfaction_ratings` | — |
+| Macros | `Search_macros`, `Preview_macro` | `Apply_macro`, `Create_macro`, `Update_macro`, `Set_macros_active` |
+| People | `Search_users`, `Find_agent_by_name`, `Search_organizations` | `Add_user_to_organization` |
+| Configuration | `List_ticket_fields`, `List_ticket_forms`, `List_triggers`, `List_brands` | — |
+| Help Center | `Search_help_center_articles`, `Get_help_center_article`, `Export_help_center_articles`, `List_help_center_categories`, `List_help_center_sections`, `List_user_segments`, `List_permission_groups` | `Create_help_center_article`, `Update_article_translation`, `Create_help_center_category`, `Update_help_center_category`, `Create_help_center_section`, `Update_help_center_section`, `Request_help_center_image_upload`, `Create_help_center_image` |
 
-| Resource | List / search | Get | Create | Update | Delete | Sub-resources |
-|---|:-:|:-:|:-:|:-:|:-:|---|
-| Accounts | ✓ | ✓ | ✓ | ✓ | ✓ | health-score breakdown |
-| Organizations | ✓ | ✓ | ✓ | ✓ | ✓ | — |
-| Users | ✓ (+search) | ✓ | ✓ | ✓ | ✓ | by account, by organisation |
-| Conversations | ✓ | ✓ | ✓ | ✓ | ✓ | by account, by organisation |
-| Messages | ✓ | ✓ | ✓ | — | ✓ | by conversation |
-| Notes | ✓ | ✓ | ✓ | ✓ | ✓ | by account, by organisation, note categories |
-| Projects | ✓ | ✓ | ✓ (from template) | ✓ | ✓ | by account, by organisation |
-| Project templates | ✓ | ✓ | — | — | — | project categories |
-| Tasks | ✓ | ✓ | ✓ | ✓ | ✓ | by account, by organisation, task categories |
-| NPS responses | ✓ | ✓ | ✓ | ✓ | ✓ | by account, by organisation |
-| Admins | search by email | — | — | — | — | — |
-| Custom objects | ✓ | ✓ | ✓ | ✓ | — | instances (list, search, CRUD) |
-| Meetings | ✓ | ✓ | ✓ | ✓ | ✓ | by account, by organisation, participants, transcripts |
-| Custom traits | schema discovery | — | — | — | — | — |
-| Custom surveys | responses (list, get) | survey question | — | — | — | — |
+Compared with Swifteq's server: the same tools and parameters (snake_case, so prompts written for one work with the other). The differences:
 
-Full per-tool descriptions are auto-generated from the `[McpServerTool]` attributes — call `tools/list` against the server to see them. Note the response contains the tools available to *the caller's tier*, so a reader's list is a subset of an admin's.
+- `get_usage` and `submit_mcp_feedback` are dropped: they are about Swifteq's billing and support.
+- The connection tools are added.
+- Tool names use the Vitally capitalisation (`Search_tickets`).
+- Two Help Center tools are renamed for clarity: `create_article` → `Create_help_center_article` and `get_help_center_article_content` → `Get_help_center_article`.
+- Swifteq's "MCP Server settings" toggles are the `Zendesk:Features:*` switches.
 
 ## Security
 
-- All MCP requests require a valid JWT signed by the configured identity provider. Tokens are validated server-side against the issuer + audience and the signature.
-- **Server-side RBAC** (`Authorization:*`) enforces a `zendesk:read` / `zendesk:write` / `zendesk:delete` permission on every tool call, mapped from the HTTP verb at a single choke point (`ZendeskService.SendAsync`). This is the hard backstop: the `ReadOnly`/`Destructive` tool attributes are advisory hints for MCP clients, but RBAC physically prevents a caller (or a misbehaving agent) from mutating data without the permission. The tier is resolved from the caller's **live Entra group membership** via Microsoft Graph on every deployed target (`Authorization:LiveGroupCheck`), so grants and revocations take effect within about a minute **while Graph is reachable**, and no claim in the token can grant access. During a Graph outage each caller's last known-good tier is served for up to `Authorization:LiveGroupStaleSeconds` (default 1 h) before the call is denied — so a revocation can take that long to bite. See `ACCESS.md` for the incident procedure. A token-claim mode exists for deployments without Graph reachability and is selected by turning that flag off.
-- **Per-caller tool discovery.** Every tool additionally carries an `[Authorize]` policy for its tier, which the MCP SDK evaluates so `tools/list` advertises only what the caller may invoke. Discovery filtering and the `SendAsync` backstop resolve permissions through the same code path, so they cannot disagree — but the security boundary remains `SendAsync`. Hiding a tool is a usability improvement, not the control: an out-of-tier call is refused regardless of what the client was shown.
-- **Per-user audit trail** (`Audit:*`) — records are keyed on the caller's Entra **object id** from the `oid` claim: a GUID that resolves to a person with `az ad user show --id`, and no more personal than the alternatives. Where there is none, the resolver falls back to the raw `sub`, then `NameIdentifier`, then `unknown` — and `anonymous` for an unauthenticated caller. A consistent-but-opaque key beats none, though an Entra token always carries `oid`, so a record keyed on anything else means an unexpected token shape. Because all users share one Vitally key, Vitally's own log can't attribute actions to individuals; this server-side record can.
+Everything vitally-mcp documents about the Entra façade, live group RBAC, the `ZendeskService.SendAsync` backstop, per-caller discovery filtering, log-level controls and the four audit record shapes applies here unchanged — see [CLAUDE.md](CLAUDE.md#architecture). What is specific to Zendesk:
 
-  There are **four record shapes**, not one, because they are emitted at different points:
+- **No shared credential.** A person with no Zendesk connection gets a connect link, never a call made as someone else. The development API token exists only for unauthenticated local runs; startup refuses it otherwise.
+- **Tokens at rest.** Each person's Zendesk grant is one Key Vault secret, readable only by the server's managed identity. Disconnecting revokes the token at Zendesk and writes a tombstone version. It does not delete the secret, because a soft-deleted name could not be reused until purged. Revoking someone urgently: remove them from the `sg-zendesk-*` groups (takes effect within about a minute while Graph is reachable), and suspend or downgrade them in Zendesk, which invalidates their token there. See [ACCESS.md](ACCESS.md#urgent-revocation).
+- **Credential boundaries in the transport.** `brand_url` arguments and attachment downloads are resolved against the account's own brand hosts (`/api/v2/brands`) before any request is made. Any other host is refused, so a URL taken from ticket or article content can never receive the caller's token.
+- **Untrusted content.** Ticket comments, article bodies and user fields can carry instructions aimed at the model. Write tools tell the model not to act on them, and the server instructions repeat it. The feature switches keep the widest-reaching actions off until an administrator decides otherwise.
+- **Audit.** Zendesk's own audit log attributes changes to the agent. This server's trail adds reads, the Entra identity, the tool and its arguments. Upstream response bodies are never logged — tickets carry customer data.
 
-  | Record | Emitted at | Carries |
-  |---|---|---|
-  | **Tool call** | a call-tool filter, once per *executed* `tools/call` | object id, tool name, **the arguments**, the ids of the records touched, counts, outcome, duration, permission tier, correlation id |
-  | Action | `ZendeskService.SendAsync`, after each upstream response | object id, HTTP verb, resource path (query string stripped), status code, duration, correlation id |
-  | Service denial | `SendAsync`, on an RBAC refusal | object id, HTTP verb, resource path — no status, the call never happened |
-  | Tier denial | the SDK `[Authorize]` checkpoint, *before* `SendAsync` runs | object id, tool name, required permission — no verb or path, no upstream call was attempted |
+## Before production
 
-  The **tool call** is the primary record — it is the one that can say *this user did this to these customers* — and the action record corroborates it by showing what the server actually did. They share a correlation id, which is what joins them.
+Pending decisions and validation, also listed in [`infra/terraform/README.md`](infra/terraform/README.md):
 
-  The **tier denial** exists precisely because that checkpoint rejects out-of-tier calls before the choke point, so neither the tool-call record nor the action record would ever see them. ⚠️ A tier-denied call therefore records *who* and *which tool*, but **not the arguments** — the trail cannot say what the caller was reaching for. That is a deliberate boundary, not a gap.
-
-  **Upstream response bodies are never logged** — they can carry meeting transcripts and arbitrary customer traits, and an audit trail does not need a copy of the data it is auditing access to.
-
-  Two notes on FISCAL's own deployment:
-
-  - **The records are queryable.** Since 2026-09-25 both targets export them to Application Insights `AppEvents`, verified on each by reading rows back rather than inferred from a clean deploy — a wrong routing attribute lands them in `AppTraces` with no error. `AppRoleName` tells the two apart. ⚠️ **Complete only while a release containing vitally-mcp#178 is serving:** a release without it drops the records of any request whose trace was not sampled — and traces are capped at about 5 a second by default, so under load the traffic beyond roughly that rate, which can be far more than 5 a second, can lose its records. Any period since 2026-09-25 that such a release served may be missing individual records; check which image served a window before relying on it. ⚠️ Staging is an on-demand app and the setting does not survive a recreate, so a staging app stood up without it keeps its records on stdout.
-  - **"Personal data is kept out of telemetry" does not describe this design.** That rule was withdrawn on 2026-09-17: the trail records **tool arguments in full**, including free-text search terms that may contain names or email addresses, because without them it cannot say *which customer* was accessed. Upstream response bodies are still excluded.
-
-    Note what that means for writes, since the two rules meet there: a create or update tool's `jsonBody` **is** a request payload, and it is recorded — *"alice set these fields on this account"* is the audit record for a modification. The exclusion is of **upstream response bodies**, which are data the server read back on the caller's behalf, not data the caller supplied. Records are size-capped.
-
-    See `docs/superpowers/specs/2026-09-17-logging-observability-design.md`. The code emits all four shapes in the table above, the tool-call record included (vitally-mcp#147).
-- The OAuth proxy's `/oauth/token` only services the `authorization_code` and `refresh_token` grants — it rejects any other grant before injecting the confidential client secret, so the secret can't be leveraged to mint tokens without a user sign-in.
-- Set `OAuth:PublicBaseUrl` in production so the OAuth metadata documents emit a fixed canonical origin rather than reflecting the request `Host`.
-- Vitally API keys are **not** distributed to clients or stored in tokens — they live in Key Vault, accessed by the server's managed identity.
-- Tokens are short-lived (8h access, with refresh rotation). The server keeps no session state; restart is transparent to clients.
-- HTTPS is terminated at the platform ingress (Container Apps managed cert) — the server itself doesn't ship TLS.
-- The OAuth proxy validates every client `redirect_uri` against `OAuth:AllowedClientRedirectUris` (plus the implicit RFC 8252 loopback rule). Without this check, an attacker could exfiltrate authorisation codes via the proxy's `/oauth/callback` reflector; with it, the proxy refuses anything that isn't a loopback URI or an explicitly-allowlisted hosted callback.
-
-### Standards conformance of the OAuth proxy
-
-The proxy presents itself as a complete authorisation server: it declares its own origin as `issuer`
-(RFC 8414 §3.3), and `/oauth/callback` replaces any upstream `iss` with that same origin so the
-authorisation response is consistent with the metadata (RFC 9207). The upstream provider remains the token issuer.
-Strict clients — including **MCP Inspector** — complete the flow; see the *complete
-authorisation-server façade* section in `CLAUDE.md` for what was verified and how.
+1. Confirm the Zendesk subdomain and create the Zendesk OAuth client (redirect URLs for both targets).
+2. Decide which departments may sign in (Gate 1) and who goes in `sg-zendesk-readers` / `-editors` / `-admins`.
+3. Confirm the hostnames and DNS.
+4. Decide the feature switches for production.
+5. Confirm that Zendesk ticket data is cleared for processing under the AI Use Policy, and the audit-trail retention for tool arguments that may contain customer names.
+6. Apply the Terraform to a reviewed plan, deploy to staging, and run the staging validation in [CLAUDE.md](CLAUDE.md#staging-validation): every tool against the real tenant, plus the endpoints marked *unverified against the live API* in code.
 
 ## Licence
 
-Proprietary — © FISCAL Technologies Ltd. All rights reserved.
+MIT — see [LICENSE](LICENSE).
 
 ## Support
 
 - Internal: Infrastructure team at FISCAL Technologies.
-- Issues: [GitHub Issues](https://github.com/fiscaltec/vitally-mcp/issues).
+- Issues: [GitHub Issues](https://github.com/fiscaltec/zendesk-mcp/issues).
