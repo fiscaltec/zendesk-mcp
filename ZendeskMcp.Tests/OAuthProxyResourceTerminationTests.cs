@@ -27,7 +27,7 @@ namespace ZendeskMcp.Tests;
 public class OAuthProxyResourceTerminationTests : IClassFixture<OAuthProxyResourceTerminationTests.Factory>
 {
     /// <summary>The App ID URI + exposed scope, in the shape Entra requires on a custom API.</summary>
-    private const string ApiScope = "https://vitally.example.com/mcp.access";
+    private const string ApiScope = "https://zendesk.example.com/mcp.access";
 
     private readonly Factory _factory;
 
@@ -37,8 +37,8 @@ public class OAuthProxyResourceTerminationTests : IClassFixture<OAuthProxyResour
         factory.CreateClient(new WebApplicationFactoryClientOptions { AllowAutoRedirect = false });
 
     [Theory]
-    [InlineData("https://vitally.example.com")]
-    [InlineData("https://vitally.example.com/")]
+    [InlineData("https://zendesk.example.com")]
+    [InlineData("https://zendesk.example.com/")]
     public async Task Authorize_DropsAMatchingResourceInsteadOfForwardingIt(string resource)
     {
         // The failure this prevents is AADSTS9010010, and it is not slash-specific: Entra's v2
@@ -69,7 +69,7 @@ public class OAuthProxyResourceTerminationTests : IClassFixture<OAuthProxyResour
         var response = await client.GetAsync(
             "/oauth/authorize?response_type=code&client_id=test&state=drop-resource-cased"
             + "&redirect_uri=" + Uri.EscapeDataString("http://localhost:54321/callback")
-            + "&RESOURCE=" + Uri.EscapeDataString("https://vitally.example.com/"));
+            + "&RESOURCE=" + Uri.EscapeDataString("https://zendesk.example.com/"));
 
         response.StatusCode.Should().Be(HttpStatusCode.Redirect);
         QueryHelpers.ParseQuery(response.Headers.Location!.Query).Keys
@@ -149,7 +149,7 @@ public class OAuthProxyResourceTerminationTests : IClassFixture<OAuthProxyResour
             ["grant_type"] = "authorization_code",
             ["code"] = "test-code",
             ["redirect_uri"] = "http://localhost:54321/callback",
-            ["resource"] = "https://vitally.example.com/"
+            ["resource"] = "https://zendesk.example.com/"
         });
         var response = await client.PostAsync("/oauth/token", form);
 
@@ -222,12 +222,13 @@ public class OAuthProxyResourceTerminationTests : IClassFixture<OAuthProxyResour
                     // Audience follows the App ID URI (Entra refuses to register a trailing slash),
                     // Resource stays the form clients normalise to. IsResourceIndicatorAllowed
                     // tolerating exactly one slash is what lets both spellings name one resource.
-                    ["OAuth:Audience"] = "https://vitally.example.com",
-                    ["OAuth:Resource"] = "https://vitally.example.com/",
+                    ["OAuth:Audience"] = "https://zendesk.example.com",
+                    ["OAuth:Resource"] = "https://zendesk.example.com/",
                     ["OAuth:UpstreamResourceScope"] = ApiScope,
                     ["OAuth:SharedClientId"] = "test-client-id",
-                    ["Vitally:Region"] = "EU",
-                    ["Vitally:DevelopmentApiKey"] = "sk_test_dummy"
+                    ["Zendesk:Subdomain"] = TestHelpers.Subdomain,
+                    ["Zendesk:DevelopmentEmail"] = "dev@example.com",
+                    ["Zendesk:DevelopmentApiToken"] = "zd_test_dummy"
                 });
             });
             builder.ConfigureServices(services =>

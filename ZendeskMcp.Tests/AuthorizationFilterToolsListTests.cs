@@ -54,8 +54,7 @@ public class AuthorizationFilterToolsListTests
         // editor/admin assertions below fail for the wrong reason.
         Environment.SetEnvironmentVariable("OAuth__NoAuth", noAuth ? "true" : "false");
         Environment.SetEnvironmentVariable("Authorization__ReadOnly", "false");
-        Environment.SetEnvironmentVariable("Vitally__DevelopmentApiKey", "sk_test_dummy");
-        Environment.SetEnvironmentVariable("Vitally__Region", "EU");
+        ZendeskHostEnvironment.Set(noAuth);
         Environment.SetEnvironmentVariable("OAuth__Authority", noAuth ? null : "https://example-issuer.test/");
         Environment.SetEnvironmentVariable("OAuth__Audience", noAuth ? null : "https://example.test/");
 
@@ -75,6 +74,10 @@ public class AuthorizationFilterToolsListTests
 
                     b.ConfigureServices(services =>
                     {
+                        // One tool per tier and per naming shape (ProbeTools), so the tier assertions
+                        // below have something to filter while the production tools are all read tier.
+                        services.AddProbeTools();
+
                         if (noAuth)
                         {
                             // Dev mode registers no authentication scheme at all; leave it that way
@@ -114,12 +117,14 @@ public class AuthorizationFilterToolsListTests
             // they all compose hosts expecting NoAuth=true.
             Environment.SetEnvironmentVariable("OAuth__NoAuth", null);
             Environment.SetEnvironmentVariable("Authorization__ReadOnly", null);
-            Environment.SetEnvironmentVariable("Vitally__DevelopmentApiKey", null);
-            Environment.SetEnvironmentVariable("Vitally__Region", null);
+            ZendeskHostEnvironment.Clear();
             Environment.SetEnvironmentVariable("OAuth__Authority", null);
             Environment.SetEnvironmentVariable("OAuth__Audience", null);
         }
     }
+
+    /// <summary>The tools this host registers, so the expected lists follow the tool set as it grows.</summary>
+    private static readonly IReadOnlyList<ToolDeclaration> Registered = ToolCatalogue.ProductionAndProbes();
 
     [Fact]
     public async Task Reader_SeesOnlyReadTools()
@@ -148,14 +153,16 @@ public class AuthorizationFilterToolsListTests
         var names = await ToolNamesForAsync("zendesk:read", "zendesk:write", "zendesk:delete");
 
         names.Should().Contain(n => n.StartsWith("Delete_", StringComparison.Ordinal));
-        names.Should().HaveCountGreaterThan(90);
+        names.Should().BeEquivalentTo(Registered.Select(t => t.Name), "an admin holds every tier");
     }
 
     /// <summary>
-    /// The tiers are cumulative and exactly partition the 93 tools: read-only 56, plus writes 25,
-    /// plus deletes 12. Asserting the counts (not just presence/absence of prefixes) is what catches
-    /// an off-tier tool — e.g. <c>Add_meeting_participant</c>, which is neither <c>Create_*</c> nor
-    /// <c>Update_*</c> yet issues a POST, so it must appear for the editor and not for the reader.
+    /// The tiers are cumulative and exactly partition every registered tool: the read tier, plus the
+    /// writes, plus the deletes, each computed from the tools' own <c>[Authorize]</c> policies rather
+    /// than a hard-coded count that would break as tools are added. Asserting the exact lists (not
+    /// just presence/absence of prefixes) is what catches an off-tier tool — e.g.
+    /// <c>Apply_probe_macro</c>, which is neither <c>Create_*</c> nor <c>Update_*</c> yet issues a
+    /// PUT, so it must appear for the editor and not for the reader, as <c>Apply_macro</c> must.
     /// </summary>
     [Fact]
     public async Task TierCounts_PartitionEveryTool()
@@ -164,22 +171,24 @@ public class AuthorizationFilterToolsListTests
         var editor = await ToolNamesForAsync("zendesk:read", "zendesk:write");
         var admin = await ToolNamesForAsync("zendesk:read", "zendesk:write", "zendesk:delete");
 
-        reader.Should().HaveCount(56);
-        editor.Should().HaveCount(81);
-        admin.Should().HaveCount(93);
+        reader.Should().BeEquivalentTo(ToolCatalogue.VisibleTo(Registered, "zendesk:read"));
+        editor.Should().BeEquivalentTo(ToolCatalogue.VisibleTo(Registered, "zendesk:read", "zendesk:write"));
+        admin.Should().BeEquivalentTo(Registered.Select(t => t.Name));
 
         reader.Should().BeSubsetOf(editor);
         editor.Should().BeSubsetOf(admin);
+        reader.Count.Should().BeLessThan(editor.Count, "the write tier adds tools");
+        editor.Count.Should().BeLessThan(admin.Count, "the delete tier adds tools");
 
-        editor.Should().Contain("Add_meeting_participant");
-        reader.Should().NotContain("Add_meeting_participant");
-        admin.Should().Contain("Remove_meeting_participant");
-        editor.Should().NotContain("Remove_meeting_participant");
+        editor.Should().Contain("Apply_probe_macro");
+        reader.Should().NotContain("Apply_probe_macro");
+        admin.Should().Contain("Remove_probe_ticket_tags");
+        editor.Should().NotContain("Remove_probe_ticket_tags");
     }
 
     /// <summary>
-    /// A caller who authenticates but holds no <c>vitally:*</c> permission at all must be shown
-    /// nothing. This is the other side of the risk: a filter that fails open would advertise all 93.
+    /// A caller who authenticates but holds no <c>zendesk:*</c> permission at all must be shown
+    /// nothing. This is the other side of the risk: a filter that fails open would advertise every tool.
     /// </summary>
     /// <summary>
     /// Pins the invariant the whole design rests on: discovery filtering and the
@@ -211,8 +220,8 @@ public class AuthorizationFilterToolsListTests
             names.Should().Contain(n => n.StartsWith("List_", StringComparison.Ordinal),
                 "the configured permission differs from the caller's only by whitespace, which "
                 + "Validate() normalises — so the reader's tools must still be discoverable");
-            names.Should().HaveCount(56,
-                "a reader should see exactly the 56 read tools; a different count means the policy "
+            names.Should().BeEquivalentTo(ToolCatalogue.VisibleTo(Registered, "zendesk:read"),
+                "a reader should see exactly the read tools; a different list means the policy "
                 + "requirement and ToolAuthorizer disagreed about the permission string");
         }
         finally
@@ -246,7 +255,7 @@ public class AuthorizationFilterToolsListTests
     {
         var names = await ToolNamesAsync(noAuth: true, []);
 
-        names.Should().HaveCount(93);
+        names.Should().BeEquivalentTo(Registered.Select(t => t.Name));
     }
 
     /// <summary>
@@ -254,17 +263,17 @@ public class AuthorizationFilterToolsListTests
     /// it. A client that already cached the full list, or one that simply guesses the name, still
     /// reaches <c>tools/call</c> — so this asserts the call is refused rather than executed. Enforcement
     /// remains layered: the SDK's call-tool checkpoint here, and <c>ZendeskService.SendAsync</c>
-    /// behind it (covered by <see cref="VitallyServiceAuthorizationTests"/>).
+    /// behind it (covered by <see cref="ZendeskServiceAuthorizationTests"/>).
     /// </summary>
     [Fact]
     public async Task Reader_CallingAWriteTool_IsDenied()
     {
         var json = await PostMcpAsync(noAuth: false, ["zendesk:read"],
-            """{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"Create_organization","arguments":{"jsonBody":"{}"}}}""");
+            """{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"Create_probe_ticket","arguments":{"subject":"x"}}}""");
 
         // The SDK's call-tool checkpoint refuses before the handler runs, so this is a JSON-RPC
         // error rather than a tool result. A successful call would have attempted the upstream
-        // Vitally POST against the dummy key.
+        // Zendesk POST — and, with no connected account for this caller, answered with a connect link.
         using var doc = JsonDocument.Parse(json);
         doc.RootElement.TryGetProperty("error", out var error).Should().BeTrue(
             "a reader must not be able to invoke a write tool even by naming it directly");
@@ -285,7 +294,7 @@ public class AuthorizationFilterToolsListTests
         var auditSink = new CapturingLoggerProvider(typeof(AuditLogger).FullName!);
 
         await PostMcpAsync(noAuth: false, ["zendesk:read"],
-            """{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"Delete_account","arguments":{"id":"acc-1"}}}""",
+            """{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"Delete_probe_ticket","arguments":{"ticketId":987654321}}}""",
             auditSink);
 
         var denials = auditSink.Entries.Where(e => e.Message.Contains("DENIED", StringComparison.Ordinal)).ToList();
@@ -294,15 +303,16 @@ public class AuthorizationFilterToolsListTests
         var (level, message) = denials[0];
         level.Should().Be(LogLevel.Warning);
         message.Should().Contain("test-subject", "the record must attribute the denial to the caller's subject id");
-        message.Should().Contain("Delete_account", "the record must name the tool that was refused");
+        message.Should().Contain("Delete_probe_ticket", "the record must name the tool that was refused");
         message.Should().Contain("zendesk:delete", "the record must state the permission the caller lacked");
-        message.Should().NotContain("acc-1", "call arguments must never reach the audit log");
+        message.Should().NotContain("987654321", "call arguments must never reach the audit log");
     }
 
     /// <summary>
     /// Discovery filtering is normal operation, not a denial. The SDK evaluates the policy once per
-    /// tool per <c>tools/list</c> (93 evaluations, uncached), so auditing every non-success would
-    /// write 37 spurious records for a reader on every list — on every client reconnect — and bury
+    /// tool per <c>tools/list</c> (one evaluation per tool, uncached), so auditing every non-success
+    /// would write a spurious record per write and delete tool for a reader on every list — on every
+    /// client reconnect — and bury
     /// the real denials. This pins the resource-type discrimination in
     /// <c>ZendeskPermissionHandler</c> that prevents it.
     /// </summary>

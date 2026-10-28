@@ -21,7 +21,7 @@ namespace ZendeskMcp.Tests;
 [Collection(IntegrationTestCollection.Name)]
 public class OAuthProxyPublicOriginTests : IClassFixture<OAuthProxyPublicOriginTests.Factory>
 {
-    private const string PublicOrigin = "https://vitally.example.com";
+    private const string PublicOrigin = "https://zendesk.example.com";
 
     private readonly Factory _factory;
 
@@ -93,8 +93,9 @@ public class OAuthProxyPublicOriginTests : IClassFixture<OAuthProxyPublicOriginT
                     ["OAuth:Audience"] = PublicOrigin,
                     ["OAuth:PublicBaseUrl"] = PublicOrigin,
                     ["OAuth:SharedClientId"] = "test-client-id",
-                    ["Vitally:Region"] = "EU",
-                    ["Vitally:DevelopmentApiKey"] = "sk_test_dummy"
+                    ["Zendesk:Subdomain"] = TestHelpers.Subdomain,
+                    ["Zendesk:DevelopmentEmail"] = "dev@example.com",
+                    ["Zendesk:DevelopmentApiToken"] = "zd_test_dummy"
                 });
             });
             // See the sibling factory: startup resolves the upstream endpoints from discovery.

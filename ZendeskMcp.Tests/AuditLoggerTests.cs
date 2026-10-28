@@ -51,7 +51,7 @@ public class AuditLoggerTests
             oid: "675ebdda-7590-4d79-8ec3-a2d17ab029ba",
             pairwiseSub: "S-1pAiRwiSeSuBjEcTeXaMpLeVaLuE0000000000000"));
 
-        audit.LogAction(HttpMethod.Delete, "https://rest.vitally-eu.io/resources/accounts/acc-1", 200);
+        audit.LogAction(HttpMethod.Delete, "https://acme.zendesk.com/api/v2/tickets/35101", 200);
 
         var message = logger.Entries.Should().ContainSingle().Subject.Message;
         message.Should().Contain("675ebdda-7590-4d79-8ec3-a2d17ab029ba");
@@ -77,7 +77,7 @@ public class AuditLoggerTests
         // The audit record still attributes, because AuditLogger's own raw-subject fallback catches
         // it — recording the whole opaque subject rather than a GUID extracted from it.
         var (audit, logger) = Build(user: user);
-        audit.LogAction(HttpMethod.Delete, "https://rest.vitally-eu.io/resources/accounts/acc-1", 200);
+        audit.LogAction(HttpMethod.Delete, "https://acme.zendesk.com/api/v2/tickets/35101", 200);
 
         logger.Entries.Should().ContainSingle().Subject.Message
             .Should().Contain("waad|fiscal-entra|675ebdda-7590-4d79-8ec3-a2d17ab029ba");
@@ -90,7 +90,7 @@ public class AuditLoggerTests
         // shape attributing every action to "unknown", which would be worse than unresolvable.
         var (audit, logger) = Build(user: AuthenticatedUser(email: null, sub: "opaque-subject-42"));
 
-        audit.LogAction(HttpMethod.Delete, "https://rest.vitally-eu.io/resources/accounts/acc-1", 200);
+        audit.LogAction(HttpMethod.Delete, "https://acme.zendesk.com/api/v2/tickets/35101", 200);
 
         logger.Entries.Should().ContainSingle().Subject.Message.Should().Contain("opaque-subject-42");
     }
@@ -104,7 +104,7 @@ public class AuditLoggerTests
         var user = EntraV2User(oid, "S-1pAiRwiSeSuBjEcTeXaMpLeVaLuE0000000000000");
         var (audit, logger) = Build();
 
-        audit.LogToolCallDenied(user, "Delete_account", "zendesk:delete");
+        audit.LogToolCallDenied(user, "Delete_ticket", "zendesk:delete");
 
         logger.Entries.Should().ContainSingle().Subject.Message.Should().Contain(oid);
         CallerIdentity.TryGetObjectId(user).Should().Be(oid,
@@ -125,7 +125,7 @@ public class AuditLoggerTests
     {
         var (audit, logger) = Build(user: AuthenticatedUser("alice@fiscaltec.com", "opaque-subject-123"));
 
-        audit.LogAction(HttpMethod.Delete, "https://rest.vitally-eu.io/resources/accounts/acc-1?limit=20", 200);
+        audit.LogAction(HttpMethod.Delete, "https://acme.zendesk.com/api/v2/tickets/35101?per_page=20", 200);
 
         logger.Entries.Should().ContainSingle();
         var (level, message) = logger.Entries[0];
@@ -133,14 +133,14 @@ public class AuditLoggerTests
         message.Should().Contain("opaque-subject-123", "the stable subject id is the audit actor key");
         message.Should().NotContain("alice@fiscaltec.com", "email must not be written to the audit log");
         message.Should().Contain("DELETE");
-        message.Should().Contain("/resources/accounts/acc-1");
-        message.Should().NotContain("limit=20", "the query string must be stripped from the audit record");
+        message.Should().Contain("/api/v2/tickets/35101");
+        message.Should().NotContain("per_page=20", "the query string must be stripped from the audit record");
     }
 
     /// <summary>
     /// The default is the control, so it is asserted on <see cref="AuditOptions"/> itself rather than
     /// through the helper above — which carries its own <c>includeReads: false</c> and would keep
-    /// passing if the real default regressed. Reads are 56 of the 93 tools, and this is the only
+    /// passing if the real default regressed. Most tools are reads, and this is the only
     /// record of who accessed which customer record, so a false default means no meaningful trail.
     /// It was false until 2026-09-17 and no deployed target overrode it (vitally-mcp#139).
     /// </summary>
@@ -155,7 +155,7 @@ public class AuditLoggerTests
     public void LogAction_SkipsReads_WhenIncludeReadsDisabled()
     {
         var (audit, logger) = Build(includeReads: false, user: AuthenticatedUser("alice@fiscaltec.com", "opaque-subject-123"));
-        audit.LogAction(HttpMethod.Get, "https://rest.vitally-eu.io/resources/accounts", 200);
+        audit.LogAction(HttpMethod.Get, "https://acme.zendesk.com/api/v2/tickets", 200);
         logger.Entries.Should().BeEmpty();
     }
 
@@ -163,7 +163,7 @@ public class AuditLoggerTests
     public void LogAction_LogsReads_WhenIncludeReadsEnabled()
     {
         var (audit, logger) = Build(includeReads: true, user: AuthenticatedUser("alice@fiscaltec.com", "opaque-subject-123"));
-        audit.LogAction(HttpMethod.Get, "https://rest.vitally-eu.io/resources/accounts", 200);
+        audit.LogAction(HttpMethod.Get, "https://acme.zendesk.com/api/v2/tickets", 200);
         logger.Entries.Should().ContainSingle();
     }
 
@@ -171,7 +171,7 @@ public class AuditLoggerTests
     public void LogAction_NoOp_WhenDisabled()
     {
         var (audit, logger) = Build(enabled: false, user: AuthenticatedUser("alice@fiscaltec.com", "opaque-subject-123"));
-        audit.LogAction(HttpMethod.Post, "https://rest.vitally-eu.io/resources/accounts", 201);
+        audit.LogAction(HttpMethod.Post, "https://acme.zendesk.com/api/v2/tickets", 201);
         logger.Entries.Should().BeEmpty();
     }
 
@@ -180,7 +180,7 @@ public class AuditLoggerTests
     {
         var (audit, logger) = Build(user: AuthenticatedUser("bob@fiscaltec.com", "opaque-subject-999"));
 
-        audit.LogDenied(HttpMethod.Delete, "https://rest.vitally-eu.io/resources/accounts/acc-1");
+        audit.LogDenied(HttpMethod.Delete, "https://acme.zendesk.com/api/v2/tickets/35101");
 
         logger.Entries.Should().ContainSingle();
         var (level, message) = logger.Entries[0];
@@ -199,7 +199,7 @@ public class AuditLoggerTests
 
         audit.LogToolCallDenied(
             AuthenticatedUser("carol@fiscaltec.com", "waad|entra|abc-123"),
-            "Create_organization",
+            "Create_ticket",
             "zendesk:write");
 
         logger.Entries.Should().ContainSingle();
@@ -208,7 +208,7 @@ public class AuditLoggerTests
         message.Should().Contain("waad|entra|abc-123", "the stable subject id is the audit actor key");
         message.Should().NotContain("carol@fiscaltec.com", "email must not be written to the audit log");
         message.Should().Contain("DENIED");
-        message.Should().Contain("Create_organization");
+        message.Should().Contain("Create_ticket");
         message.Should().Contain("zendesk:write");
     }
 
@@ -217,7 +217,7 @@ public class AuditLoggerTests
     {
         var (audit, logger) = Build(user: null);
 
-        audit.LogToolCallDenied(new ClaimsPrincipal(new ClaimsIdentity()), "Delete_account", "zendesk:delete");
+        audit.LogToolCallDenied(new ClaimsPrincipal(new ClaimsIdentity()), "Delete_ticket", "zendesk:delete");
 
         logger.Entries.Should().ContainSingle();
         logger.Entries[0].Message.Should().Contain("anonymous");
@@ -228,7 +228,7 @@ public class AuditLoggerTests
     {
         var (audit, logger) = Build(enabled: false);
 
-        audit.LogToolCallDenied(AuthenticatedUser(null, "opaque-subject-123"), "Delete_account", "zendesk:delete");
+        audit.LogToolCallDenied(AuthenticatedUser(null, "opaque-subject-123"), "Delete_ticket", "zendesk:delete");
 
         logger.Entries.Should().BeEmpty();
     }
@@ -237,7 +237,7 @@ public class AuditLoggerTests
     public void LogAction_FallsBackToAnonymous_WhenNoAuthenticatedUser()
     {
         var (audit, logger) = Build(includeReads: true, user: null);
-        audit.LogAction(HttpMethod.Get, "https://rest.vitally-eu.io/resources/accounts", 200);
+        audit.LogAction(HttpMethod.Get, "https://acme.zendesk.com/api/v2/tickets", 200);
         logger.Entries.Should().ContainSingle();
         logger.Entries[0].Message.Should().Contain("anonymous");
     }
@@ -247,17 +247,17 @@ public class AuditLoggerTests
     {
         // The acceptance criterion for vitally-mcp#147, stated as an outcome rather than a field list:
         // "the audit trail must show that THIS USER called THIS TOOL and accessed, modified or
-        // deleted data for THESE CUSTOMERS". `List_organizations` is the case the upstream record
+        // deleted data for THESE CUSTOMERS". `Search_organizations` is the case the upstream record
         // cannot answer — an unscoped list whose customers exist only in the response body.
         var (audit, logger) = Build(user: EntraV2User(
             oid: "675ebdda-7590-4d79-8ec3-a2d17ab029ba",
             pairwiseSub: "S-1pAiRwiSeSuBjEcTeXaMpLeVaLuE0000000000000"));
 
         var context = new ToolCallAuditContext();
-        context.RecordUpstream(AuditRecordIds.Extract("""{"results":[{"id":"org-1"},{"id":"org-2"}]}"""));
+        context.RecordUpstream(AuditRecordIds.Extract("""{"organizations":[{"id":601},{"id":602}]}"""));
 
         audit.LogToolCall(new ToolCallAudit(
-            ToolName: "List_organizations",
+            ToolName: "Search_organizations",
             Arguments: AuditArguments.Format(null),
             Records: context.Summarise(),
             Outcome: "ok",
@@ -269,8 +269,8 @@ public class AuditLoggerTests
 
         var message = logger.Entries.Should().ContainSingle().Subject.Message;
         message.Should().Contain("675ebdda-7590-4d79-8ec3-a2d17ab029ba", "this user");
-        message.Should().Contain("List_organizations", "this tool");
-        message.Should().Contain("org-1").And.Contain("org-2", "these customers");
+        message.Should().Contain("Search_organizations", "this tool");
+        message.Should().Contain("601").And.Contain("602", "these organisations");
     }
 
     private static ToolCallAudit SampleCall(
@@ -392,7 +392,7 @@ public class AuditLoggerTests
             oid: "675ebdda-7590-4d79-8ec3-a2d17ab029ba",
             pairwiseSub: "S-1pairwise"));
 
-        var forged = "evil\r\nZendesk audit: 00000000-0000-0000-0000-000000000000 called Delete_account";
+        var forged = "evil\r\nZendesk audit: 00000000-0000-0000-0000-000000000000 called Delete_ticket";
 
         audit.LogToolCall(SampleCall() with { McpClient = forged });
 
@@ -431,7 +431,7 @@ public class AuditLoggerTests
             oid: "675ebdda-7590-4d79-8ec3-a2d17ab029ba",
             pairwiseSub: "S-1pairwise"));
 
-        audit.LogAction(HttpMethod.Get, "https://rest.vitally-eu.io/resources/organizations", 200, "corr-abc");
+        audit.LogAction(HttpMethod.Get, "https://acme.zendesk.com/api/v2/organizations", 200, "corr-abc");
 
         logger.Entries.Should().ContainSingle().Subject.Message
             .Should().Contain("correlation=corr-abc");
@@ -637,9 +637,9 @@ public class AuditLoggerTests
 
     public static TheoryData<string, Action<AuditLogger>> EveryAuditEmission() => new()
     {
-        { "ZendeskUpstreamCall", a => a.LogAction(HttpMethod.Delete, "https://rest.vitally-eu.io/resources/accounts/acc-1", 200) },
-        { "ZendeskUpstreamDenied", a => a.LogDenied(HttpMethod.Delete, "https://rest.vitally-eu.io/resources/accounts/acc-1") },
-        { "ZendeskToolCallDenied", a => a.LogToolCallDenied(null, "Delete_account", "zendesk:delete") },
+        { "ZendeskUpstreamCall", a => a.LogAction(HttpMethod.Delete, "https://acme.zendesk.com/api/v2/tickets/35101", 200) },
+        { "ZendeskUpstreamDenied", a => a.LogDenied(HttpMethod.Delete, "https://acme.zendesk.com/api/v2/tickets/35101") },
+        { "ZendeskToolCallDenied", a => a.LogToolCallDenied(null, "Delete_ticket", "zendesk:delete") },
     };
 
     [Theory]
@@ -702,14 +702,14 @@ public class AuditLoggerTests
             .Should().ContainSingle().Subject.Message;
 
         breadcrumb.Should().Contain("675ebdda-7590-4d79-8ec3-a2d17ab029ba", "who");
-        breadcrumb.Should().NotContain("acc-1",
+        breadcrumb.Should().NotContain("35101",
             "and still no customer identifiers — the resource path is exactly what must not follow it to stdout");
     }
 
     [Theory]
     [InlineData("alice@example.com")]
     [InlineData("acc-9f3c2b1a")]
-    [InlineData("Get_account?query=bob@example.com")]
+    [InlineData("Get_ticket?query=bob@example.com")]
     [InlineData("Acme_123")]
     [InlineData("alice")]
     public void Breadcrumb_DoesNotCarryACallerInventedToolName(string hostileName)
@@ -733,7 +733,7 @@ public class AuditLoggerTests
         var audit = new AuditLogger(
             Options.Create(new AuditOptions { Enabled = true, EmitBreadcrumb = true }),
             new CapturingLogger<AuditLogger>(), accessor, factory,
-            new KnownToolNames(["List_organizations", "Get_account"]));
+            new KnownToolNames(["Search_organizations", "Get_ticket"]));
 
         audit.LogToolCall(SampleCall() with { ToolName = hostileName });
         audit.LogToolCallDenied(null, hostileName, "zendesk:delete");
@@ -762,12 +762,12 @@ public class AuditLoggerTests
         var audit = new AuditLogger(
             Options.Create(new AuditOptions { Enabled = true, EmitBreadcrumb = true }),
             new CapturingLogger<AuditLogger>(), accessor, factory,
-            new KnownToolNames(["List_organizations", "Get_account"]));
+            new KnownToolNames(["Search_organizations", "Get_ticket"]));
 
-        audit.LogToolCall(SampleCall() with { ToolName = "List_organizations" });
+        audit.LogToolCall(SampleCall() with { ToolName = "Search_organizations" });
 
         factory.Loggers[AuditLogger.BreadcrumbCategory].Entries.Should().ContainSingle()
-            .Subject.Message.Should().Contain("List_organizations");
+            .Subject.Message.Should().Contain("Search_organizations");
     }
 
     [Fact]
@@ -787,7 +787,7 @@ public class AuditLoggerTests
 
         audit.LogToolCallDenied(
             EntraV2User("675ebdda-7590-4d79-8ec3-a2d17ab029ba", "S-1pairwise"),
-            "Delete_account",
+            "Delete_ticket",
             "zendesk:delete");
 
         factory.Loggers[AuditLogger.BreadcrumbCategory].Entries.Should().ContainSingle()
@@ -820,7 +820,7 @@ public class AuditLoggerTests
             Options.Create(new AuditOptions { Enabled = true, EmitBreadcrumb = true, IncludeReads = true }),
             new CapturingLogger<AuditLogger>(), accessor, factory);
 
-        audit.LogAction(HttpMethod.Get, "https://rest.vitally-eu.io/resources/organizations", 200);
+        audit.LogAction(HttpMethod.Get, "https://acme.zendesk.com/api/v2/organizations", 200);
 
         factory.Loggers[AuditLogger.BreadcrumbCategory].Entries.Should().ContainSingle()
             .Subject.Message.Should().NotContain("alice@example.com",

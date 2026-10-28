@@ -58,6 +58,15 @@ public class ReadOnlyToolsListTests : IClassFixture<ReadOnlyToolsListTests.Facto
             "Update_* tools must be hidden in read-only mode");
         toolNames.Should().NotContain(n => n.StartsWith("Delete_"),
             "Delete_* tools must be hidden in read-only mode");
+
+        // The prefix checks above cannot see a mutation named otherwise (Apply_*, Request_*, or the
+        // read-tier Disconnect_zendesk), so the exact list is asserted too: what is left must be
+        // precisely the tools that declare ReadOnly.
+        toolNames.Should().BeEquivalentTo(
+            ToolCatalogue.ProductionAndProbes().Where(t => t.Attribute.ReadOnly).Select(t => t.Name),
+            "read-only mode keeps exactly the tools annotated ReadOnly");
+        toolNames.Should().NotContain("Disconnect_zendesk",
+            "it is in the read tier but changes state, so a read-only deployment hides it too");
     }
 
     /// <summary>
@@ -140,13 +149,13 @@ public class ReadOnlyToolsListTests : IClassFixture<ReadOnlyToolsListTests.Facto
 
         var body = BuildJsonRpc("tools/call", id: 2, new
         {
-            name = "Create_organization",
-            arguments = new { jsonBody = "{}" }
+            name = "Create_probe_ticket",
+            arguments = new { subject = "x" }
         });
         var responseText = await PostMcpAsync(client, body);
 
         // The CallTool filter surfaces the UnauthorizedAccessException message from ToolAuthorizer,
-        // instead of the SDK's generic "An error occurred invoking 'Create_organization'."
+        // instead of the SDK's generic "An error occurred invoking 'Create_probe_ticket'."
         responseText.Should().Contain("read-only mode");
         responseText.Should().NotContain("An error occurred invoking");
     }
@@ -170,13 +179,14 @@ public class ReadOnlyToolsListTests : IClassFixture<ReadOnlyToolsListTests.Facto
             // reads the correct values at app-composition time.
             Environment.SetEnvironmentVariable("OAuth__NoAuth", "true");
             Environment.SetEnvironmentVariable("Authorization__ReadOnly", "true");
-            Environment.SetEnvironmentVariable("Vitally__Region", "EU");
-            Environment.SetEnvironmentVariable("Vitally__DevelopmentApiKey", "sk_test_dummy");
+            ZendeskHostEnvironment.Set(noAuth: true);
         }
 
         protected override IHost CreateHost(IHostBuilder builder)
         {
             builder.UseEnvironment(Environments.Development);
+            // A write and a delete to hide (the production tools are all read tier for now).
+            builder.ConfigureServices(services => services.AddProbeTools());
             builder.ConfigureAppConfiguration((_, config) =>
             {
                 // Belt-and-braces: also override via in-memory config for IOptions bindings.
@@ -184,8 +194,9 @@ public class ReadOnlyToolsListTests : IClassFixture<ReadOnlyToolsListTests.Facto
                 {
                     ["OAuth:NoAuth"] = "true",
                     ["Authorization:ReadOnly"] = "true",
-                    ["Vitally:Region"] = "EU",
-                    ["Vitally:DevelopmentApiKey"] = "sk_test_dummy"
+                    ["Zendesk:Subdomain"] = TestHelpers.Subdomain,
+                    ["Zendesk:DevelopmentEmail"] = "dev@example.com",
+                    ["Zendesk:DevelopmentApiToken"] = "zd_test_dummy"
                 });
             });
             return base.CreateHost(builder);
@@ -196,8 +207,7 @@ public class ReadOnlyToolsListTests : IClassFixture<ReadOnlyToolsListTests.Facto
             // Clean up so env vars don't leak into other test classes.
             Environment.SetEnvironmentVariable("OAuth__NoAuth", null);
             Environment.SetEnvironmentVariable("Authorization__ReadOnly", null);
-            Environment.SetEnvironmentVariable("Vitally__Region", null);
-            Environment.SetEnvironmentVariable("Vitally__DevelopmentApiKey", null);
+            ZendeskHostEnvironment.Clear();
             base.Dispose(disposing);
         }
     }

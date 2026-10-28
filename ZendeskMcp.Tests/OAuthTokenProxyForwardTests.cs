@@ -86,13 +86,13 @@ public class OAuthTokenProxyForwardTests : IClassFixture<OAuthTokenProxyForwardT
             ["grant_type"] = "authorization_code",
             ["code"] = "test-code",
             ["redirect_uri"] = "http://localhost:54321/callback",
-            ["resource"] = "https://vitally.example.com/"
+            ["resource"] = "https://zendesk.example.com/"
         });
         var response = await client.PostAsync("/oauth/token", form);
 
         response.StatusCode.Should().Be(HttpStatusCode.OK);
         _factory.Upstream.RequestBodies.Last()
-            .Should().Contain("resource=" + Uri.EscapeDataString("https://vitally.example.com/"));
+            .Should().Contain("resource=" + Uri.EscapeDataString("https://zendesk.example.com/"));
     }
 
     [Theory]
@@ -131,7 +131,7 @@ public class OAuthTokenProxyForwardTests : IClassFixture<OAuthTokenProxyForwardT
         {
             new KeyValuePair<string, string>("grant_type", "authorization_code"),
             new KeyValuePair<string, string>("code", "test-code"),
-            new KeyValuePair<string, string>("resource", "https://vitally.example.com/"),
+            new KeyValuePair<string, string>("resource", "https://zendesk.example.com/"),
             new KeyValuePair<string, string>("resource", "https://evil.example.com/")
         });
         var response = await client.PostAsync("/oauth/token", form);
@@ -156,10 +156,11 @@ public class OAuthTokenProxyForwardTests : IClassFixture<OAuthTokenProxyForwardT
                 {
                     ["OAuth:NoAuth"] = "true",
                     ["OAuth:Authority"] = StubOidcDiscovery.Issuer,
-                    ["OAuth:Audience"] = "https://vitally.example.com",
+                    ["OAuth:Audience"] = "https://zendesk.example.com",
                     ["OAuth:SharedClientId"] = "test-client-id",
-                    ["Vitally:Region"] = "EU",
-                    ["Vitally:DevelopmentApiKey"] = "sk_test_dummy"
+                    ["Zendesk:Subdomain"] = TestHelpers.Subdomain,
+                    ["Zendesk:DevelopmentEmail"] = "dev@example.com",
+                    ["Zendesk:DevelopmentApiToken"] = "zd_test_dummy"
                 });
             });
             builder.ConfigureServices(services =>

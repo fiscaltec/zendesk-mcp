@@ -5,7 +5,7 @@ namespace ZendeskMcp.Tests;
 
 /// <summary>
 /// The capture helper is itself load-bearing: several assertions rest on <c>Exceptions[i]</c>
-/// belonging to <c>Entries[i]</c>, and <c>Get_organization_summary</c> logs from two sections running
+/// belonging to <c>Entries[i]</c>, and a composite tool can log from sections running
 /// concurrently. Unsynchronised <c>List.Add</c> calls can drop entries or misalign the two lists, and
 /// a test reading a misaligned pair would assert about the wrong record (Copilot on vitally-mcp#177).
 /// </summary>

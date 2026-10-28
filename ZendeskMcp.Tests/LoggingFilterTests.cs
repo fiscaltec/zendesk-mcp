@@ -304,8 +304,9 @@ public class LoggingFilterTests
             // Auth ON — the NoAuth path never registers the callback under test.
             Environment.SetEnvironmentVariable("OAuth__NoAuth", "false");
             Environment.SetEnvironmentVariable("Authorization__ReadOnly", "false");
-            Environment.SetEnvironmentVariable("Vitally__DevelopmentApiKey", "sk_test_dummy");
-            Environment.SetEnvironmentVariable("Vitally__Region", "EU");
+            // The per-user OAuth client, not the development token: the startup guard refuses the
+            // token with authentication on.
+            ZendeskHostEnvironment.Set(noAuth: false);
             Environment.SetEnvironmentVariable("OAuth__Authority", "https://example-issuer.test/");
             Environment.SetEnvironmentVariable("OAuth__Audience", "https://example.test/");
 
@@ -378,12 +379,12 @@ public class LoggingFilterTests
     /// <c>WebApplicationFactory</c> can inject configuration — so environment variables are the only
     /// override that works.
     ///
-    /// <para>Only these four are <i>set</i>. Everything else under the configuration prefixes in
+    /// <para>Only these are <i>set</i>. Everything else under the configuration prefixes in
     /// <see cref="ConfigurationPrefixes"/>
     /// is <b>cleared wholesale</b> by <see cref="ComposeAndGetLogger"/> rather than enumerated,
     /// which is deliberate: naming individual keys to clear is a losing game. Three review rounds
     /// each found another one that fails host composition before a single assertion runs —
-    /// <c>Vitally__KeyVaultUri</c> (<c>StartupGuards.EnsureSafeAuthConfig</c> refuses it alongside
+    /// <c>Zendesk__KeyVaultUri</c> (<c>StartupGuards.EnsureSafeAuthConfig</c> refuses it alongside
     /// <c>NoAuth</c>), <c>OAuth__SharedClientId</c> and <c>OAuth__PublicBaseUrl</c>, then
     /// <c>OAuth__SharedClientSecret</c>, <c>OAuth__UpstreamResourceScope</c> and
     /// <c>Authorization__LiveGroupCheck</c> with its group ids. Each failure surfaces as an OAuth or
@@ -394,12 +395,12 @@ public class LoggingFilterTests
     /// never restores them, so this fixture inherits them from a sibling in the same collection.
     /// Clearing by prefix is immune to the next such addition, which an enumeration is not.</para>
     /// </summary>
-    private static readonly (string Key, string Value)[] RequiredSettings =
+    private static readonly (string Key, string? Value)[] RequiredSettings =
     [
         ("OAuth__NoAuth", "true"),
         ("Authorization__ReadOnly", "false"),
-        ("Vitally__DevelopmentApiKey", "sk_test_dummy"),
-        ("Vitally__Region", "EU"),
+        // The development API token, which the startup guard accepts only with NoAuth on.
+        .. TestHelpers.NoAuthZendeskConfiguration.Select(kv => (kv.Key.Replace(":", "__", StringComparison.Ordinal), kv.Value)),
     ];
 
     /// <summary>
@@ -407,7 +408,7 @@ public class LoggingFilterTests
     /// is cleared before composing, so the host sees exactly <see cref="RequiredSettings"/>.
     /// </summary>
     private static readonly string[] ConfigurationPrefixes =
-        ["OAuth__", "Authorization__", "Vitally__", "Audit__", "ToolsListCache__", "Logging__",
+        ["OAuth__", "Authorization__", "Zendesk__", "Audit__", "ToolsListCache__", "Logging__",
          "ApplicationInsights__"];
 
     // Logging__ is in that list for a reason specific to this class: WebApplication.CreateBuilder
@@ -578,9 +579,11 @@ public class LoggingFilterTests
             // set is EMPTY and every breadcrumb silently reads "unrecognised", which fails closed but
             // also makes the field useless without anything failing.
             var knownTools = services.GetRequiredService<KnownToolNames>();
-            knownTools.Count.Should().BeGreaterThan(50,
-                "this server registers 90-odd tools; an empty set means the SDK registrations were not found");
-            knownTools.IsRegistered("List_organizations").Should().BeTrue(
+            knownTools.Count.Should().BeGreaterThan(0,
+                "an empty set means the SDK registrations were not found");
+            knownTools.Count.Should().Be(ToolCatalogue.Production().Count,
+                "every tool the assembly declares is registered, and nothing else");
+            knownTools.IsRegistered("Get_zendesk_connection").Should().BeTrue(
                 "and a real tool name must pass, or the breadcrumb never names a tool at all");
 
             // Same shape of gap as the tool-name set: TelemetryRedactionTests construct the processor
@@ -635,9 +638,9 @@ public class LoggingFilterTests
             using var mcpSource = new System.Diagnostics.ActivitySource(TelemetrySources.McpActivitySource);
             mcpSource.HasListeners().Should().BeTrue("the MCP SDK's spans must reach the exporter");
 
-            using (var vitallyMeter = new System.Diagnostics.Metrics.Meter(TelemetrySources.ZendeskMeter))
+            using (var zendeskMeter = new System.Diagnostics.Metrics.Meter(TelemetrySources.ZendeskMeter))
             {
-                vitallyMeter.CreateCounter<long>("registration.probe").Enabled.Should().BeTrue(
+                zendeskMeter.CreateCounter<long>("registration.probe").Enabled.Should().BeTrue(
                     "this server's counters must be registered with the exporter");
             }
 

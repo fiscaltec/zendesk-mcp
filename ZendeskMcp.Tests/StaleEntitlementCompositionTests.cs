@@ -140,8 +140,7 @@ public class StaleEntitlementCompositionTests
             // classes touch, so scheduling order cannot decide the outcome.
             Environment.SetEnvironmentVariable("OAuth__NoAuth", "false");
             Environment.SetEnvironmentVariable("Authorization__ReadOnly", "false");
-            Environment.SetEnvironmentVariable("Vitally__DevelopmentApiKey", "sk_test_dummy");
-            Environment.SetEnvironmentVariable("Vitally__Region", "EU");
+            ZendeskHostEnvironment.Set(noAuth: false);
             Environment.SetEnvironmentVariable("OAuth__Authority", "https://example-issuer.test/");
             Environment.SetEnvironmentVariable("OAuth__Audience", "https://example.test/");
             Environment.SetEnvironmentVariable("Authorization__LiveGroupCheck", "true");
@@ -154,6 +153,9 @@ public class StaleEntitlementCompositionTests
             _baseFactory = new WebApplicationFactory<Program>();
             _factory = _baseFactory.WithWebHostBuilder(b => b.ConfigureServices(services =>
             {
+                // A tool in each tier, so a tier change shows in tools/list (ProbeTools).
+                services.AddProbeTools();
+
                 // Authenticate as a principal carrying `oid`, which is what makes ToolAuthorizer
                 // take the live group path at all.
                 services.AddAuthentication(TestAuthHandler.SchemeName)
@@ -210,7 +212,7 @@ public class StaleEntitlementCompositionTests
 
             foreach (var name in new[]
             {
-                "OAuth__NoAuth", "Authorization__ReadOnly", "Vitally__DevelopmentApiKey", "Vitally__Region",
+                "OAuth__NoAuth", "Authorization__ReadOnly",
                 "OAuth__Authority", "OAuth__Audience", "Authorization__LiveGroupCheck",
                 "Authorization__LiveGroupCacheSeconds", "Authorization__LiveGroupStaleSeconds",
                 "Authorization__ReaderGroupId", "Authorization__EditorGroupId", "Authorization__AdminGroupId"
@@ -218,6 +220,8 @@ public class StaleEntitlementCompositionTests
             {
                 Environment.SetEnvironmentVariable(name, null);
             }
+
+            ZendeskHostEnvironment.Clear();
         }
     }
 

@@ -247,8 +247,8 @@ public class ToolAuthorizerTests
     public async Task LiveCheck_LogsItsDenialReasonOncePerRequest_NotOncePerEvaluation(bool noResolver)
     {
         // ToolAuthorizer is scoped, so one instance is one HTTP request — and a single tools/list
-        // evaluates authorisation once per tool (93 of them). Without the guard, one malformed token
-        // or one Graph outage buries the single line that explains the failure under 92 copies of
+        // evaluates authorisation once per tool (dozens of them). Without the guard, one malformed token
+        // or one Graph outage buries the single line that explains the failure under a copy per tool of
         // itself, in exactly the logs someone is reading because authorisation is failing.
         var logger = new CapturingLogger<ToolAuthorizer>();
         var authorizer = Build(
@@ -444,7 +444,7 @@ public class ToolAuthorizerTests
     public async Task HasEffectivePermissionAsync_RecordsTheTier_WhenThePermissionNamesAreConfigured()
     {
         // ToolAuthorizationOptions lets the three permission names be configured, and only validates
-        // that they are non-empty — so a deployment may legitimately use names with no `vitally:`
+        // that they are non-empty — so a deployment may legitimately use names with no `zendesk:`
         // prefix. Filtering the recorded tier on that prefix meant HasPermission would authorise the
         // call while the audit record claimed the caller held nothing.
         var context = new ToolCallAuditContext();

@@ -140,6 +140,9 @@ public sealed class ZendeskCredentialProvider(
     {
         if (UsesDevelopmentToken)
         {
+            // Logged here because nothing else will: ToolCallFailureLog treats the exception below as a
+            // permission denial and stays silent, which would leave a bad development token with no line.
+            logger.LogWarning("Zendesk rejected Zendesk:DevelopmentApiToken (401)");
             return new UnauthorizedAccessException(
                 "Zendesk rejected Zendesk:DevelopmentApiToken. Check the token and Zendesk:DevelopmentEmail.");
         }

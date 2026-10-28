@@ -356,8 +356,8 @@ public sealed class UpstreamOidcMetadataTests : IDisposable
         await resolver.GetAsync();
         await resolver.GetAsync();
 
-        capture.Total("vitally.cache.lookups", ("cache", "oidc_discovery"), ("result", "miss")).Should().Be(1);
-        capture.Total("vitally.cache.lookups", ("cache", "oidc_discovery"), ("result", "hit")).Should().Be(2);
+        capture.Total("zendesk.cache.lookups", ("cache", "oidc_discovery"), ("result", "miss")).Should().Be(1);
+        capture.Total("zendesk.cache.lookups", ("cache", "oidc_discovery"), ("result", "hit")).Should().Be(2);
     }
 
     /// <summary>

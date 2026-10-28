@@ -4,7 +4,7 @@ using ZendeskMcp;
 namespace ZendeskMcp.Tests;
 
 /// <summary>
-/// One tool call can make several upstream calls — <c>Get_organization_summary</c> makes four, and the
+/// One tool call can make several upstream calls — a ticket with its comments and audits makes three, and the
 /// bounded auto-pager can make ten. The audit record is per <i>tool call</i>, so something has to
 /// gather what those upstream calls touched and hand it back as one answer.
 /// </summary>
@@ -47,8 +47,8 @@ public class ToolCallAuditContextTests
     public void Summarise_DistinguishesAPagerTruncation_FromTheIdCap()
     {
         // These mean different things and must not be conflated. `Truncated` says the pager stopped
-        // at MaxAutoPageFetches, so the number of *matching* records is unknowable — Vitally's
-        // envelope exposes only `next`, there is no total. The id cap says the list was shortened
+        // at MaxAutoPageFetches, so the number of *matching* records is unknowable — Zendesk's cursor
+        // envelope exposes only `meta.has_more`, there is no total. The id cap says the list was shortened
         // while the count stayed true. "Fetched 1000, ids 100, truncated" is honest; a capped read
         // claiming the total is unknown, or a truncated one implying RecordsFetched was all of it,
         // is not.
@@ -83,7 +83,7 @@ public class ToolCallAuditContextTests
     [Fact]
     public void Summarise_ReportsUpstreamCallsThatYieldedNoIds()
     {
-        // `Get_organization_summary` makes four upstream calls of different shapes. If one of them
+        // A composite tool makes several upstream calls of different shapes. If one of them
         // returns something this cannot read ids from, the record has to say so — otherwise it looks
         // like a complete account of what was touched while silently missing a call.
         var context = new ToolCallAuditContext();

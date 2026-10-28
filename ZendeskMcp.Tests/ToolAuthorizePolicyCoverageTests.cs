@@ -1,7 +1,5 @@
-using System.Reflection;
 using FluentAssertions;
 using Microsoft.AspNetCore.Authorization;
-using ModelContextProtocol.Server;
 
 namespace ZendeskMcp.Tests;
 
@@ -20,31 +18,27 @@ namespace ZendeskMcp.Tests;
 /// </summary>
 public class ToolAuthorizePolicyCoverageTests
 {
-    private const string ReadPolicy = "zendesk:read";
-    private const string WritePolicy = "zendesk:write";
-    private const string DeletePolicy = "zendesk:delete";
+    private const string ReadPolicy = ToolCatalogue.ReadPolicy;
+    private const string WritePolicy = ToolCatalogue.WritePolicy;
+    private const string DeletePolicy = ToolCatalogue.DeletePolicy;
 
-    private static IEnumerable<(string Name, McpServerToolAttribute Attr, MethodInfo Method)> AllTools()
-    {
-        var assembly = typeof(ZendeskService).Assembly;
-        foreach (var type in assembly.GetTypes().Where(t => t.GetCustomAttribute<McpServerToolTypeAttribute>() is not null))
-        {
-            foreach (var method in type.GetMethods(BindingFlags.Public | BindingFlags.Static | BindingFlags.Instance | BindingFlags.DeclaredOnly))
-            {
-                var attr = method.GetCustomAttribute<McpServerToolAttribute>();
-                if (attr is not null)
-                {
-                    yield return (attr.Name ?? method.Name, attr, method);
-                }
-            }
-        }
-    }
+    /// <summary>Name prefixes that only ever read, so must be discoverable with the read tier alone.</summary>
+    public static TheoryData<string> ReadPrefixes => new() { "List_", "Get_", "Search_", "Count_", "Find_", "Preview_", "Export_" };
+
+    /// <summary>
+    /// Name prefixes that write through POST/PUT. <c>Apply_</c>, <c>Add_</c>, <c>Set_</c> and
+    /// <c>Request_</c> are the ones a Create_/Update_ check would miss — <c>Apply_macro</c> changes a
+    /// ticket and <c>Request_*_upload</c> reserves an upload, so each must stay out of a reader's list.
+    /// </summary>
+    public static TheoryData<string> WritePrefixes => new() { "Create_", "Update_", "Apply_", "Add_", "Set_", "Request_" };
 
     [Fact]
     public void EveryTool_CarriesExactlyOneAuthorizePolicyConsistentWithItsAnnotations()
     {
-        foreach (var (name, attr, method) in AllTools())
+        foreach (var tool in ToolCatalogue.Production())
         {
+            var (name, attr, method) = (tool.Name, tool.Attribute, tool.Method);
+
             // CustomAttributeData rather than the attribute instance: it is the only way to see the
             // policy exactly as the source assigned it, and to count the usages on this member
             // without inheritance folding two declarations into one.
@@ -70,12 +64,17 @@ public class ToolAuthorizePolicyCoverageTests
                     $"{name} must name a policy on its [Authorize] attribute, not just [Authorize].");
 
             policy.Should().BeOneOf([ReadPolicy, WritePolicy, DeletePolicy],
-                $"{name} must use one of the three registered vitally:* policies");
+                $"{name} must use one of the three registered zendesk:* policies");
 
             if (attr.ReadOnly)
             {
                 policy.Should().Be(ReadPolicy,
                     $"{name} is ReadOnly=true, so a reader-tier caller must be allowed to discover it");
+            }
+            else if (ToolCatalogue.ReadTierMutations.Contains(name))
+            {
+                policy.Should().Be(ReadPolicy,
+                    $"{name} changes only the caller's own connection, so it is deliberately in the read tier");
             }
             else
             {
@@ -85,26 +84,59 @@ public class ToolAuthorizePolicyCoverageTests
         }
     }
 
-    /// <summary>
-    /// Guards the split itself: the counts are asserted so that a tool silently changing tier (e.g. a
-    /// delete re-labelled as a write) shows up as a failure rather than passing the consistency check
-    /// above. Totals must sum to the full tool count.
-    /// </summary>
     [Fact]
-    public void PolicyDistribution_MatchesTheHttpVerbTiers()
+    public void TheReadTierExceptions_AreRealTools()
     {
-        var byPolicy = AllTools()
-            .Select(t => t.Method.GetCustomAttributesData()
-                .First(d => d.AttributeType == typeof(AuthorizeAttribute))
-                .NamedArguments.First(a => a.MemberName == nameof(AuthorizeAttribute.Policy))
-                .TypedValue.Value as string)
-            .GroupBy(p => p!)
-            .ToDictionary(g => g.Key, g => g.Count());
+        // An exception list that outlives its tool would quietly widen the rule above for whatever is
+        // next given that name.
+        var names = ToolCatalogue.Production().Select(t => t.Name).ToHashSet(StringComparer.Ordinal);
+        ToolCatalogue.ReadTierMutations.Should().OnlyContain(n => names.Contains(n));
+    }
 
-        byPolicy.Should().ContainKey(ReadPolicy).And.ContainKey(WritePolicy).And.ContainKey(DeletePolicy);
-        byPolicy.Values.Sum().Should().Be(93, "the server exposes 93 tools and each must be classified");
-        byPolicy[ReadPolicy].Should().Be(56, "List_*/Get_*/Search_* all issue GETs");
-        byPolicy[WritePolicy].Should().Be(25, "Create_*/Update_*/Add_meeting_participant all issue POST/PUT");
-        byPolicy[DeletePolicy].Should().Be(12, "Delete_*/Remove_meeting_participant issue DELETEs");
+    /// <summary>
+    /// Guards the split itself, by name rather than by count: the tool set grows as tools are added,
+    /// so a hard-coded total would fail on every addition and be "fixed" by editing the number. A
+    /// tool silently changing tier (a write re-labelled as a read) still fails here, because its
+    /// prefix says what its verb is.
+    /// </summary>
+    [Theory]
+    [MemberData(nameof(ReadPrefixes))]
+    public void ReadPrefixedTools_AreInTheReadTier(string prefix)
+    {
+        var tools = ToolCatalogue.Production().Where(t => t.Name.StartsWith(prefix, StringComparison.Ordinal)).ToList();
+        Assert.SkipWhen(tools.Count == 0, $"No {prefix}* tools are registered yet.");
+
+        tools.Should().OnlyContain(t => t.Policy == ReadPolicy, $"{prefix}* tools only issue GETs");
+    }
+
+    [Theory]
+    [MemberData(nameof(WritePrefixes))]
+    public void WritePrefixedTools_AreInTheWriteTier(string prefix)
+    {
+        var tools = ToolCatalogue.Production().Where(t => t.Name.StartsWith(prefix, StringComparison.Ordinal)).ToList();
+        Assert.SkipWhen(tools.Count == 0, $"No {prefix}* tools are registered yet.");
+
+        tools.Should().OnlyContain(t => t.Policy == WritePolicy, $"{prefix}* tools issue POST/PUT");
+    }
+
+    [Fact]
+    public void DeletePrefixedTools_AreInTheDeleteTier()
+    {
+        // v1 ships no delete tools, so this guards the first one to arrive rather than any today.
+        var tools = ToolCatalogue.Production().Where(t => t.Name.StartsWith("Delete_", StringComparison.Ordinal)).ToList();
+        Assert.SkipWhen(tools.Count == 0, "No Delete_* tools are registered (v1 has none).");
+
+        tools.Should().OnlyContain(t => t.Policy == DeletePolicy, "Delete_* tools issue DELETEs");
+    }
+
+    [Fact]
+    public void EveryTool_IsClassified_AndTheSetIsNotEmpty()
+    {
+        var tools = ToolCatalogue.Production();
+
+        tools.Should().NotBeEmpty("a sweep over nothing proves nothing");
+        tools.Should().OnlyContain(t => t.Policy == ReadPolicy || t.Policy == WritePolicy || t.Policy == DeletePolicy,
+            "each tool must be in exactly one of the three tiers");
+        tools.Select(t => t.Name).Should().OnlyHaveUniqueItems("a duplicate name would make one tool unreachable");
     }
 }

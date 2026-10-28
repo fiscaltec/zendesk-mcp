@@ -22,12 +22,12 @@ namespace ZendeskMcp.Tests;
 public class TelemetryRedactionTests
 {
     [Theory]
-    [InlineData("https://rest.vitally-eu.io/resources/users/search?query=alice@example.com",
-                "https://rest.vitally-eu.io/resources/users/search?*")]
-    [InlineData("https://rest.vitally-eu.io/resources/organizations?limit=100&from=cursor",
-                "https://rest.vitally-eu.io/resources/organizations?*")]
-    [InlineData("https://rest.vitally-eu.io/resources/accounts/acc-1",
-                "https://rest.vitally-eu.io/resources/accounts/acc-1")]
+    [InlineData("https://acme.zendesk.com/api/v2/users/search?query=alice@example.com",
+                "https://acme.zendesk.com/api/v2/users/search?*")]
+    [InlineData("https://acme.zendesk.com/api/v2/organizations?page%5Bsize%5D=100&page%5Bafter%5D=cursor",
+                "https://acme.zendesk.com/api/v2/organizations?*")]
+    [InlineData("https://acme.zendesk.com/api/v2/tickets/35101",
+                "https://acme.zendesk.com/api/v2/tickets/35101")]
     public void Redact_RemovesTheQuery_AndLeavesThePath(string url, string expected) =>
         QueryStringRedactingProcessor.Redact(url).Should().Be(expected,
             "the path carries the record id, which the trail records deliberately; the query carries "
@@ -38,7 +38,7 @@ public class TelemetryRedactionTests
     {
         // The runtime redacts url.full itself on .NET 9+, so most spans arrive in this shape. Without
         // this the processor would append its own marker to the runtime's and produce "?*​*".
-        const string alreadyRedacted = "https://rest.vitally-eu.io/resources/users/search?*";
+        const string alreadyRedacted = "https://acme.zendesk.com/api/v2/users/search?*";
 
         QueryStringRedactingProcessor.Redact(alreadyRedacted).Should().Be(alreadyRedacted);
     }
@@ -55,15 +55,15 @@ public class TelemetryRedactionTests
         ActivitySource.AddActivityListener(listener);
 
         using var activity = source.StartActivity("GET")!;
-        activity.SetTag("url.full", "https://rest.vitally-eu.io/resources/users/search?query=bob@example.com");
+        activity.SetTag("url.full", "https://acme.zendesk.com/api/v2/users/search?query=bob@example.com");
 
         new QueryStringRedactingProcessor().OnEnd(activity);
 
-        activity.GetTagItem("url.full").Should().Be("https://rest.vitally-eu.io/resources/users/search?*");
+        activity.GetTagItem("url.full").Should().Be("https://acme.zendesk.com/api/v2/users/search?*");
     }
 
     private const string SanitiseSource = "ZendeskMcp.Tests.Sanitise";
-    private static readonly KnownToolNames Known = new(["List_organizations"]);
+    private static readonly KnownToolNames Known = new(["Search_organizations"]);
 
     private static (ActivitySource Source, ActivityListener Listener) StartSource(string name)
     {
@@ -81,13 +81,13 @@ public class TelemetryRedactionTests
     public void Sanitiser_ClearsTheStatusDescription_ButKeepsTheErrorStatus()
     {
         // The MCP SDK copies a failed tool call's whole error text into the span's StatusDescription,
-        // and that text carries the caller's arguments ("got 'alice@example.com'") and Vitally's
+        // and that text carries the caller's arguments ("got 'alice@example.com'") and Zendesk's
         // response body. The status code says everything an operator needs; the text is customer data.
         var (source, listener) = StartSource(SanitiseSource);
         using var _source = source;
         using var _listener = listener;
-        using var activity = source.StartActivity("tools/call List_organizations")!;
-        activity.SetStatus(ActivityStatusCode.Error, "Upstream API returned 400. Body: alice@example.com");
+        using var activity = source.StartActivity("tools/call Search_organizations")!;
+        activity.SetStatus(ActivityStatusCode.Error, "Zendesk returned 400. Body: alice@example.com");
 
         new SpanSanitisingProcessor(Known).OnEnd(activity);
 
@@ -119,13 +119,13 @@ public class TelemetryRedactionTests
         var (source, listener) = StartSource(TelemetrySources.McpActivitySource);
         using var _source = source;
         using var _listener = listener;
-        using var activity = source.StartActivity("tools/call List_organizations")!;
-        activity.SetTag("gen_ai.tool.name", "List_organizations");
+        using var activity = source.StartActivity("tools/call Search_organizations")!;
+        activity.SetTag("gen_ai.tool.name", "Search_organizations");
 
         new SpanSanitisingProcessor(Known).OnEnd(activity);
 
-        activity.GetTagItem("gen_ai.tool.name").Should().Be("List_organizations");
-        activity.DisplayName.Should().Be("tools/call List_organizations");
+        activity.GetTagItem("gen_ai.tool.name").Should().Be("Search_organizations");
+        activity.DisplayName.Should().Be("tools/call Search_organizations");
     }
 
     [Fact]
@@ -190,7 +190,7 @@ public class TelemetryRedactionTests
         var (source, listener) = StartSource(TelemetrySources.McpActivitySource);
         using var _source = source;
         using var _listener = listener;
-        using var activity = source.StartActivity("tools/call List_organizations")!;
+        using var activity = source.StartActivity("tools/call Search_organizations")!;
         activity.SetTag("jsonrpc.request.id", "alice@example.com");
 
         new SpanSanitisingProcessor(Known).OnEnd(activity);

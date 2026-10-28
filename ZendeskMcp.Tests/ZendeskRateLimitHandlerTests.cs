@@ -13,7 +13,7 @@ namespace ZendeskMcp.Tests;
 /// undequeued HttpResponseMessages still sitting in the QueueingHandler) at the end of
 /// every test, rather than relying on the GC.
 /// </summary>
-public class VitallyRateLimitHandlerTests : IDisposable
+public class ZendeskRateLimitHandlerTests : IDisposable
 {
     private readonly List<HttpClient> _clients = new();
 
@@ -109,7 +109,7 @@ public class VitallyRateLimitHandlerTests : IDisposable
     public async Task Counts_EachRetry_AndNoExhaustion_WhenARetrySucceeds()
     {
         // vitally-mcp#94: "retries exhausted" was only a log line, text to parse; a counter is a pre-aggregated
-        // series of how often the server exceeds Vitally's 1000 req/min budget.
+        // series of how often the server exceeds Zendesk's per-minute rate limit.
         using var capture = new MetricCapture();
         var (client, inner, _) = BuildClient(metrics: capture.Metrics);
         inner.Responses.Enqueue(TooManyRequests());
@@ -118,8 +118,8 @@ public class VitallyRateLimitHandlerTests : IDisposable
 
         using var response = await client.GetAsync("http://example.test/x");
 
-        capture.Total("vitally.ratelimit.retries").Should().Be(2);
-        capture.Total("vitally.ratelimit.exhausted").Should().Be(0);
+        capture.Total("zendesk.ratelimit.retries").Should().Be(2);
+        capture.Total("zendesk.ratelimit.exhausted").Should().Be(0);
     }
 
     [Fact]
@@ -135,7 +135,7 @@ public class VitallyRateLimitHandlerTests : IDisposable
         var act = () => client.GetAsync("http://example.test/x", cts.Token);
 
         await act.Should().ThrowAsync<OperationCanceledException>();
-        capture.Total("vitally.ratelimit.retries").Should().Be(0);
+        capture.Total("zendesk.ratelimit.retries").Should().Be(0);
     }
 
     [Fact]
@@ -151,8 +151,8 @@ public class VitallyRateLimitHandlerTests : IDisposable
         using var response = await client.GetAsync("http://example.test/x");
 
         response.StatusCode.Should().Be(HttpStatusCode.TooManyRequests);
-        capture.Total("vitally.ratelimit.retries").Should().Be(2);
-        capture.Total("vitally.ratelimit.exhausted").Should().Be(1);
+        capture.Total("zendesk.ratelimit.retries").Should().Be(2);
+        capture.Total("zendesk.ratelimit.exhausted").Should().Be(1);
     }
 
     [Fact]

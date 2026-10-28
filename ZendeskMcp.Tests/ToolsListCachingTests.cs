@@ -71,8 +71,7 @@ public class ToolsListCachingTests : IClassFixture<ToolsListCachingTests.Factory
             // class must be overwritten rather than inherited.
             Environment.SetEnvironmentVariable("OAuth__NoAuth", "true");
             Environment.SetEnvironmentVariable("Authorization__ReadOnly", "false");
-            Environment.SetEnvironmentVariable("Vitally__DevelopmentApiKey", "sk_test_dummy");
-            Environment.SetEnvironmentVariable("Vitally__Region", "EU");
+            ZendeskHostEnvironment.Set(noAuth: true);
             return base.CreateHost(builder);
         }
 
@@ -85,11 +84,13 @@ public class ToolsListCachingTests : IClassFixture<ToolsListCachingTests.Factory
             await base.DisposeAsync();
             foreach (var name in new[]
             {
-                "OAuth__NoAuth", "Authorization__ReadOnly", "Vitally__DevelopmentApiKey", "Vitally__Region",
+                "OAuth__NoAuth", "Authorization__ReadOnly",
             })
             {
                 Environment.SetEnvironmentVariable(name, null);
             }
+
+            ZendeskHostEnvironment.Clear();
         }
     }
 }

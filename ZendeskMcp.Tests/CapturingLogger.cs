@@ -22,8 +22,8 @@ public sealed class CapturingLogger<T> : ILogger<T>
 
     public IDisposable BeginScope<TState>(TState state) where TState : notnull => NullScope.Instance;
     public bool IsEnabled(LogLevel logLevel) => true;
-    // One lock over both lists, because callers log concurrently — Get_organization_summary's two
-    // sections run in parallel — and the index alignment above only holds if each entry and its
+    // One lock over both lists, because callers log concurrently — a composite tool's
+    // sections can run in parallel — and the index alignment above only holds if each entry and its
     // exception are added as one unit. Reads are not locked: tests read after the writes finish.
     private readonly object _gate = new();
 

@@ -1,4 +1,5 @@
 using System.Net;
+using System.Text.Json.Nodes;
 using Azure;
 using Azure.Security.KeyVault.Secrets;
 using FluentAssertions;
@@ -33,12 +34,12 @@ public class FailureLoggingTests
         // A sentinel without reserved characters, so URL-encoding cannot disguise a leak and let the
         // assertion below pass for the wrong reason.
         const string searchTerm = "searchtermsentinel";
-        var act = () => service.GetRawAsync("users/search",
-            new Dictionary<string, string> { ["query"] = searchTerm });
+        var act = () => service.GetAsync("/api/v2/users/search",
+            new Dictionary<string, string?> { ["query"] = searchTerm });
         await act.Should().ThrowAsync<HttpRequestException>();
 
         var entry = logger.Entries.Should().ContainSingle(e => e.Level == LogLevel.Error).Subject.Message;
-        entry.Should().Contain("500").And.Contain("GET").And.Contain("/resources/users");
+        entry.Should().Contain("500").And.Contain("GET").And.Contain("/api/v2/users");
         entry.Should().NotContain(CustomerEmail, "the upstream body may be customer data");
         entry.Should().NotContain(searchTerm, "the query string carries caller search terms");
         logger.Exceptions.Should().AllSatisfy(e => e.Should().BeNull(
@@ -48,8 +49,8 @@ public class FailureLoggingTests
     [Fact]
     public async Task SendAsync_NeverLogsAPathSegmentTheCallerTyped()
     {
-        // Tools put caller strings into the path unescaped (`accounts/{accountId}/users`), and a 404
-        // is exactly the case where that segment is NOT a Vitally id but whatever the model typed —
+        // Tools put caller strings into the path (`organizations/{organizationId}/users`), and a 404
+        // is exactly the case where that segment is NOT a Zendesk id but whatever the model typed —
         // a customer name, an email. This category stays on the console, unlike AuditLogger's, so
         // only the resource type is logged; the correlation id leads to the full path in AppEvents.
         const string typedId = "acmeholdingsltd";
@@ -57,11 +58,11 @@ public class FailureLoggingTests
         var logger = new CapturingLogger<ZendeskService>();
         var service = TestHelpers.BuildZendeskService(client, logger: logger);
 
-        var act = () => service.GetRawAsync($"accounts/{typedId}/users");
+        var act = () => service.GetAsync($"/api/v2/organizations/{typedId}/users");
         await act.Should().ThrowAsync<HttpRequestException>();
 
         var entry = logger.Entries.Should().ContainSingle().Subject.Message;
-        entry.Should().Contain("/resources/accounts/…");
+        entry.Should().Contain("/api/v2/organizations/…");
         entry.Should().NotContain(typedId);
     }
 
@@ -72,7 +73,7 @@ public class FailureLoggingTests
     [InlineData("./../acmeholdingsltd/x")]
     public async Task SendAsync_CannotBeSteeredIntoLoggingCallerText_ByDotSegments(string typedId)
     {
-        // Uri normalises `../` BEFORE the path is read, so "the first segment after /resources/" can
+        // Uri normalises `../` BEFORE the path is read, so "the first segment after /api/v2/" can
         // be made into the caller's own text — a customer name on the console. The resource type is
         // therefore checked against the set this code builds, not taken from a parsed path, and
         // anything else reads `unrecognised`: fail closed, as KnownToolNames does for tool names.
@@ -80,7 +81,7 @@ public class FailureLoggingTests
         var logger = new CapturingLogger<ZendeskService>();
         var service = TestHelpers.BuildZendeskService(client, logger: logger);
 
-        var act = () => service.GetResourceByIdAsync("organizations", typedId);
+        var act = () => service.GetAsync($"/api/v2/organizations/{typedId}");
         await act.Should().ThrowAsync<HttpRequestException>();
 
         logger.Entries.Should().ContainSingle().Subject.Message.Should().NotContain("acmeholdingsltd");
@@ -93,7 +94,7 @@ public class FailureLoggingTests
         var logger = new CapturingLogger<ZendeskService>();
         var service = TestHelpers.BuildZendeskService(client, logger: logger);
 
-        var act = () => service.GetRawAsync("acmeholdingsltd/x");
+        var act = () => service.GetAsync("/api/v2/acmeholdingsltd/x");
         await act.Should().ThrowAsync<HttpRequestException>();
 
         var entry = logger.Entries.Should().ContainSingle().Subject.Message;
@@ -106,7 +107,7 @@ public class FailureLoggingTests
         // HttpRequestError is Unknown whenever a response arrived, which reads as "an unknown error".
         var logger = new CapturingLogger<object>();
 
-        ToolCallFailureLog.Write(logger, "List_users",
+        ToolCallFailureLog.Write(logger, "Search_users",
             new HttpRequestException("x", null, HttpStatusCode.InternalServerError), "corr", CancellationToken.None);
 
         logger.Entries.Single().Message.Should().Contain("error=none").And.NotContain("Unknown");
@@ -121,8 +122,8 @@ public class FailureLoggingTests
         // Warning would bury a server fault as the caller's mistake.
         var logger = new CapturingLogger<object>();
 
-        ToolCallFailureLog.Write(logger, "List_users", new ArgumentOutOfRangeException("start"), "corr", CancellationToken.None);
-        ToolCallFailureLog.Write(logger, "List_users", new ArgumentNullException("value"), "corr", CancellationToken.None);
+        ToolCallFailureLog.Write(logger, "Search_users", new ArgumentOutOfRangeException("start"), "corr", CancellationToken.None);
+        ToolCallFailureLog.Write(logger, "Search_users", new ArgumentNullException("value"), "corr", CancellationToken.None);
 
         logger.Entries.Should().HaveCount(2).And.OnlyContain(e => e.Level == LogLevel.Error);
     }
@@ -132,7 +133,7 @@ public class FailureLoggingTests
         // The caller's mistake: a wrong id, a missing field. Worth seeing, not worth paging for.
         { 400, LogLevel.Warning }, { 404, LogLevel.Warning }, { 409, LogLevel.Warning },
         { 422, LogLevel.Warning },
-        // Ours or Vitally's: a bad or revoked shared key, the rate-limit budget, an outage — and
+        // Ours or Zendesk's: a rejected credential, the rate-limit budget, an outage — and
         // 407/408, which are infrastructure conditions despite sitting in the 4xx range.
         { 401, LogLevel.Error }, { 403, LogLevel.Error }, { 407, LogLevel.Error },
         { 408, LogLevel.Error }, { 429, LogLevel.Error },
@@ -141,18 +142,53 @@ public class FailureLoggingTests
         { 302, LogLevel.Error }, { 600, LogLevel.Error },
     };
 
+    // Every status but 401, which ZendeskService hands to ZendeskCredentialProvider.OnTokenRejectedAsync
+    // instead of its own failure log: see SendAsync_TurnsA401IntoTheCredentialProvidersException.
+    public static TheoryData<int, LogLevel> ServiceStatusLevels
+    {
+        get
+        {
+            var data = new TheoryData<int, LogLevel>();
+            foreach (var row in StatusLevels)
+            {
+                var (status, level) = row.Data;
+                if (status != 401)
+                {
+                    data.Add(status, level);
+                }
+            }
+
+            return data;
+        }
+    }
+
     [Theory]
-    [MemberData(nameof(StatusLevels))]
+    [MemberData(nameof(ServiceStatusLevels))]
     public async Task SendAsync_ChoosesTheLevelByStatus(int status, LogLevel expected)
     {
         using var client = TestHelpers.CreateMockHttpClient("{}", (HttpStatusCode)status);
         var logger = new CapturingLogger<ZendeskService>();
         var service = TestHelpers.BuildZendeskService(client, logger: logger);
 
-        var act = () => service.GetResourcesAsync("organizations");
+        var act = () => service.GetAsync("/api/v2/organizations");
         await act.Should().ThrowAsync<HttpRequestException>();
 
         logger.Entries.Should().ContainSingle().Subject.Level.Should().Be(expected);
+    }
+
+    [Fact]
+    public async Task SendAsync_TurnsA401IntoTheCredentialProvidersException()
+    {
+        // A 401 is the caller's own Zendesk credential being refused, which no retry fixes, so it is
+        // not thrown as an upstream failure: with the development token it becomes an
+        // UnauthorizedAccessException naming the setting to check, and with per-user OAuth a
+        // connect link (covered with the credential provider).
+        using var client = TestHelpers.CreateMockHttpClient("{\"error\":\"Couldn't authenticate you\"}", HttpStatusCode.Unauthorized);
+        var service = TestHelpers.BuildZendeskService(client);
+
+        var act = () => service.GetAsync("/api/v2/organizations");
+
+        await act.Should().ThrowAsync<UnauthorizedAccessException>().WithMessage("*DevelopmentApiToken*");
     }
 
     [Theory]
@@ -161,65 +197,39 @@ public class FailureLoggingTests
     {
         var logger = new CapturingLogger<object>();
 
-        ToolCallFailureLog.Write(logger, "List_users",
+        ToolCallFailureLog.Write(logger, "Search_users",
             new HttpRequestException("x", null, (HttpStatusCode)status), "corr", CancellationToken.None);
 
         logger.Entries.Should().ContainSingle().Subject.Level.Should().Be(expected);
     }
 
     [Fact]
-    public async Task OrganizationSummary_LogsASectionItCouldNotResolve_WithoutTheCallersObjectName()
-    {
-        // A renamed custom object in Vitally makes every summary return an error section forever,
-        // and the tool still succeeds — so without this the drift is invisible server-side. The
-        // object name is caller-overridable, so the fixed SECTION label is logged, never the name.
-        // Sequenced, one response per upstream call: SendAsync disposes each response, so a single
-        // shared one fails the second call — and the section would then read "catalogue unavailable",
-        // which is how this test first passed for the wrong reason.
-        var (client, _) = TestHelpers.CreateMockHttpClientPaged(
-            "{\"id\":\"org-1\",\"name\":\"Acme\"}",
-            "{\"results\":[{\"id\":\"co-1\",\"name\":\"somethingElse\"}]}");
-        using var _client = client;
-        var logger = new CapturingLogger<ZendeskService>();
-        var service = TestHelpers.BuildZendeskService(client, logger: logger);
-
-        await service.GetOrganizationSummaryAsync("org-1", null, "callerGoalsName", "callerFeedbackName");
-
-        logger.Entries.Should().HaveCount(2).And.OnlyContain(e => e.Level == LogLevel.Warning);
-        logger.Entries.Should().OnlyContain(e => e.Message.Contains("not found in the catalogue", StringComparison.Ordinal),
-            "the reason is what sends the operator to the right place");
-        logger.Entries.Should().Contain(e => e.Message.Contains("goals", StringComparison.Ordinal));
-        logger.Entries.Should().Contain(e => e.Message.Contains("productFeedback", StringComparison.Ordinal));
-        logger.Entries.Should().NotContain(e => e.Message.Contains("callerGoalsName", StringComparison.Ordinal)
-            || e.Message.Contains("callerFeedbackName", StringComparison.Ordinal));
-    }
-
-    [Fact]
     public async Task SendAsync_LogsNothingAboveInformationOnSuccess()
     {
-        using var client = TestHelpers.CreateMockHttpClient("{\"results\":[]}");
+        using var client = TestHelpers.CreateMockHttpClient("{\"organizations\":[]}");
         var logger = new CapturingLogger<ZendeskService>();
         var service = TestHelpers.BuildZendeskService(client, logger: logger);
 
-        await service.GetResourcesAsync("organizations");
+        await service.GetAsync("/api/v2/organizations");
 
         logger.Entries.Should().NotContain(e => e.Level >= LogLevel.Warning);
     }
 
     [Fact]
-    public async Task ApiKeyProvider_LogsAnErrorNamingTheSecret_WhenKeyVaultFails_AndStillThrows()
+    public async Task TokenStore_LogsAnErrorNamingTheUser_WhenKeyVaultFails_AndStillThrows()
     {
         var secrets = new Mock<SecretClient>();
-        secrets.Setup(s => s.GetSecretAsync("vitally-shared", null, It.IsAny<SecretContentType?>(), It.IsAny<CancellationToken>()))
+        secrets.Setup(s => s.GetSecretAsync(TokenSecretName, null, It.IsAny<SecretContentType?>(), It.IsAny<CancellationToken>()))
             .ThrowsAsync(new RequestFailedException(403, "Forbidden"));
-        var logger = new CapturingLogger<VitallyApiKeyProvider>();
-        var provider = BuildProvider(secrets.Object, logger);
+        var logger = new CapturingLogger<KeyVaultZendeskTokenStore>();
+        var store = BuildTokenStore(secrets.Object, logger);
 
-        var act = () => provider.GetApiKeyAsync();
+        var act = () => store.GetAsync(TestHelpers.TestObjectId);
 
         await act.Should().ThrowAsync<RequestFailedException>("the failure must still reach the caller");
+        // The object id is what leads an operator to the `zendesk-user-{objectId}` secret.
         logger.Entries.Should().ContainSingle(e => e.Level == LogLevel.Error)
-            .Subject.Message.Should().Contain("vitally-shared");
+            .Subject.Message.Should().Contain(TestHelpers.TestObjectId);
         // The inverse of the tool-call rule, and deliberate: Azure's status and error code are what
         // tell a missing role from an unreachable vault, and they carry no secret or customer data.
         logger.Exceptions.Should().ContainSingle(e => e is RequestFailedException,
@@ -227,51 +237,52 @@ public class FailureLoggingTests
     }
 
     [Fact]
-    public async Task ApiKeyProvider_LogsAKeyVaultTimeout()
+    public async Task TokenStore_LogsAKeyVaultTimeout()
     {
         // Azure.Core surfaces a timeout as TaskCanceledException with the CALLER's token not
         // cancelled — a slow vault, which is the case most worth seeing. A gate on the exception type
         // rather than the caller's token would silently drop it.
         var secrets = new Mock<SecretClient>();
-        secrets.Setup(s => s.GetSecretAsync("vitally-shared", null, It.IsAny<SecretContentType?>(), It.IsAny<CancellationToken>()))
+        secrets.Setup(s => s.GetSecretAsync(TokenSecretName, null, It.IsAny<SecretContentType?>(), It.IsAny<CancellationToken>()))
             .ThrowsAsync(new TaskCanceledException("timed out"));
-        var logger = new CapturingLogger<VitallyApiKeyProvider>();
-        var provider = BuildProvider(secrets.Object, logger);
+        var logger = new CapturingLogger<KeyVaultZendeskTokenStore>();
+        var store = BuildTokenStore(secrets.Object, logger);
 
-        var act = () => provider.GetApiKeyAsync(CancellationToken.None);
+        var act = () => store.GetAsync(TestHelpers.TestObjectId, CancellationToken.None);
 
         await act.Should().ThrowAsync<TaskCanceledException>();
         logger.Entries.Should().ContainSingle(e => e.Level == LogLevel.Error);
     }
 
     [Fact]
-    public async Task ApiKeyProvider_LogsAnError_WhenTheSecretHasNoValue()
+    public async Task TokenStore_ReadsAMissingSecretAsNotConnected_WithoutLogging()
     {
+        // A 404 is the normal state of someone who has never connected, not a Key Vault fault: it must
+        // neither throw nor log, or every first use would look like an incident.
         var secrets = new Mock<SecretClient>();
-        secrets.Setup(s => s.GetSecretAsync("vitally-shared", null, It.IsAny<SecretContentType?>(), It.IsAny<CancellationToken>()))
-            .ReturnsAsync(Response.FromValue(SecretModelFactory.KeyVaultSecret(new SecretProperties("vitally-shared"), value: null), Mock.Of<Response>()));
-        var logger = new CapturingLogger<VitallyApiKeyProvider>();
-        var provider = BuildProvider(secrets.Object, logger);
+        secrets.Setup(s => s.GetSecretAsync(TokenSecretName, null, It.IsAny<SecretContentType?>(), It.IsAny<CancellationToken>()))
+            .ThrowsAsync(new RequestFailedException(404, "SecretNotFound"));
+        var logger = new CapturingLogger<KeyVaultZendeskTokenStore>();
+        var store = BuildTokenStore(secrets.Object, logger);
 
-        var act = () => provider.GetApiKeyAsync();
+        var token = await store.GetAsync(TestHelpers.TestObjectId);
 
-        await act.Should().ThrowAsync<InvalidOperationException>();
-        logger.Entries.Should().ContainSingle(e => e.Level == LogLevel.Error)
-            .Subject.Message.Should().Contain("vitally-shared");
+        token.Should().BeNull();
+        logger.Entries.Should().NotContain(e => e.Level >= LogLevel.Warning);
     }
 
     [Fact]
-    public async Task ApiKeyProvider_DoesNotLogACallerCancellation()
+    public async Task TokenStore_DoesNotLogACallerCancellation()
     {
         using var cts = new CancellationTokenSource();
         await cts.CancelAsync();
         var secrets = new Mock<SecretClient>();
-        secrets.Setup(s => s.GetSecretAsync("vitally-shared", null, It.IsAny<SecretContentType?>(), It.IsAny<CancellationToken>()))
+        secrets.Setup(s => s.GetSecretAsync(TokenSecretName, null, It.IsAny<SecretContentType?>(), It.IsAny<CancellationToken>()))
             .ThrowsAsync(new OperationCanceledException(cts.Token));
-        var logger = new CapturingLogger<VitallyApiKeyProvider>();
-        var provider = BuildProvider(secrets.Object, logger);
+        var logger = new CapturingLogger<KeyVaultZendeskTokenStore>();
+        var store = BuildTokenStore(secrets.Object, logger);
 
-        var act = () => provider.GetApiKeyAsync(cts.Token);
+        var act = () => store.GetAsync(TestHelpers.TestObjectId, cts.Token);
 
         await act.Should().ThrowAsync<OperationCanceledException>();
         logger.Entries.Should().NotContain(e => e.Level >= LogLevel.Warning,
@@ -293,7 +304,7 @@ public class FailureLoggingTests
         "upstream-status" => new HttpRequestException(
             "Upstream API returned 500. Body: " + CustomerEmail, null, HttpStatusCode.InternalServerError),
         "transport" => new HttpRequestException("Connection refused " + CustomerEmail),
-        "validation" => new ArgumentException("createdAfter must be ISO-8601 (got '" + CustomerEmail + "')"),
+        "validation" => new ArgumentException("created_after must be ISO-8601 (got '" + CustomerEmail + "')"),
         "unexpected" => new InvalidOperationException("unexpected " + CustomerEmail),
         "denied" => new UnauthorizedAccessException("denied " + CustomerEmail),
         _ => throw new ArgumentOutOfRangeException(nameof(kind)),
@@ -306,7 +317,7 @@ public class FailureLoggingTests
         var ex = ExceptionFor(kind);
         var logger = new CapturingLogger<object>();
 
-        ToolCallFailureLog.Write(logger, "List_users", ex, "corr-123", CancellationToken.None);
+        ToolCallFailureLog.Write(logger, "Search_users", ex, "corr-123", CancellationToken.None);
 
         if (expected is null)
         {
@@ -316,7 +327,7 @@ public class FailureLoggingTests
 
         var entry = logger.Entries.Should().ContainSingle().Subject;
         entry.Level.Should().Be(expected.Value);
-        entry.Message.Should().Contain("List_users").And.Contain(ex.GetType().Name).And.Contain("corr-123");
+        entry.Message.Should().Contain("Search_users").And.Contain(ex.GetType().Name).And.Contain("corr-123");
         entry.Message.Should().NotContain(CustomerEmail,
             "exception messages carry upstream bodies and caller input, so only the type is logged");
         // Attaching the exception would leak the same text by another route — the console formatter
@@ -329,7 +340,7 @@ public class FailureLoggingTests
     {
         var logger = new CapturingLogger<object>();
 
-        ToolCallFailureLog.Write(logger, "List_users",
+        ToolCallFailureLog.Write(logger, "Search_users",
             new HttpRequestException("x", null, HttpStatusCode.TooManyRequests), "corr", CancellationToken.None);
 
         logger.Entries.Single().Message.Should().Contain("429");
@@ -342,19 +353,19 @@ public class FailureLoggingTests
         await cts.CancelAsync();
         var logger = new CapturingLogger<object>();
 
-        ToolCallFailureLog.Write(logger, "List_users", new OperationCanceledException(), "corr", cts.Token);
+        ToolCallFailureLog.Write(logger, "Search_users", new OperationCanceledException(), "corr", cts.Token);
         logger.Entries.Should().BeEmpty("the client went away; nothing failed");
 
         // An HttpClient timeout surfaces as TaskCanceledException with the caller's token NOT
         // cancelled — a slow upstream, which is exactly the failure worth seeing.
-        ToolCallFailureLog.Write(logger, "List_users", new TaskCanceledException(), "corr", CancellationToken.None);
+        ToolCallFailureLog.Write(logger, "Search_users", new TaskCanceledException(), "corr", CancellationToken.None);
         logger.Entries.Should().ContainSingle(e => e.Level == LogLevel.Error);
     }
 
     [Fact]
     public void ToolCallFailureLog_NeverThrows_WhenTheLoggerDoes()
     {
-        var act = () => ToolCallFailureLog.Write(new ThrowingLogger(), "List_users",
+        var act = () => ToolCallFailureLog.Write(new ThrowingLogger(), "Search_users",
             new InvalidOperationException(), "corr", CancellationToken.None);
 
         act.Should().NotThrow("a failing log sink must not replace the tool's own result");
@@ -369,14 +380,16 @@ public class FailureLoggingTests
         var services = new Mock<IServiceProvider>();
         services.Setup(s => s.GetService(It.IsAny<Type>())).Throws(new ObjectDisposedException("scope"));
 
-        var act = () => ToolCallFailureLog.Write(services.Object, "List_users",
+        var act = () => ToolCallFailureLog.Write(services.Object, "Search_users",
             new InvalidOperationException(), CancellationToken.None);
 
         act.Should().NotThrow();
     }
 
-    private static VitallyApiKeyProvider BuildProvider(SecretClient secrets, ILogger<VitallyApiKeyProvider> logger) =>
-        new(Options.Create(new ZendeskServerOptions()), new MemoryCache(new MemoryCacheOptions()), logger, secrets);
+    private static readonly string TokenSecretName = $"zendesk-user-{TestHelpers.TestObjectId}";
+
+    private static KeyVaultZendeskTokenStore BuildTokenStore(SecretClient secrets, ILogger<KeyVaultZendeskTokenStore> logger) =>
+        new(secrets, new MemoryCache(new MemoryCacheOptions()), Options.Create(new ZendeskServerOptions()), logger);
 
     [Fact]
     public void ToolCallFailureLog_NeverThrows_WhenTheLoggerThrowsACancellation()
@@ -386,13 +399,13 @@ public class FailureLoggingTests
         // excluding the type from the guard only let a logging failure replace the tool's result.
         var logger = new ThrowingLogger<object>(() => new OperationCanceledException("sink"));
 
-        var viaLogger = () => ToolCallFailureLog.Write(logger, "List_users",
+        var viaLogger = () => ToolCallFailureLog.Write(logger, "Search_users",
             new InvalidOperationException(), "corr", CancellationToken.None);
         viaLogger.Should().NotThrow();
 
         var services = new Mock<IServiceProvider>();
         services.Setup(s => s.GetService(It.IsAny<Type>())).Throws(new OperationCanceledException("scope"));
-        var viaServices = () => ToolCallFailureLog.Write(services.Object, "List_users",
+        var viaServices = () => ToolCallFailureLog.Write(services.Object, "Search_users",
             new InvalidOperationException(), CancellationToken.None);
         viaServices.Should().NotThrow();
     }
@@ -400,42 +413,27 @@ public class FailureLoggingTests
     [Fact]
     public async Task SendAsync_StillThrowsTheUpstreamFailure_WhenItsLoggerThrows()
     {
-        // The HttpRequestException carries the Vitally body the client is shown. A throwing sink must
+        // The HttpRequestException carries the Zendesk body the client is shown. A throwing sink must
         // not replace it with its own exception, which the filter would not surface.
-        using var client = TestHelpers.CreateMockHttpClient("{\"message\":\"externalId is required\"}",
-            HttpStatusCode.BadRequest);
+        using var client = TestHelpers.CreateMockHttpClient(
+            "{\"error\":\"RecordInvalid\",\"description\":\"Record validation errors\",\"details\":{\"subject\":[{\"description\":\"Subject: cannot be blank\"}]}}",
+            HttpStatusCode.UnprocessableEntity);
         var service = TestHelpers.BuildZendeskService(client, logger: new ThrowingLogger<ZendeskService>());
 
-        var act = () => service.GetResourcesAsync("organizations");
+        var act = () => service.PostAsync("/api/v2/tickets", new JsonObject { ["ticket"] = new JsonObject() });
 
-        (await act.Should().ThrowAsync<HttpRequestException>()).WithMessage("*externalId is required*");
+        (await act.Should().ThrowAsync<HttpRequestException>()).WithMessage("*Subject: cannot be blank*");
     }
 
     [Fact]
-    public async Task OrganizationSummary_KeepsItsSectionIsolation_WhenItsLoggerThrows()
-    {
-        // A section failure is absorbed into `{error: ...}` by design. Logging it must not undo that by
-        // turning an absorbed error into a failed summary.
-        var (client, _) = TestHelpers.CreateMockHttpClientPaged(
-            "{\"id\":\"org-1\",\"name\":\"Acme\"}",
-            "{\"results\":[{\"id\":\"co-1\",\"name\":\"somethingElse\"}]}");
-        using var _client = client;
-        var service = TestHelpers.BuildZendeskService(client, logger: new ThrowingLogger<ZendeskService>());
-
-        var result = await service.GetOrganizationSummaryAsync("org-1", null, "goals", "feedback");
-
-        result.Should().Contain("\"organization\"").And.Contain("not found");
-    }
-
-    [Fact]
-    public async Task ApiKeyProvider_StillThrowsTheKeyVaultFailure_WhenItsLoggerThrows()
+    public async Task TokenStore_StillThrowsTheKeyVaultFailure_WhenItsLoggerThrows()
     {
         var secrets = new Mock<SecretClient>();
-        secrets.Setup(s => s.GetSecretAsync("vitally-shared", null, It.IsAny<SecretContentType?>(), It.IsAny<CancellationToken>()))
+        secrets.Setup(s => s.GetSecretAsync(TokenSecretName, null, It.IsAny<SecretContentType?>(), It.IsAny<CancellationToken>()))
             .ThrowsAsync(new RequestFailedException(403, "Forbidden"));
-        var provider = BuildProvider(secrets.Object, new ThrowingLogger<VitallyApiKeyProvider>());
+        var store = BuildTokenStore(secrets.Object, new ThrowingLogger<KeyVaultZendeskTokenStore>());
 
-        var act = () => provider.GetApiKeyAsync();
+        var act = () => store.GetAsync(TestHelpers.TestObjectId);
 
         await act.Should().ThrowAsync<RequestFailedException>("Azure's error is the diagnosis, not the sink's");
     }

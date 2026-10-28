@@ -54,23 +54,31 @@ public class ToolAnnotationCoverageTests
     [Fact]
     public void EveryToolIsDiscovered()
     {
-        AllTools().Should().HaveCountGreaterThan(90, "the server exposes 93 tools; a big drop means discovery broke");
+        // No count: the tool set grows as tools are added. A floor of one plus a known tool is what
+        // tells "discovery broke" apart from "nothing to check", which would pass every sweep below.
+        AllTools().Should().NotBeEmpty("a sweep over no tools proves nothing");
+        AllTools().Select(t => t.Name).Should().Contain("Get_zendesk_connection");
     }
 
     [Theory]
     [InlineData("List_")]
     [InlineData("Get_")]
+    [InlineData("Search_")]
+    [InlineData("Count_")]
+    [InlineData("Find_")]
+    [InlineData("Preview_")]
+    [InlineData("Export_")]
     public void ReadTools_AreReadOnlyIdempotentAndClosedWorld(string prefix)
     {
         var tools = AllTools().Where(t => t.Name.StartsWith(prefix, StringComparison.Ordinal)).ToList();
-        tools.Should().NotBeEmpty($"there must be tools named {prefix}*");
+        Assert.SkipWhen(tools.Count == 0, $"No {prefix}* tools are registered yet.");
 
         foreach (var (name, attr) in tools)
         {
             attr.ReadOnly.Should().Be(true, $"{name} only reads");
             attr.Destructive.Should().Be(false, $"{name} only reads");
             attr.Idempotent.Should().Be(true, $"{name} is safe to repeat");
-            attr.OpenWorld.Should().Be(false, $"{name} addresses one closed Vitally tenant");
+            attr.OpenWorld.Should().Be(false, $"{name} addresses one Zendesk account");
         }
     }
 
@@ -78,7 +86,7 @@ public class ToolAnnotationCoverageTests
     public void CreateTools_AreDestructiveAndNotIdempotent()
     {
         var tools = AllTools().Where(t => t.Name.StartsWith("Create_", StringComparison.Ordinal)).ToList();
-        tools.Should().NotBeEmpty();
+        Assert.SkipWhen(tools.Count == 0, "No Create_* tools are registered yet.");
 
         foreach (var (name, attr) in tools)
         {
@@ -91,11 +99,13 @@ public class ToolAnnotationCoverageTests
 
     [Theory]
     [InlineData("Update_")]
+    // v1 has no delete tools, so this case skips until one is added; it is kept so the first one is
+    // checked on arrival.
     [InlineData("Delete_")]
     public void UpdateAndDeleteTools_AreDestructiveAndIdempotent(string prefix)
     {
         var tools = AllTools().Where(t => t.Name.StartsWith(prefix, StringComparison.Ordinal)).ToList();
-        tools.Should().NotBeEmpty($"there must be tools named {prefix}*");
+        Assert.SkipWhen(tools.Count == 0, $"No {prefix}* tools are registered yet.");
 
         foreach (var (name, attr) in tools)
         {
@@ -107,8 +117,31 @@ public class ToolAnnotationCoverageTests
     }
 
     /// <summary>
+    /// The writes named outside Create_/Update_. Idempotency is per tool here and deliberately not
+    /// asserted: setting a macro active twice lands the same state, applying a macro twice may add
+    /// a second comment, and requesting an upload slot twice mints two.
+    /// </summary>
+    [Theory]
+    [InlineData("Request_")]
+    [InlineData("Apply_")]
+    [InlineData("Set_")]
+    [InlineData("Add_")]
+    public void OtherWriteTools_AreDestructiveAndClosedWorld(string prefix)
+    {
+        var tools = AllTools().Where(t => t.Name.StartsWith(prefix, StringComparison.Ordinal)).ToList();
+        Assert.SkipWhen(tools.Count == 0, $"No {prefix}* tools are registered yet.");
+
+        foreach (var (name, attr) in tools)
+        {
+            attr.ReadOnly.Should().Be(false, $"{name} mutates");
+            attr.Destructive.Should().Be(true, $"{name} mutates");
+            attr.OpenWorld.Should().Be(false, $"{name} addresses one Zendesk account");
+        }
+    }
+
+    /// <summary>
     /// Makes the invariant prefix-independent: unlike the tests above, this runs over every tool
-    /// regardless of name, so a future tool named outside List_/Get_/Create_/Update_/Delete_ (e.g. a
+    /// regardless of name, so a future tool named outside the prefixes above (e.g. a
     /// hypothetical Sync_*) cannot slip through with unset or contradictory hints. Two checks:
     /// (a) all four hints are explicitly assigned in the attribute usage — not merely defaulted to
     /// false by the CLR because the property was never mentioned — and (b) the repo's ReadOnly/Destructive

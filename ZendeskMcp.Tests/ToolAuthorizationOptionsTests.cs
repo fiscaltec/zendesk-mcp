@@ -4,7 +4,7 @@ namespace ZendeskMcp.Tests;
 
 /// <summary>
 /// Validation and defaults for <see cref="ToolAuthorizationOptions"/>, mirroring
-/// <see cref="OAuthOptionsTests"/> and <see cref="VitallyServerOptionsTests"/>.
+/// <see cref="OAuthOptionsTests"/> and <see cref="ZendeskServerOptionsTests"/>.
 /// </summary>
 public class ToolAuthorizationOptionsTests
 {

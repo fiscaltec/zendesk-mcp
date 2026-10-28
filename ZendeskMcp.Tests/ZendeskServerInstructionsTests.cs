@@ -3,14 +3,14 @@ using ZendeskMcp;
 
 namespace ZendeskMcp.Tests;
 
-public class VitallyServerInstructionsTests
+public class ZendeskServerInstructionsTests
 {
     [Theory]
-    [InlineData("organisation")]
-    [InlineData("Traits")]
-    [InlineData("custom object")]
-    [InlineData("List_organizations(nameContains")]
-    [InlineData("createdAfter")]
+    [InlineData("connect link")]
+    [InlineData("Get_zendesk_connection")]
+    [InlineData("untrusted data")]
+    [InlineData("Search_tickets")]
+    [InlineData("Preview_macro")]
     [InlineData("Read-only")]
     public void Text_ContainsKeyGuidanceMarkers(string marker)
     {

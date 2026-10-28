@@ -174,7 +174,7 @@ public static class TestHelpers
         serverOptions.Validate();
         var options = Options.Create(serverOptions);
 
-        var accessor = new HttpContextAccessor
+        var accessor = new FieldHttpContextAccessor
         {
             HttpContext = new DefaultHttpContext { User = user ?? new ClaimsPrincipal(new ClaimsIdentity()) },
         };
@@ -251,7 +251,7 @@ public static class TestHelpers
                     permissions.Select(p => new Claim("permissions", p)),
                     authenticationType: "Test"))
         };
-        var accessor = new HttpContextAccessor { HttpContext = httpContext };
+        var accessor = new FieldHttpContextAccessor { HttpContext = httpContext };
         return new ToolAuthorizer(
             Options.Create(new ToolAuthorizationOptions { Enabled = true }),
             Options.Create(new OAuthOptions { NoAuth = false }),
@@ -297,6 +297,18 @@ public static class TestHelpers
       "meta": { "has_more": false, "after_cursor": null }
     }
     """;
+
+    /// <summary>
+    /// An <see cref="IHttpContextAccessor"/> that keeps its context in a field. The framework's
+    /// <see cref="HttpContextAccessor"/> stores it in one process-wide async-local slot, so two accessors
+    /// built in the same test overwrite each other — <see cref="BuildZendeskService"/> would silently
+    /// replace an authorizer's caller with an anonymous one, and "allowed" assertions would fail while
+    /// "denied" ones passed for the wrong reason.
+    /// </summary>
+    public sealed class FieldHttpContextAccessor : IHttpContextAccessor
+    {
+        public HttpContext? HttpContext { get; set; }
+    }
 
     /// <summary>An IHttpClientFactory handing out one client, for the OAuth client in tests.</summary>
     public sealed class SingleClientFactory(HttpClient client) : IHttpClientFactory

@@ -33,26 +33,29 @@ public class ToolCallAuditCompositionTests
     private const int FreshSeconds = 60;
     private const int StaleSeconds = 3600;
 
-    private const string TwoOrganisations =
-        "{\"results\":[{\"id\":\"org-1\",\"name\":\"Acme\"},{\"id\":\"org-2\",\"name\":\"Globex\"}]}";
+    // Ids distinctive enough that finding one in a record cannot be a coincidence of some other number.
+    private const string TwoTickets =
+        "{\"tickets\":[{\"id\":35101,\"subject\":\"Login fails\"},{\"id\":35102,\"subject\":\"Invoice query\"}],"
+        + "\"meta\":{\"has_more\":false,\"after_cursor\":null}}";
 
     [Fact]
     public async Task AToolCall_LeavesARecordNamingTheUser_TheTool_AndTheCustomersItTouched()
     {
-        // `List_organizations` is deliberately the tool under test: an unscoped list is the case the
-        // upstream record cannot answer, because the customers appear only in the response body.
-        using var harness = new Harness(TwoOrganisations);
+        // A list is deliberately the tool under test (`List_probe_tickets`, standing in for any list
+        // tool): an unscoped list is the case the upstream record cannot answer, because the records
+        // appear only in the response body.
+        using var harness = new Harness(TwoTickets);
 
-        var result = await harness.CallToolAsync("List_organizations");
+        var result = await harness.CallToolAsync("List_probe_tickets");
         result.Should().NotContain("\"error\"", "the call itself must succeed");
 
         var record = harness.AuditRecords.Should()
-            .ContainSingle(e => e.Message.Contains("called List_organizations", StringComparison.Ordinal),
+            .ContainSingle(e => e.Message.Contains("called List_probe_tickets", StringComparison.Ordinal),
                 "one record per tool call")
             .Subject.Message;
 
         record.Should().Contain(UserOid, "this user");
-        record.Should().Contain("org-1").And.Contain("org-2", "these customers");
+        record.Should().Contain("35101").And.Contain("35102", "these tickets");
         record.Should().Contain("tier=zendesk:read", "the tier the decision was actually made against");
         record.Should().Contain("outcome=ok");
     }
@@ -65,22 +68,22 @@ public class ToolCallAuditCompositionTests
         // carries the truth if the SAME answer the admission decision used is the one that lands in
         // the scoped context the filter reads. One scenario in one host, because the stale path only
         // engages after a success: the retained copy is the state linking the three phases.
-        using var harness = new Harness(TwoOrganisations);
+        using var harness = new Harness(TwoTickets);
 
-        await harness.CallToolAsync("List_organizations");
+        await harness.CallToolAsync("List_probe_tickets");
 
         // Past the fresh window, so this call must ask Graph — and Graph is down.
         harness.Graph.Status = HttpStatusCode.ServiceUnavailable;
         harness.Clock.Advance(TimeSpan.FromSeconds(FreshSeconds + 1));
-        var duringOutage = await harness.CallToolAsync("List_organizations");
+        var duringOutage = await harness.CallToolAsync("List_probe_tickets");
         duringOutage.Should().NotContain("\"error\"", "the retained tier still admits the call");
 
         // Past the stale window as well: nothing left to serve, so the call must be refused.
         harness.Clock.Advance(TimeSpan.FromSeconds(StaleSeconds + 1));
-        await harness.CallToolAsync("List_organizations");
+        await harness.CallToolAsync("List_probe_tickets");
 
         var calls = harness.AuditRecords
-            .Where(e => e.Message.Contains("called List_organizations", StringComparison.Ordinal))
+            .Where(e => e.Message.Contains("called List_probe_tickets", StringComparison.Ordinal))
             .Select(e => e.Message)
             .ToList();
         calls.Should().HaveCount(2, "the two admitted calls each leave a record; the refused one does not");
@@ -93,7 +96,7 @@ public class ToolCallAuditCompositionTests
             "on the live path the resolver always knows which branch it took");
 
         harness.AuditRecords.Should().Contain(
-            e => e.Message.Contains("DENIED tools/call List_organizations", StringComparison.Ordinal),
+            e => e.Message.Contains("DENIED tools/call List_probe_tickets", StringComparison.Ordinal),
             "null from the resolver still means deny — the widened return must not have softened it");
     }
 
@@ -107,7 +110,7 @@ public class ToolCallAuditCompositionTests
         // down while the fresh window lapses, so every later check is served the retained copy. The
         // record must say False. Last-write-wins, a scope split, or a dropped first write each
         // record True.
-        using var harness = new Harness(TwoOrganisations);
+        using var harness = new Harness(TwoTickets);
         harness.Graph.AfterRespond = () =>
         {
             harness.Graph.AfterRespond = null;
@@ -115,7 +118,7 @@ public class ToolCallAuditCompositionTests
             harness.Clock.Advance(TimeSpan.FromSeconds(FreshSeconds + 1));
         };
 
-        var result = await harness.CallToolAsync("List_organizations");
+        var result = await harness.CallToolAsync("List_probe_tickets");
 
         // First, so a broken premise fails with its real cause rather than as a misleading denial
         // below. Each lookup is ONE request, because only ReaderGroup is configured. And there are
@@ -129,7 +132,7 @@ public class ToolCallAuditCompositionTests
             "only the first check was answered, or the split this test relies on did not happen");
         result.Should().NotContain("\"error\"", "the later checks are admitted on the retained tier");
         harness.AuditRecords.Should()
-            .ContainSingle(e => e.Message.Contains("called List_organizations", StringComparison.Ordinal))
+            .ContainSingle(e => e.Message.Contains("called List_probe_tickets", StringComparison.Ordinal))
             .Subject.Message.Should().Contain("tierStale=False",
                 "the record documents the first check that admitted the call, and Graph confirmed that "
                 + "one — so the caller was entitled per Graph at the moment of the call");
@@ -174,18 +177,17 @@ public class ToolCallAuditCompositionTests
         public GraphHandler Graph { get; } = new(ReaderGroup);
 
         public Harness(
-            string vitallyBody,
-            HttpStatusCode vitallyStatus = HttpStatusCode.OK,
+            string zendeskBody,
+            HttpStatusCode zendeskStatus = HttpStatusCode.OK,
             bool sabotageAudit = false,
-            Func<Exception>? vitallyThrows = null,
+            Func<Exception>? zendeskThrows = null,
             string? failPathContaining = null)
         {
             // Process-wide, and read by Program.cs at composition time before test configuration is
             // injected — hence the collection this class belongs to.
             Environment.SetEnvironmentVariable("OAuth__NoAuth", "false");
             Environment.SetEnvironmentVariable("Authorization__ReadOnly", "false");
-            Environment.SetEnvironmentVariable("Vitally__DevelopmentApiKey", "sk_test_dummy");
-            Environment.SetEnvironmentVariable("Vitally__Region", "EU");
+            ZendeskHostEnvironment.Set(noAuth: false);
             Environment.SetEnvironmentVariable("OAuth__Authority", "https://example-issuer.test/");
             Environment.SetEnvironmentVariable("OAuth__Audience", "https://example.test/");
             Environment.SetEnvironmentVariable("Authorization__LiveGroupCheck", "true");
@@ -217,6 +219,11 @@ public class ToolCallAuditCompositionTests
                         o.DefaultPolicy = new AuthorizationPolicyBuilder(TestAuthHandler.SchemeName)
                             .RequireAuthenticatedUser().Build());
 
+                    // The caller has connected Zendesk, so the tool reaches the stub below rather than
+                    // answering with a connect link; and the probe tools give it a list to call.
+                    services.AddConnectedZendeskUser(UserOid);
+                    services.AddProbeTools();
+
                     services.AddSingleton<TokenCredential>(new StubTokenCredential());
                     services.AddSingleton<TimeProvider>(Clock);
                     services.AddHttpClient<IGroupPermissionResolver, GraphGroupPermissionResolver>()
@@ -225,7 +232,7 @@ public class ToolCallAuditCompositionTests
                     // Stub the upstream at the *primary* handler so the real ZendeskService
                     // pipeline — the rate-limit handler included — still runs in front of it.
                     services.AddHttpClient<ZendeskService>()
-                        .ConfigurePrimaryHttpMessageHandler(() => new VitallyHandler(vitallyBody, vitallyStatus, vitallyThrows, failPathContaining));
+                        .ConfigurePrimaryHttpMessageHandler(() => new ZendeskHandler(zendeskBody, zendeskStatus, zendeskThrows, failPathContaining));
                 }));
         }
 
@@ -320,14 +327,15 @@ public class ToolCallAuditCompositionTests
 
             foreach (var name in new[]
             {
-                "OAuth__NoAuth", "Authorization__ReadOnly", "Vitally__DevelopmentApiKey", "Vitally__Region",
-                "OAuth__Authority", "OAuth__Audience", "Authorization__LiveGroupCheck",
+                "OAuth__NoAuth", "Authorization__ReadOnly", "OAuth__Authority", "OAuth__Audience", "Authorization__LiveGroupCheck",
                 "Authorization__ReaderGroupId", "Authorization__LiveGroupCacheSeconds",
                 "Authorization__LiveGroupStaleSeconds", "Audit__Enabled", "Audit__IncludeReads"
             })
             {
                 Environment.SetEnvironmentVariable(name, null);
             }
+
+            ZendeskHostEnvironment.Clear();
         }
     }
 
@@ -422,7 +430,7 @@ public class ToolCallAuditCompositionTests
         }
     }
 
-    private sealed class VitallyHandler(
+    private sealed class ZendeskHandler(
         string body, HttpStatusCode status, Func<Exception>? throws = null, string? failPathContaining = null)
         : RecordingHandler
     {
@@ -439,7 +447,7 @@ public class ToolCallAuditCompositionTests
             {
                 return new(HttpStatusCode.InternalServerError)
                 {
-                    Content = new StringContent("{\"message\":\"sub-call exploded\"}", Encoding.UTF8, "application/json")
+                    Content = new StringContent("{\"error\":\"sub-call exploded\"}", Encoding.UTF8, "application/json")
                 };
             }
 
@@ -486,12 +494,12 @@ public class ToolCallAuditCompositionTests
         // result. A trail that recorded only successes could not show an attempted access that
         // failed — which is exactly the sort of event an access record is kept for.
         using var harness = new Harness(
-            "{\"message\":\"upstream exploded\"}", HttpStatusCode.InternalServerError);
+            "{\"error\":\"upstream exploded\"}", HttpStatusCode.InternalServerError);
 
-        await harness.CallToolAsync("List_organizations");
+        await harness.CallToolAsync("List_probe_tickets");
 
         var record = harness.AuditRecords.Should()
-            .ContainSingle(e => e.Message.Contains("called List_organizations", StringComparison.Ordinal))
+            .ContainSingle(e => e.Message.Contains("called List_probe_tickets", StringComparison.Ordinal))
             .Subject.Message;
 
         record.Should().Contain("outcome=error");
@@ -506,13 +514,13 @@ public class ToolCallAuditCompositionTests
         // Stateless mode has no `initialize` handshake to read clientInfo from — 2026-07-28 removed
         // it — so the client's identity arrives in per-request `_meta` and must be read per call.
         // Without this the trail cannot tell Claude Desktop from VS Code from a script.
-        using var harness = new Harness(TwoOrganisations);
+        using var harness = new Harness(TwoTickets);
 
-        var response = await harness.CallToolWithClientInfoAsync("List_organizations", "smoke-client");
+        var response = await harness.CallToolWithClientInfoAsync("List_probe_tickets", "smoke-client");
         response.Should().NotContain("\"error\"", "the 2026-07-28 request shape must be accepted");
 
         harness.AuditRecords.Should()
-            .ContainSingle(e => e.Message.Contains("called List_organizations", StringComparison.Ordinal))
+            .ContainSingle(e => e.Message.Contains("called List_probe_tickets", StringComparison.Ordinal))
             .Subject.Message.Should().Contain("client=smoke-client");
     }
 
@@ -524,27 +532,27 @@ public class ToolCallAuditCompositionTests
         // and a telemetry sink refusing writes is exactly the sort of thing that happens during the
         // incident you most want the trail for. Losing the record is bad; losing the user's call as
         // well is worse, and inexplicable from the client side.
-        using var harness = new Harness(TwoOrganisations, sabotageAudit: true);
+        using var harness = new Harness(TwoTickets, sabotageAudit: true);
 
-        var result = await harness.CallToolAsync("List_organizations");
+        var result = await harness.CallToolAsync("List_probe_tickets");
 
         result.Should().NotContain("\"error\"", "the tool call survives an audit sink that throws");
-        result.Should().Contain("org-1", "and still returns its data");
+        result.Should().Contain("35101", "and still returns its data");
     }
 
     [Fact]
     public async Task TheUpstreamRecordsCarryTheSameCorrelationIdAsTheToolCall()
     {
         // The tool-call record is the primary evidence and the upstream records corroborate it — but
-        // only if they can be joined. A composite tool makes four upstream calls and the pager up to
+        // only if they can be joined. A composite tool makes several upstream calls and the pager up to
         // ten, so without a shared id there is no telling which upstream calls belonged to which
         // tool call, and the corroboration is worthless.
-        using var harness = new Harness(TwoOrganisations);
+        using var harness = new Harness(TwoTickets);
 
-        await harness.CallToolAsync("List_organizations");
+        await harness.CallToolAsync("List_probe_tickets");
 
         var toolCall = harness.AuditRecords
-            .Single(e => e.Message.Contains("called List_organizations", StringComparison.Ordinal)).Message;
+            .Single(e => e.Message.Contains("called List_probe_tickets", StringComparison.Ordinal)).Message;
         var correlation = Regex.Match(toolCall, @"correlation=([0-9a-f]{32})").Groups[1].Value;
         correlation.Should().NotBeEmpty("the tool-call record carries a correlation id");
 
@@ -559,22 +567,22 @@ public class ToolCallAuditCompositionTests
     public async Task AnUpstreamFailure_IsLoggedAtError_ByTheFilterAndTheService_JoinedToTheAuditRecord()
     {
         // vitally-mcp#94: the error-surfacing filter used to return the failure to the client without logging
-        // it, so a Vitally outage left no server-side trace. Asserted through a composed host because
+        // it, so a Zendesk outage left no server-side trace. Asserted through a composed host because
         // the filter only has a correlation id if it resolves the SAME scoped context the tool wrote to.
         using var harness = new Harness(
-            "{\"message\":\"upstream exploded\"}", HttpStatusCode.InternalServerError);
+            "{\"error\":\"upstream exploded\"}", HttpStatusCode.InternalServerError);
 
-        var result = await harness.CallToolAsync("List_organizations");
+        var result = await harness.CallToolAsync("List_probe_tickets");
         result.Should().Contain("upstream exploded", "the client still sees the real reason");
 
         var correlation = Regex.Match(
-            harness.AuditRecords.Single(e => e.Message.Contains("called List_organizations", StringComparison.Ordinal)).Message,
+            harness.AuditRecords.Single(e => e.Message.Contains("called List_probe_tickets", StringComparison.Ordinal)).Message,
             @"correlation=([0-9a-f]{32})").Groups[1].Value;
         correlation.Should().NotBeEmpty("the tool-call audit record carries a correlation id");
 
         var failure = harness.FailureRecords.Should().ContainSingle().Subject;
         failure.Level.Should().Be(LogLevel.Error);
-        failure.Message.Should().Contain("List_organizations").And.Contain("HttpRequestException")
+        failure.Message.Should().Contain("List_probe_tickets").And.Contain("HttpRequestException")
             .And.Contain("500").And.Contain(correlation);
         failure.Message.Should().NotContain("upstream exploded", "the body can carry customer data");
 
@@ -588,10 +596,10 @@ public class ToolCallAuditCompositionTests
     {
         // No response at all, so SendAsync's non-2xx record never fires — the filter is the only
         // place this failure can be seen.
-        using var harness = new Harness(TwoOrganisations,
-            vitallyThrows: () => new HttpRequestException(HttpRequestError.ConnectionError, "connection refused"));
+        using var harness = new Harness(TwoTickets,
+            zendeskThrows: () => new HttpRequestException(HttpRequestError.ConnectionError, "connection refused"));
 
-        await harness.CallToolAsync("List_organizations");
+        await harness.CallToolAsync("List_probe_tickets");
 
         var failure = harness.FailureRecords.Should().ContainSingle(e => e.Level == LogLevel.Error).Subject.Message;
         failure.Should().Contain("HttpRequestException").And.Contain("status=none");
@@ -605,9 +613,9 @@ public class ToolCallAuditCompositionTests
     {
         // A wrong id from the model is routine and is the caller's input, not a fault — logging it at
         // Error would bury a real outage in noise once vitally-mcp#159 alerts on that level.
-        using var harness = new Harness("{\"message\":\"not found\"}", HttpStatusCode.NotFound);
+        using var harness = new Harness("{\"error\":\"RecordNotFound\",\"description\":\"Not found\"}", HttpStatusCode.NotFound);
 
-        await harness.CallToolAsync("List_organizations");
+        await harness.CallToolAsync("List_probe_tickets");
 
         harness.FailureRecords.Should().ContainSingle().Subject.Level.Should().Be(LogLevel.Warning);
         harness.ServiceRecords.Should().ContainSingle().Subject.Level.Should().Be(LogLevel.Warning);
@@ -618,7 +626,7 @@ public class ToolCallAuditCompositionTests
     {
         // The name in a tools/call is caller-controlled text, and this category stays on the console,
         // which the data map declares customer-data-free. Same rule as the audit breadcrumb.
-        using var harness = new Harness(TwoOrganisations);
+        using var harness = new Harness(TwoTickets);
 
         await harness.CallToolAsync("alice_at_example");
 
@@ -631,27 +639,27 @@ public class ToolCallAuditCompositionTests
     }
 
     [Fact]
-    public async Task AnAbsorbedSubCallFailure_InTheSummary_IsLoggedAlthoughTheToolSucceeds()
+    public async Task AnAbsorbedSubCallFailure_InACompositeTool_IsLoggedAlthoughTheToolSucceeds()
     {
-        // Get_organization_summary turns a failed section into `{error: ...}` inside a successful
-        // result, so the tool-call log never fires and the audit record says ok. These lines are the
-        // only server-side trace of it — which is why the upstream failure is logged per upstream
-        // call, not per tool call.
+        // A composite tool turns a failed section into `{error: ...}` inside a successful result, so
+        // the tool-call log never fires and the audit record says ok. The upstream line is the only
+        // server-side trace of it — which is why the upstream failure is logged per upstream call,
+        // not per tool call.
         using var harness = new Harness(
-            "{\"id\":\"org-1\",\"name\":\"Acme\",\"results\":[]}", failPathContaining: "/resources/customObjects");
+            "{\"ticket\":{\"id\":35101,\"subject\":\"Login fails\"}}", failPathContaining: "/comments");
 
-        var result = await harness.CallToolAsync("Get_organization_summary", "{\"organizationId\":\"org-1\"}");
-        // Bare word: the summary is JSON-escaped inside the tool result's text content.
-        result.Should().Contain("goals", "the summary still returns");
+        var result = await harness.CallToolAsync("Get_probe_ticket_summary", "{\"ticketId\":35101}");
+        // Bare words: the summary is JSON-escaped inside the tool result's text content.
+        result.Should().Contain("comments unavailable", "the summary still returns, with the section's error");
         result.Should().NotContain("\"isError\":true", "the tool itself succeeded");
 
         harness.FailureRecords.Should().BeEmpty("the tool itself succeeded");
-        harness.ServiceRecords.Should().Contain(e => e.Level == LogLevel.Error
-            && e.Message.Contains("/resources/customObjects", StringComparison.Ordinal));
-        harness.ServiceRecords.Where(e => e.Level == LogLevel.Warning).Should().HaveCount(2,
-            "each absorbed section is recorded, so a failure the summary hid is still visible")
-            .And.OnlyContain(e => e.Message.Contains("catalogue unavailable", StringComparison.Ordinal),
-                "the catalogue fetch failed, which is a different fix from a renamed object");
+        harness.ServiceRecords.Should().ContainSingle(e => e.Level == LogLevel.Error)
+            .Subject.Message.Should().Contain("/api/v2/tickets/…").And.Contain("500",
+                "the absorbed failure is still visible server-side, by resource type only");
+        harness.AuditRecords.Should()
+            .ContainSingle(e => e.Message.Contains("called Get_probe_ticket_summary", StringComparison.Ordinal))
+            .Subject.Message.Should().Contain("outcome=ok");
     }
 
     [Fact]
@@ -660,10 +668,10 @@ public class ToolCallAuditCompositionTests
         // Not a surfaceable type, so the SDK keeps its generic message. The SDK ALSO logs this at Error
         // itself, with the exception attached — pinned below, because the docs rest on it: ours adds
         // the correlation id that joins it to the audit record, and the SDK's carries the stack trace.
-        using var harness = new Harness(TwoOrganisations,
-            vitallyThrows: () => new InvalidOperationException("internal detail"));
+        using var harness = new Harness(TwoTickets,
+            zendeskThrows: () => new InvalidOperationException("internal detail"));
 
-        var result = await harness.CallToolAsync("List_organizations");
+        var result = await harness.CallToolAsync("List_probe_tickets");
         result.Should().NotContain("internal detail", "unexpected detail is never surfaced to the client");
 
         var failure = harness.FailureRecords.Should().ContainSingle(e => e.Level == LogLevel.Error).Subject;
@@ -680,9 +688,9 @@ public class ToolCallAuditCompositionTests
     [Fact]
     public async Task ASuccessfulCall_LogsNoFailure()
     {
-        using var harness = new Harness(TwoOrganisations);
+        using var harness = new Harness(TwoTickets);
 
-        await harness.CallToolAsync("List_organizations");
+        await harness.CallToolAsync("List_probe_tickets");
 
         harness.FailureRecords.Should().BeEmpty();
     }
@@ -695,19 +703,19 @@ public class ToolCallAuditCompositionTests
         // every unit test, which injects it by hand, would still pass. Asserted through the real
         // wiring: a pager that never runs out of pages must be counted as truncated.
         using var harness = new Harness(
-            """{"results":[{"id":"org-1","name":"Acme"}],"next":"more"}""");
+            """{"tickets":[{"id":35101,"subject":"Login fails"}],"meta":{"has_more":true,"after_cursor":"more"}}""");
         using var capture = new MetricCapture(
             harness.Services.GetRequiredService<System.Diagnostics.Metrics.IMeterFactory>());
 
-        await harness.CallToolAsync("List_organizations", """{"nameContains":"Acme"}""");
+        await harness.CallToolAsync("List_probe_tickets", """{"nameContains":"Login"}""");
 
-        capture.Total("vitally.autopager.truncations", ("resource", "organizations")).Should().Be(1);
+        capture.Total("zendesk.autopager.truncations", ("resource", "/api/v2/tickets")).Should().Be(1);
 
         // A second consumer, registered differently: the Graph resolver is a typed HttpClient the
         // harness re-registers, and this host runs the live group check, so it must have counted.
-        // The OIDC resolver, the API-key provider and the rate limiter are not reachable here (no
-        // proxy, the development key, and a 5 s retry fallback) and are covered by their unit tests.
-        capture.Total("vitally.cache.lookups", ("cache", "group_membership")).Should().BeGreaterThan(0,
+        // The OIDC resolver, the token store and the rate limiter are not reachable here (no proxy, an
+        // in-memory store, and a 5 s retry fallback) and are covered by their unit tests.
+        capture.Total("zendesk.cache.lookups", ("cache", "group_membership")).Should().BeGreaterThan(0,
             "the Graph resolver must receive the counters through the real wiring too");
     }
 
@@ -744,9 +752,9 @@ public class ToolCallAuditCompositionTests
         };
         System.Diagnostics.ActivitySource.AddActivityListener(activityListener);
 
-        using var harness = new Harness(TwoOrganisations);
-        await harness.CallToolAsync("List_organizations", "{\"nameContains\":\"" + sentinel + "\"}");
-        await harness.CallToolAsync("List_notes", "{\"createdAfter\":\"" + sentinel + "\"}");
+        using var harness = new Harness(TwoTickets);
+        await harness.CallToolAsync("List_probe_tickets", "{\"nameContains\":\"" + sentinel + "\"}");
+        await harness.CallToolAsync("Search_probe_tickets", "{\"createdAfter\":\"" + sentinel + "\"}");
         await harness.CallToolAsync("Tool_" + sentinel);
 
         // The routes the re-review probe found, none of which involves a tool: an unknown method, an
@@ -764,7 +772,7 @@ public class ToolCallAuditCompositionTests
             + string.Join(", ", captured.Select(a => a.Source.Name).Distinct()));
 
         // Controls: the scan must see real attributes, and the caller text must have reached them.
-        mcp.Should().Contain(a => Equals(a.GetTagItem(SpanSanitisingProcessor.ToolNameTag), "List_organizations"),
+        mcp.Should().Contain(a => Equals(a.GetTagItem(SpanSanitisingProcessor.ToolNameTag), "List_probe_tickets"),
             "a span carries the registered tool name, so the attribute scan below is not looking at nothing");
         captured.Should().Contain(a => Carries(a.StatusDescription, sentinel),
             "the failed call's error text reaches StatusDescription before sanitising — the leak this gates. "

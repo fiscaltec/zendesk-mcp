@@ -120,8 +120,8 @@ public class OAuthProxyEndpointsTests : IClassFixture<OAuthProxyEndpointsTests.F
     }
 
     [Theory]
-    [InlineData("https://vitally.example.com")]
-    [InlineData("https://vitally.example.com/")]
+    [InlineData("https://zendesk.example.com")]
+    [InlineData("https://zendesk.example.com/")]
     public async Task Authorize_ForwardsAMatchingResourceUnchanged(string resource)
     {
         // The relay posture: with OAuth:UpstreamResourceScope unset, `resource` goes upstream
@@ -147,8 +147,8 @@ public class OAuthProxyEndpointsTests : IClassFixture<OAuthProxyEndpointsTests.F
 
     [Theory]
     [InlineData("https://evil.example.com/")]
-    [InlineData("https://vitally.example.com.evil.com/")]
-    [InlineData("https://vitally.example.com/other")]
+    [InlineData("https://zendesk.example.com.evil.com/")]
+    [InlineData("https://zendesk.example.com/other")]
     [InlineData("")]
     public async Task Authorize_RejectsAResourceWeDoNotPublish(string resource)
     {
@@ -203,7 +203,7 @@ public class OAuthProxyEndpointsTests : IClassFixture<OAuthProxyEndpointsTests.F
         var response = await client.GetAsync(
             "/oauth/authorize?response_type=code&client_id=test&state=res-repeated"
             + "&redirect_uri=" + Uri.EscapeDataString("http://localhost:54321/callback")
-            + "&resource=" + Uri.EscapeDataString("https://vitally.example.com/")
+            + "&resource=" + Uri.EscapeDataString("https://zendesk.example.com/")
             + "&resource=" + Uri.EscapeDataString("https://evil.example.com/"));
 
         response.StatusCode.Should().Be(HttpStatusCode.BadRequest);
@@ -448,11 +448,12 @@ public class OAuthProxyEndpointsTests : IClassFixture<OAuthProxyEndpointsTests.F
                     // Must equal StubOidcDiscovery.Issuer — the resolver refuses a document that
                     // speaks for a different issuer (OIDC Discovery §4.3).
                     ["OAuth:Authority"] = StubOidcDiscovery.Issuer,
-                    ["OAuth:Audience"] = "https://vitally.example.com",
+                    ["OAuth:Audience"] = "https://zendesk.example.com",
                     ["OAuth:SharedClientId"] = "test-client-id",
                     ["OAuth:AllowedClientRedirectUris:0"] = "https://claude.ai/api/mcp/auth_callback",
-                    ["Vitally:Region"] = "EU",
-                    ["Vitally:DevelopmentApiKey"] = "sk_test_dummy"
+                    ["Zendesk:Subdomain"] = TestHelpers.Subdomain,
+                    ["Zendesk:DevelopmentEmail"] = "dev@example.com",
+                    ["Zendesk:DevelopmentApiToken"] = "zd_test_dummy"
                 });
             });
             // The proxy resolves the upstream endpoints from the provider's discovery document at

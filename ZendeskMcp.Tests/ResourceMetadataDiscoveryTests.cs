@@ -141,8 +141,7 @@ public class ResourceMetadataDiscoveryTests : IClassFixture<ResourceMetadataDisc
             // explicitly because they are process-wide (see IntegrationTestCollection).
             Environment.SetEnvironmentVariable("OAuth__NoAuth", "false");
             Environment.SetEnvironmentVariable("Authorization__ReadOnly", "false");
-            Environment.SetEnvironmentVariable("Vitally__DevelopmentApiKey", "sk_test_dummy");
-            Environment.SetEnvironmentVariable("Vitally__Region", "EU");
+            ZendeskHostEnvironment.Set(noAuth: false);
             Environment.SetEnvironmentVariable("OAuth__Authority", "https://example-issuer.test/");
             Environment.SetEnvironmentVariable("OAuth__Audience", "https://example.test/");
             Environment.SetEnvironmentVariable("OAuth__Resource", "https://example.test/");
@@ -160,12 +159,14 @@ public class ResourceMetadataDiscoveryTests : IClassFixture<ResourceMetadataDisc
             await base.DisposeAsync();
             foreach (var name in new[]
             {
-                "OAuth__NoAuth", "Authorization__ReadOnly", "Vitally__DevelopmentApiKey", "Vitally__Region",
+                "OAuth__NoAuth", "Authorization__ReadOnly",
                 "OAuth__Authority", "OAuth__Audience", "OAuth__Resource", "OAuth__PublicBaseUrl",
             })
             {
                 Environment.SetEnvironmentVariable(name, null);
             }
+
+            ZendeskHostEnvironment.Clear();
         }
     }
 }

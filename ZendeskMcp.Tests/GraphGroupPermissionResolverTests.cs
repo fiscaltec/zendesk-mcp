@@ -65,7 +65,7 @@ public class GraphGroupPermissionResolverTests : IDisposable
     /// <c>status</c> is non-success, every call fails (drives the fail-degraded path). Records every
     /// requested URI so tests can assert the relationship and the call count. Every response it
     /// creates is retained and disposed on <see cref="Dispose(bool)"/> (invoked when the owning
-    /// HttpClient is disposed), mirroring the QueueingHandler in VitallyRateLimitHandlerTests.
+    /// HttpClient is disposed), mirroring the QueueingHandler in ZendeskRateLimitHandlerTests.
     /// </summary>
     private sealed class RecordingHandler(ISet<string> memberGroupIds, HttpStatusCode status = HttpStatusCode.OK)
         : HttpMessageHandler
@@ -165,8 +165,8 @@ public class GraphGroupPermissionResolverTests : IDisposable
         await resolver.TryResolvePermissionsAsync(UserOid);
         await resolver.TryResolvePermissionsAsync(UserOid);
 
-        capture.Total("vitally.cache.lookups", ("cache", "group_membership"), ("result", "miss")).Should().Be(1);
-        capture.Total("vitally.cache.lookups", ("cache", "group_membership"), ("result", "hit")).Should().Be(2);
+        capture.Total("zendesk.cache.lookups", ("cache", "group_membership"), ("result", "miss")).Should().Be(1);
+        capture.Total("zendesk.cache.lookups", ("cache", "group_membership"), ("result", "hit")).Should().Be(2);
     }
 
     [Fact]
@@ -287,8 +287,8 @@ public class GraphGroupPermissionResolverTests : IDisposable
         var served = await resolver.TryResolvePermissionsAsync(UserOid);
 
         served!.ServedStale.Should().BeTrue("a precondition: this must be the stale path");
-        capture.Total("vitally.cache.lookups", ("cache", "group_membership"), ("result", "miss")).Should().Be(2);
-        capture.Total("vitally.cache.lookups", ("cache", "group_membership"), ("result", "hit")).Should().Be(0);
+        capture.Total("zendesk.cache.lookups", ("cache", "group_membership"), ("result", "miss")).Should().Be(2);
+        capture.Total("zendesk.cache.lookups", ("cache", "group_membership"), ("result", "hit")).Should().Be(0);
     }
 
     [Fact]

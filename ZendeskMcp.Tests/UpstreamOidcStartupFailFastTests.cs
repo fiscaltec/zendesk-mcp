@@ -69,9 +69,10 @@ public class UpstreamOidcStartupFailFastTests
                 {
                     ["OAuth:NoAuth"] = "true",
                     ["OAuth:Authority"] = StubOidcDiscovery.Issuer,
-                    ["OAuth:Audience"] = "https://vitally.example.com",
-                    ["Vitally:Region"] = "EU",
-                    ["Vitally:DevelopmentApiKey"] = "sk_test_dummy"
+                    ["OAuth:Audience"] = "https://zendesk.example.com",
+                    ["Zendesk:Subdomain"] = TestHelpers.Subdomain,
+                    ["Zendesk:DevelopmentEmail"] = "dev@example.com",
+                    ["Zendesk:DevelopmentApiToken"] = "zd_test_dummy"
                 };
                 if (proxyEnabled)
                 {

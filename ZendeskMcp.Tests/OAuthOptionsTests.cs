@@ -215,11 +215,11 @@ public class OAuthOptionsTests
     }
 
     [Theory]
-    [InlineData("vitally.fiscaltec.com")]                 // no scheme
+    [InlineData("zendesk.fiscaltec.com")]                 // no scheme
     [InlineData("/mcp")]                                  // relative — and `file:///mcp` on Linux, see below
     [InlineData("file:///etc/passwd")]                    // absolute, wrong scheme
-    [InlineData("urn:example:vitally")]                   // absolute, but not an http resource
-    [InlineData("https://vitally.fiscaltec.com/#frag")]    // fragment — RFC 8707 §2 forbids it
+    [InlineData("urn:example:zendesk")]                   // absolute, but not an http resource
+    [InlineData("https://zendesk.fiscaltec.com/#frag")]    // fragment — RFC 8707 §2 forbids it
     public void Validate_MalformedResource_Throws(string resource)
     {
         // PublishedResourceIdentifier is no longer only published: it is what an incoming RFC 8707
@@ -270,13 +270,13 @@ public class OAuthOptionsTests
 
 
     [Theory]
-    [InlineData("https://vitally.fiscaltec.com/", "https://vitally.fiscaltec.com/")]  // exact
-    [InlineData("https://vitally.fiscaltec.com/", "https://vitally.fiscaltec.com")]   // client dropped the slash
-    [InlineData("https://vitally.fiscaltec.com", "https://vitally.fiscaltec.com/")]   // client added one
-    [InlineData("https://vitally.fiscaltec.com/mcp", "https://vitally.fiscaltec.com/mcp")]
-    [InlineData("https://vitally.fiscaltec.com/mcp", "https://vitally.fiscaltec.com/mcp/")]  // exactly one slash
-    [InlineData("https://VITALLY.fiscaltec.com/", "https://vitally.fiscaltec.com/")]  // host is case-insensitive
-    [InlineData("https://vitally.fiscaltec.com/", "HTTPS://vitally.fiscaltec.com/")]  // so is scheme
+    [InlineData("https://zendesk.fiscaltec.com/", "https://zendesk.fiscaltec.com/")]  // exact
+    [InlineData("https://zendesk.fiscaltec.com/", "https://zendesk.fiscaltec.com")]   // client dropped the slash
+    [InlineData("https://zendesk.fiscaltec.com", "https://zendesk.fiscaltec.com/")]   // client added one
+    [InlineData("https://zendesk.fiscaltec.com/mcp", "https://zendesk.fiscaltec.com/mcp")]
+    [InlineData("https://zendesk.fiscaltec.com/mcp", "https://zendesk.fiscaltec.com/mcp/")]  // exactly one slash
+    [InlineData("https://ZENDESK.fiscaltec.com/", "https://zendesk.fiscaltec.com/")]  // host is case-insensitive
+    [InlineData("https://zendesk.fiscaltec.com/", "HTTPS://zendesk.fiscaltec.com/")]  // so is scheme
     public void IsResourceIndicatorAllowed_MatchesThePublishedIdentifier(string published, string requested)
     {
         // Trailing-slash tolerance is not cosmetic: Entra refuses to register an identifierUri
@@ -290,12 +290,12 @@ public class OAuthOptionsTests
 
     [Theory]
     [InlineData("https://evil.example.com/")]
-    [InlineData("https://vitally.fiscaltec.com.evil.com/")]     // suffix spoof
-    [InlineData("https://vitally.fiscaltec.com/mcp/other")]
-    [InlineData("https://vitally.fiscaltec.com/mcp//")]        // two slashes is a different path, not the same name
-    [InlineData("https://vitally.fiscaltec.com:8443/mcp")]      // different port
-    [InlineData("http://vitally.fiscaltec.com/mcp")]            // different scheme
-    [InlineData("https://vitally.fiscaltec.com/MCP")]           // path is case-sensitive (RFC 3986 6.2.2.1)
+    [InlineData("https://zendesk.fiscaltec.com.evil.com/")]     // suffix spoof
+    [InlineData("https://zendesk.fiscaltec.com/mcp/other")]
+    [InlineData("https://zendesk.fiscaltec.com/mcp//")]        // two slashes is a different path, not the same name
+    [InlineData("https://zendesk.fiscaltec.com:8443/mcp")]      // different port
+    [InlineData("http://zendesk.fiscaltec.com/mcp")]            // different scheme
+    [InlineData("https://zendesk.fiscaltec.com/MCP")]           // path is case-sensitive (RFC 3986 6.2.2.1)
     [InlineData("not-a-uri")]
     [InlineData("")]                                            // present but empty binds nothing
     [InlineData("   ")]
@@ -304,7 +304,7 @@ public class OAuthOptionsTests
         // `resource` is an audience-binding control (RFC 8707). Accepting a value we do not
         // publish would hand the caller a token bound to an audience we never vouched for.
         var options = ValidOptions([]);
-        options.Resource = "https://vitally.fiscaltec.com/mcp";
+        options.Resource = "https://zendesk.fiscaltec.com/mcp";
 
         options.IsResourceIndicatorAllowed(requested).Should().BeFalse();
     }
@@ -314,9 +314,9 @@ public class OAuthOptionsTests
     {
         // RFC 8707 section 2 forbids a fragment on a resource indicator outright.
         var options = ValidOptions([]);
-        options.Resource = "https://vitally.fiscaltec.com/";
+        options.Resource = "https://zendesk.fiscaltec.com/";
 
-        options.IsResourceIndicatorAllowed("https://vitally.fiscaltec.com/#frag").Should().BeFalse();
+        options.IsResourceIndicatorAllowed("https://zendesk.fiscaltec.com/#frag").Should().BeFalse();
     }
 
     [Fact]
@@ -443,12 +443,12 @@ public class OAuthOptionsTests
         // GUID is SharedClientId. Accepting each settles which one arrives rather than betting.
         var options = new OAuthOptions
         {
-            Audience = "https://vitally.fiscaltec.com",
+            Audience = "https://zendesk.fiscaltec.com",
             SharedClientId = "c3812e7d-a413-4169-b57e-803326611ba3"
         };
 
         options.ValidAudiences.Should().BeEquivalentTo(
-            new[] { "https://vitally.fiscaltec.com", "c3812e7d-a413-4169-b57e-803326611ba3" });
+            new[] { "https://zendesk.fiscaltec.com", "c3812e7d-a413-4169-b57e-803326611ba3" });
     }
 
     [Fact]

@@ -4,7 +4,7 @@ using Microsoft.AspNetCore.Authorization;
 
 namespace ZendeskMcp.Tests;
 
-public class VitallyPermissionHandlerTests
+public class ZendeskPermissionHandlerTests
 {
     private static AuthorizationHandlerContext ContextFor(ClaimsPrincipal user, string permission)
     {

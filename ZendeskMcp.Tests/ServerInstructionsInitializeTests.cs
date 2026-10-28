@@ -55,8 +55,8 @@ public class ServerInstructionsInitializeTests : IClassFixture<ServerInstruction
         var instructions = doc.RootElement.GetProperty("result").GetProperty("instructions").GetString();
 
         instructions.Should().NotBeNullOrWhiteSpace();
-        instructions.Should().Contain("organisation");
-        instructions.Should().Contain("custom object");
+        instructions.Should().Contain("connect link");
+        instructions.Should().Contain("untrusted data");
     }
 
     public class Factory : WebApplicationFactory<Program>
@@ -64,8 +64,7 @@ public class ServerInstructionsInitializeTests : IClassFixture<ServerInstruction
         public Factory()
         {
             Environment.SetEnvironmentVariable("OAuth__NoAuth", "true");
-            Environment.SetEnvironmentVariable("Vitally__Region", "EU");
-            Environment.SetEnvironmentVariable("Vitally__DevelopmentApiKey", "sk_test_dummy");
+            ZendeskHostEnvironment.Set(noAuth: true);
         }
 
         protected override IHost CreateHost(IHostBuilder builder)
@@ -77,8 +76,7 @@ public class ServerInstructionsInitializeTests : IClassFixture<ServerInstruction
         protected override void Dispose(bool disposing)
         {
             Environment.SetEnvironmentVariable("OAuth__NoAuth", null);
-            Environment.SetEnvironmentVariable("Vitally__Region", null);
-            Environment.SetEnvironmentVariable("Vitally__DevelopmentApiKey", null);
+            ZendeskHostEnvironment.Clear();
             base.Dispose(disposing);
         }
     }

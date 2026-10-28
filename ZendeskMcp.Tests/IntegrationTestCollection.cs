@@ -34,7 +34,7 @@ namespace ZendeskMcp.Tests;
 /// an incomplete list makes the collection look narrower in purpose than it is.
 /// <see cref="ServerInstructionsInitializeTests"/> is the sharpest illustration
 /// of why serialisation is required, not just desirable: its <c>Factory.Dispose</c> resets
-/// <c>OAuth__NoAuth</c>, <c>Vitally__Region</c> and <c>Vitally__DevelopmentApiKey</c> to
+/// <c>OAuth__NoAuth</c> and the <c>Zendesk__*</c> variables (<see cref="ZendeskHostEnvironment"/>) to
 /// <c>null</c>, so running it unserialised could null out a sibling fixture's configuration while
 /// that sibling's host is still composing.
 /// </para>
