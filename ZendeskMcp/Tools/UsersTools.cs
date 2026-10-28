@@ -122,8 +122,8 @@ public static class UsersTools
                 terms.Add("role:" + roleValue);
             }
 
-            // Unverified against the live API: repeated tags: terms match users with ANY of the tags
-            // (Zendesk ORs repeated values of one keyword), and a leading '*' wildcard is honoured.
+            // Repeated tags: terms match users with ANY of the tags (Zendesk ORs repeated values of one
+            // keyword), and a leading '*' wildcard is honoured (both confirmed against the live API).
             terms.AddRange(tagTerms);
             var query = string.Join(' ', terms);
             var page = await zendesk.GetAsync("/api/v2/search/export",

@@ -83,12 +83,24 @@ public static class OrganizationsTools
                     throw new ArgumentException("A prefix name search needs at least 2 characters.");
                 }
 
-                // Unverified against the live API: that autocomplete honours cursor pagination. Without
-                // meta.has_more the result reads as a single page.
+                // Autocomplete refuses cursor pagination ("page must be an integer", seen live) and pages
+                // by offset, so the cursor handed back is the next page number.
+                var pageNumber = 1;
+                if (after_cursor is not null && (!int.TryParse(after_cursor, NumberStyles.None, CultureInfo.InvariantCulture, out pageNumber) || pageNumber < 1))
+                {
+                    throw new ArgumentException("after_cursor is not a next_cursor from a prefix Search_organizations.");
+                }
+
                 var page = await zendesk.GetAsync("/api/v2/organizations/autocomplete",
-                    ToolJson.Query(("name", trimmed), ("page[size]", size), ("page[after]", after_cursor)), cancellationToken: cancellationToken);
+                    ToolJson.Query(("name", trimmed), ("per_page", size), ("page", pageNumber)), cancellationToken: cancellationToken);
                 organizations = (page["organizations"] as JsonArray ?? []).OfType<JsonNode>().ToList();
-                output["pagination_info"] = ToolJson.PaginationInfo(page, size);
+                var hasMore = ToolJson.String(page["next_page"]) is not null;
+                output["pagination_info"] = new JsonObject
+                {
+                    ["has_more"] = hasMore,
+                    ["next_cursor"] = hasMore ? (pageNumber + 1).ToString(CultureInfo.InvariantCulture) : null,
+                    ["page_size"] = size,
+                };
             }
             else
             {
@@ -99,7 +111,8 @@ public static class OrganizationsTools
         }
         else if (tagTerms.Count > 0)
         {
-            // Unverified against the live API: repeated tags: terms match ANY of the tags.
+            // Repeated tags: terms match ANY of the tags: confirmed against the live API for user and
+            // ticket search; the validation account's organisations have no tags to try it on.
             var query = "type:organization " + string.Join(' ', tagTerms);
             var page = await zendesk.GetAsync("/api/v2/search/export",
                 ToolJson.Query(("query", query), ("filter[type]", "organization"), ("page[size]", size), ("page[after]", after_cursor)), cancellationToken: cancellationToken);
@@ -185,6 +198,7 @@ public static class OrganizationsTools
         {
             // Unverified against the live API: how Zendesk words the refusal on accounts that allow one
             // organisation per user. A 422 for a user who already has a membership is read as that.
+            // Not live-tested (a write); Zendesk's documentation does not give the wording either.
             if (replace_existing != true)
             {
                 var current = memberships[0];

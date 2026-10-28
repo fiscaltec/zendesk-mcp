@@ -62,6 +62,27 @@ public class OrganizationsToolsTests
     }
 
     [Fact]
+    public async Task SearchOrganizations_Prefix_PagesAutocompleteByOffset()
+    {
+        // Live, autocomplete refuses page[size]/page[after] and pages by number.
+        var (fake, zendesk) = Build(r => r.Query("page[size]") is not null
+            ? FakeResponse.WithStatus(System.Net.HttpStatusCode.BadRequest, """{"error":{"title":"Invalid attribute","message":"page must be an integer"}}""")
+            : FakeResponse.Json(r.Query("page") == "2"
+                ? $$$"""{"organizations":[{{{Acme}}}],"next_page":null,"previous_page":"x","count":2}"""
+                : $$$"""{"organizations":[{{{Acme}}}],"next_page":"https://acme.zendesk.com/api/v2/organizations/autocomplete.json?name=Ac&page=2&per_page=1","previous_page":null,"count":2}"""));
+        using var _ = fake;
+
+        var first = JsonNode.Parse(await OrganizationsTools.SearchOrganizations(zendesk, name: "Ac", match: "prefix", page_size: 1))!;
+        var next = first["pagination_info"]!["next_cursor"]!.GetValue<string>();
+        var second = JsonNode.Parse(await OrganizationsTools.SearchOrganizations(zendesk, name: "Ac", match: "prefix", page_size: 1, after_cursor: next))!;
+
+        first["pagination_info"]!["has_more"]!.GetValue<bool>().Should().BeTrue();
+        second["pagination_info"]!["has_more"]!.GetValue<bool>().Should().BeFalse();
+        fake.Requests[0].Query("per_page").Should().Be("1");
+        fake.Requests[1].Query("page").Should().Be("2");
+    }
+
+    [Fact]
     public async Task SearchOrganizations_Tags_UseExportSearch()
     {
         var (fake, zendesk) = Build(_ => FakeResponse.Json($$$"""{"results":[{{{Acme}}}],"meta":{"has_more":false}}"""));
