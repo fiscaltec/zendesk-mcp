@@ -132,8 +132,8 @@ public static class AnalyticsTools
             return AnalyticsSupport.OverCapResult(query, searchUrl, cap, "Split the date range (for example into halves or weeks) or narrow the filters, and call again for each part.");
         }
 
-        // Unverified against the live API: that show_many accepts include=metric_sets and returns them
-        // as a top-level metric_sets array keyed by ticket_id (as the ticket list endpoints do).
+        // show_many with include=metric_sets returns a top-level metric_sets array keyed by ticket_id
+        // (confirmed against the live API).
         var (tickets, sideloads) = await AnalyticsSupport.ShowManyTicketsAsync(zendesk, gathered.Ids, "metric_sets", cancellationToken);
         var metricSets = (sideloads.GetValueOrDefault("metric_sets") ?? [])
             .Where(m => AnalyticsStats.Long(m["ticket_id"]) is not null)
@@ -415,8 +415,8 @@ public static class AnalyticsTools
 
         // Rank from the running targets Zendesk lists on each ticket (one request per 100 tickets), and
         // read the full metric events only for the tickets returned.
-        // Unverified against the live API: that show_many accepts include=slas and puts
-        // slas.policy_metrics on each ticket, as the single-ticket endpoint does.
+        // show_many with include=slas puts slas.policy_metrics on each ticket, as the single-ticket
+        // endpoint does (confirmed against the live API).
         var (tickets, _) = await AnalyticsSupport.ShowManyTicketsAsync(zendesk, gathered.Ids, "slas", cancellationToken);
         var now = DateTimeOffset.UtcNow;
         var queue = AnalyticsSla.RankQueue(tickets, now);

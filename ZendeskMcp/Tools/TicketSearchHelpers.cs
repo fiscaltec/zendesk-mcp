@@ -217,9 +217,8 @@ public static class TicketSearchHelpers
         if (wantMetrics || wantCommentCount)
         {
             // Search results carry neither, so both come from show_many with sideloads, which takes
-            // up to 100 ids a call.
-            // Unverified against the live API: that show_many accepts the comment_count sideload
-            // alongside metric_sets (both are documented ticket sideloads).
+            // up to 100 ids a call. show_many accepts comment_count alongside metric_sets (confirmed
+            // against the live API): comment_count lands on each ticket, metric_sets beside them.
             var sideloads = string.Join(",", new[] { wantMetrics ? "metric_sets" : null, wantCommentCount ? "comment_count" : null }.OfType<string>());
             foreach (var batch in Batches(ticketIds))
             {

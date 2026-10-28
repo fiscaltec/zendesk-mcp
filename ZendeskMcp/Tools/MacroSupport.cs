@@ -209,8 +209,7 @@ public static partial class MacroSupport
 
     /// <summary>All the account's dynamic content items, keyed by placeholder name.</summary>
     /// <remarks>
-    /// Unverified against the live API: that <c>/api/v2/dynamic_content/items</c> answers cursor
-    /// pagination. If it only pages by offset, the pager stops after the first page of 100 items.
+    /// <c>/api/v2/dynamic_content/items</c> answers cursor pagination (confirmed against the live API).
     /// </remarks>
     public static async Task<Dictionary<string, JsonNode>> LoadDynamicContentAsync(ZendeskService zendesk, CancellationToken cancellationToken)
     {

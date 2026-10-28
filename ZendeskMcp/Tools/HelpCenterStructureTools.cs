@@ -235,9 +235,7 @@ public static class HelpCenterStructureTools
         "Use this to find user_segment_id values for Create_help_center_article, and to resolve the user_segment_ids returned on articles.")]
     public static async Task<string> ListUserSegments(ZendeskService zendesk, CancellationToken cancellationToken = default)
     {
-        // Unverified against the live API: that user_segments follows cursor pagination. If it answers
-        // with offset pagination instead, the pager stops after the first page and truncated says so
-        // only when Zendesk reports has_more.
+        // user_segments follows cursor pagination (confirmed against the live API).
         var pages = await zendesk.GetAllPagesAsync("/api/v2/help_center/user_segments", null, "user_segments", maxItems: 1000, cancellationToken: cancellationToken);
         var segments = new JsonArray();
         foreach (var segment in pages.Items)
