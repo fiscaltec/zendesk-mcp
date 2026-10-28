@@ -11,7 +11,9 @@ cite `vitally-mcp#NNN` where a lesson was learned there.
 
 > **Validated, not planned.** `terraform fmt -check -recursive` and `terraform validate` pass
 > (after `terraform init -backend=false`, which resolved azurerm 4.81.0 and azuread 3.10.0 on
-> 2026-10-28). `validate` checks syntax and provider schemas only: it does not reach Azure, so values
+> 2026-10-28). Those versions are pinned in the committed `.terraform.lock.hcl`, with checksums for
+> linux_amd64, linux_arm64, windows_amd64, darwin_amd64 and darwin_arm64. Move them deliberately with
+> `terraform init -upgrade`, then re-run `terraform providers lock` with the same `-platform` list. `validate` checks syntax and provider schemas only: it does not reach Azure, so values
 > the API rejects (container `cpu`/`memory` pairs, SKUs, region availability) will first show at
 > `terraform plan`. Nothing has been planned or applied.
 
