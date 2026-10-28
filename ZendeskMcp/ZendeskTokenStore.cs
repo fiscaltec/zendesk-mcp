@@ -110,7 +110,7 @@ public sealed class KeyVaultZendeskTokenStore(
         cache.Set(CacheKey(objectId), new CachedToken(null), _options.TokenCacheDuration);
     }
 
-    internal static ZendeskUserToken? Parse(string? value)
+    public static ZendeskUserToken? Parse(string? value)
     {
         if (string.IsNullOrWhiteSpace(value))
         {

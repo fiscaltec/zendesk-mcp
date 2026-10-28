@@ -322,7 +322,7 @@ public sealed record RecordedRequest(HttpMethod Method, Uri Url, string? Body, I
 public sealed record FakeResponse(HttpStatusCode Status, string Body, IReadOnlyDictionary<string, string>? Headers = null, string ContentType = "application/json")
 {
     public static FakeResponse Json(string body) => new(HttpStatusCode.OK, body);
-    public static FakeResponse Status(HttpStatusCode status, string body = "{}") => new(status, body);
+    public static FakeResponse WithStatus(HttpStatusCode status, string body = "{}") => new(status, body);
     public static FakeResponse NotFound() => new(HttpStatusCode.NotFound, "{\"error\":\"RecordNotFound\",\"description\":\"Not found\"}");
 }
 

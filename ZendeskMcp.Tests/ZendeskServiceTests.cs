@@ -1,0 +1,166 @@
+using System.Net;
+using System.Text.Json.Nodes;
+using FluentAssertions;
+
+namespace ZendeskMcp.Tests;
+
+/// <summary>
+/// The transport every tool shares: URL building, error surfacing, cursor paging, and the two
+/// credential boundaries — a <c>brand_url</c> and an attachment URL may only ever reach this
+/// account's own hosts, because the caller's Zendesk token goes wherever the request goes.
+/// </summary>
+public class ZendeskServiceTests
+{
+    private const string BrandsJson = """
+        {"brands":[
+          {"id":1,"name":"Main","brand_url":"https://acme.zendesk.com","host_mapping":null},
+          {"id":2,"name":"Other","brand_url":"https://acme-other.zendesk.com","host_mapping":"help.other.example"}
+        ],"meta":{"has_more":false}}
+        """;
+
+    [Fact]
+    public async Task QueryValues_AreEscaped_AndNullsDropped()
+    {
+        using var zendesk = TestHelpers.CreateFakeZendesk(_ => FakeResponse.Json("{}"));
+        var service = TestHelpers.BuildZendeskService(zendesk.Client);
+
+        await service.GetAsync("/api/v2/search/export", [new("query", "type:ticket subject:\"a&b=c\""), new("skip", null)]);
+
+        var request = zendesk.Requests.Single();
+        request.Url.GetLeftPart(UriPartial.Path).Should().Be("https://acme.zendesk.com/api/v2/search/export");
+        request.Query("query").Should().Be("type:ticket subject:\"a&b=c\"");
+        request.Url.Query.Should().NotContain("skip");
+    }
+
+    [Fact]
+    public async Task AZendeskRefusal_SurfacesItsBody()
+    {
+        using var zendesk = TestHelpers.CreateFakeZendesk(_ => FakeResponse.WithStatus(HttpStatusCode.UnprocessableEntity,
+            "{\"error\":\"RecordInvalid\",\"description\":\"Record validation errors\",\"details\":{\"subject\":[\"is too long\"]}}"));
+        var service = TestHelpers.BuildZendeskService(zendesk.Client);
+
+        var act = () => service.PostAsync("/api/v2/tickets", new JsonObject());
+
+        (await act.Should().ThrowAsync<HttpRequestException>())
+            .Which.Message.Should().Contain("422").And.Contain("is too long", "the model needs Zendesk's reason to correct its call");
+    }
+
+    [Fact]
+    public async Task GetAllPages_FollowsTheCursor_AndMergesSideloads()
+    {
+        var (client, _) = TestHelpers.CreateMockHttpClientPaged(
+            "{\"tickets\":[{\"id\":1}],\"users\":[{\"id\":10}],\"meta\":{\"has_more\":true,\"after_cursor\":\"c1\"}}",
+            "{\"tickets\":[{\"id\":2}],\"users\":[{\"id\":20}],\"meta\":{\"has_more\":false,\"after_cursor\":null}}");
+        using var _client = client;
+        var service = TestHelpers.BuildZendeskService(client);
+
+        var paged = await service.GetAllPagesAsync("/api/v2/tickets", null, "tickets", maxItems: 100);
+
+        paged.Items.Select(t => t["id"]!.GetValue<long>()).Should().Equal(1, 2);
+        paged.HasMore.Should().BeFalse();
+        paged.PagesFetched.Should().Be(2);
+        ((JsonArray)paged.Sideloads["users"]!).Should().HaveCount(2);
+    }
+
+    [Fact]
+    public async Task GetAllPages_StopsAtThePageCap_AndReportsTheCursor()
+    {
+        using var zendesk = TestHelpers.CreateFakeZendesk(_ =>
+            FakeResponse.Json("{\"tickets\":[{\"id\":1}],\"meta\":{\"has_more\":true,\"after_cursor\":\"next\"}}"));
+        var context = new ToolCallAuditContext();
+        var service = TestHelpers.BuildZendeskService(zendesk.Client, maxAutoPageFetches: 3, auditContext: context);
+
+        var paged = await service.GetAllPagesAsync("/api/v2/tickets", null, "tickets", maxItems: 1000);
+
+        zendesk.Requests.Should().HaveCount(3);
+        paged.HasMore.Should().BeTrue();
+        paged.NextCursor.Should().Be("next");
+        zendesk.Requests[1].Query("page[after]").Should().Be("next");
+    }
+
+    [Fact]
+    public async Task ABrandUrl_ForOneOfTheAccountsBrands_IsUsedAsTheBase()
+    {
+        using var zendesk = TestHelpers.CreateFakeZendesk(r => r.Path == "/api/v2/brands"
+            ? FakeResponse.Json(BrandsJson)
+            : FakeResponse.Json("{\"articles\":[]}"));
+        var service = TestHelpers.BuildZendeskService(zendesk.Client);
+
+        await service.GetAsync("/api/v2/help_center/articles", brandUrl: "https://help.other.example/hc/en-gb");
+
+        zendesk.Requests.Last().Url.GetLeftPart(UriPartial.Path).Should().Be("https://help.other.example/api/v2/help_center/articles");
+    }
+
+    [Theory]
+    [InlineData("https://attacker.example")]
+    [InlineData("https://acme.zendesk.com.attacker.example")]
+    [InlineData("http://acme-other.zendesk.com")]
+    [InlineData("not a url")]
+    public async Task ABrandUrl_ThatIsNotTheAccounts_IsRefused_BeforeAnyRequestReachesIt(string brandUrl)
+    {
+        using var zendesk = TestHelpers.CreateFakeZendesk(r => r.Path == "/api/v2/brands"
+            ? FakeResponse.Json(BrandsJson)
+            : FakeResponse.Json("{}"));
+        var service = TestHelpers.BuildZendeskService(zendesk.Client);
+
+        var act = () => service.GetAsync("/api/v2/help_center/articles", brandUrl: brandUrl);
+
+        await act.Should().ThrowAsync<ArgumentException>();
+        zendesk.Requests.Should().OnlyContain(r => r.Url.Host == "acme.zendesk.com",
+            "the caller's token must never be sent to a host the account does not own");
+    }
+
+    [Fact]
+    public async Task ADownload_FromAnotherHost_IsRefused_WithoutSendingTheToken()
+    {
+        using var zendesk = TestHelpers.CreateFakeZendesk(r => r.Path == "/api/v2/brands"
+            ? FakeResponse.Json(BrandsJson)
+            : FakeResponse.Json("{}"));
+        var service = TestHelpers.BuildZendeskService(zendesk.Client);
+
+        var act = () => service.DownloadAsync("https://files.attacker.example/a.pdf");
+
+        await act.Should().ThrowAsync<ArgumentException>();
+        zendesk.Requests.Should().NotContain(r => r.Url.Host == "files.attacker.example");
+    }
+
+    [Fact]
+    public async Task ADownload_LargerThanTheLimit_IsRefused()
+    {
+        using var zendesk = TestHelpers.CreateFakeZendesk(_ => new FakeResponse(HttpStatusCode.OK, new string('x', 2048), ContentType: "application/pdf"));
+        var service = TestHelpers.BuildZendeskService(zendesk.Client, configure: o => o.MaxAttachmentBytes = 1024);
+
+        var act = () => service.DownloadAsync("https://acme.zendesk.com/attachments/token/abc/?name=a.pdf");
+
+        await act.Should().ThrowAsync<ArgumentException>().WithMessage("*1024*");
+    }
+
+    [Fact]
+    public async Task TheRbacBackstop_RefusesAWriteFromAReader_BeforeAnythingIsSent()
+    {
+        using var zendesk = TestHelpers.CreateFakeZendesk(_ => FakeResponse.Json("{}"));
+        var service = TestHelpers.BuildZendeskService(zendesk.Client,
+            authorizer: TestHelpers.BuildEnabledAuthorizer("zendesk:read"));
+
+        var act = () => service.PutAsync("/api/v2/tickets/1", new JsonObject());
+
+        await act.Should().ThrowAsync<UnauthorizedAccessException>();
+        zendesk.Requests.Should().BeEmpty();
+    }
+
+    [Fact]
+    public void Paths_MustBeRooted()
+    {
+        var service = TestHelpers.BuildZendeskService(TestHelpers.CreateMockHttpClient("{}"));
+
+        var act = () => service.BuildUrl("api/v2/tickets", null, null);
+
+        act.Should().Throw<ArgumentException>();
+    }
+
+    [Fact]
+    public void Segment_EscapesSeparators()
+    {
+        ZendeskService.Segment("en-gb/../../users").Should().Be("en-gb%2F..%2F..%2Fusers");
+    }
+}
