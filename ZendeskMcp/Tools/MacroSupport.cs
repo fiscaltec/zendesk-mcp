@@ -231,10 +231,11 @@ public static partial class MacroSupport
     /// agents, statuses and custom field options as values, which is what makes the actions readable.
     /// </summary>
     /// <remarks>
-    /// Unverified against the live API: the exact envelope. <c>/api/v2/macros/actions</c> is read as
-    /// <c>{"actions":[{"output_key"|"subject", "title", "type", "values":[{"value","title"}]}]}</c>,
-    /// and the <c>{"definitions":{"actions":[…]}}</c> shape of <c>/api/v2/macros/definitions</c> is
-    /// accepted too.
+    /// Confirmed against the live API: <c>/api/v2/macros/actions</c> answers
+    /// <c>{"actions":[{"field", "title", "title_for_field", "group", "repeatable", "operators",
+    /// "values":{"type", "list":[{"value","title","enabled"}]}}]}</c>, with <c>output_key</c> null. A bare
+    /// <c>values</c> array, <c>output_key</c>/<c>subject</c> naming the field, and the
+    /// <c>{"definitions":{"actions":[…]}}</c> shape of <c>/api/v2/macros/definitions</c> are accepted too.
     /// </remarks>
     public static async Task<Dictionary<string, MacroActionDefinition>> LoadDefinitionsAsync(ZendeskService zendesk, CancellationToken cancellationToken)
     {
@@ -250,7 +251,7 @@ public static partial class MacroSupport
             }
 
             var values = new List<(string, string)>();
-            foreach (var value in node?["values"] as JsonArray ?? [])
+            foreach (var value in node?["values"] as JsonArray ?? node?["values"]?["list"] as JsonArray ?? [])
             {
                 if (ScalarText(value?["value"]) is { } v)
                 {
@@ -258,7 +259,8 @@ public static partial class MacroSupport
                 }
             }
 
-            definitions.TryAdd(field, new MacroActionDefinition(field, ToolJson.String(node?["title"]) ?? field, ToolJson.String(node?["type"]), values));
+            definitions.TryAdd(field, new MacroActionDefinition(field, ToolJson.String(node?["title"]) ?? field,
+                ToolJson.String(node?["type"]) ?? ToolJson.String(node?["values"]?["type"]), values));
         }
 
         return definitions;

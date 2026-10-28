@@ -116,21 +116,43 @@ public static class MacrosTools
                 ("sort_order", sortOrder),
                 ("include", MacroSupport.UsageInclude));
 
+            // Zendesk refuses the usage sorts with cursor pagination ("sort_by=usage_30d is not
+            // supported with cursor pagination", seen live) but honours them with offset pagination,
+            // so those page by number and our cursor carries the page number instead.
+            var byOffset = sortBy is not null && sortBy.StartsWith("usage_", StringComparison.Ordinal);
+            if (byOffset && after is not null && !int.TryParse(after, NumberStyles.None, CultureInfo.InvariantCulture, out _))
+            {
+                throw new ArgumentException("after_cursor is not a next_cursor from Search_macros with this sort_by.");
+            }
+
             var scanned = 0;
             string? next = null;
             var done = false;
             while (!done)
             {
-                var pageQuery = new List<KeyValuePair<string, string?>>(query) { new("page[size]", ScanPageSize.ToString(CultureInfo.InvariantCulture)) };
-                if (after is not null)
+                var pageQuery = new List<KeyValuePair<string, string?>>(query);
+                if (byOffset)
                 {
-                    pageQuery.Add(new("page[after]", after));
+                    pageQuery.Add(new("per_page", ScanPageSize.ToString(CultureInfo.InvariantCulture)));
+                    pageQuery.Add(new("page", after ?? "1"));
+                }
+                else
+                {
+                    pageQuery.Add(new("page[size]", ScanPageSize.ToString(CultureInfo.InvariantCulture)));
+                    if (after is not null)
+                    {
+                        pageQuery.Add(new("page[after]", after));
+                    }
                 }
 
                 var page = await zendesk.GetAsync("/api/v2/macros", pageQuery, cancellationToken: cancellationToken);
                 var items = (page["macros"] as JsonArray ?? []).ToList();
-                var pageHasMore = page["meta"]?["has_more"]?.GetValue<bool>() == true;
-                var pageAfter = ToolJson.String(page["meta"]?["after_cursor"]);
+                var pageHasMore = byOffset
+                    ? ToolJson.String(page["next_page"]) is not null
+                    : page["meta"]?["has_more"]?.GetValue<bool>() == true;
+                var pageAfter = byOffset
+                    ? (int.Parse(after ?? "1", NumberStyles.None, CultureInfo.InvariantCulture) + 1).ToString(CultureInfo.InvariantCulture)
+                    : ToolJson.String(page["meta"]?["after_cursor"]);
 
                 for (var i = skip; i < items.Count; i++)
                 {

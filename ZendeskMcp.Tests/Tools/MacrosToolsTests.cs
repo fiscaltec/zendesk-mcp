@@ -11,9 +11,11 @@ public class MacrosToolsTests
 {
     private const string Definitions = """
         {"actions":[
-          {"output_key":"status","title":"Status","type":"list","values":[{"value":"open","title":"Open"},{"value":"solved","title":"Solved"}]},
-          {"output_key":"group_id","title":"Group","type":"list","values":[{"value":"77","title":"Billing"}]},
-          {"output_key":"current_tags","title":"Add tags","type":"text"},
+          {"field":"status","value":"status","output_key":null,"title":"Status","title_for_field":"Status","group":"ticket","repeatable":false,"operators":[{"value":"is","title":"Is"}],
+           "values":{"type":"list","list":[{"value":"open","title":"Open","enabled":true},{"value":"solved","title":"Solved","enabled":true}]}},
+          {"field":"group_id","value":"group_id","output_key":null,"title":"Group","title_for_field":"Group","group":"ticket","repeatable":false,"operators":[],
+           "values":{"type":"list","list":[{"value":"77","title":"Billing","enabled":true}]}},
+          {"field":"current_tags","value":"current_tags","output_key":null,"title":"Add tags","title_for_field":"Add tags","group":"ticket","repeatable":true,"operators":[],"values":{"type":"text"}},
           {"output_key":"priority","title":"Priority","type":"list","values":[{"value":"high","title":"High"}]}
         ]}
         """;
@@ -124,19 +126,47 @@ public class MacrosToolsTests
         });
         using var _ = fake;
 
-        var result = Parse(await MacrosTools.SearchMacros(zendesk, access: "group", group_id: 77, active: true, sort_by: "usage_30d", sort_order: "asc"));
+        var result = Parse(await MacrosTools.SearchMacros(zendesk, access: "group", group_id: 77, active: true, sort_by: "updated_at", sort_order: "asc"));
 
         var macros = result["macros"]!.AsArray();
         macros.Select(m => (long)m!["id"]!).Should().Equal(2, 4);
         macros[0]!["access"]!.GetValue<string>().Should().Be("group");
         macros[0]!["restricted_to"]![0]!["name"]!.GetValue<string>().Should().Be("Billing");
-        result["note"]!.GetValue<string>().Should().Contain("usage", "the fake returned no usage data");
 
         var first = fake.Requests.First(r => r.Path == "/api/v2/macros");
         first.Query("group_id").Should().Be("77");
         first.Query("active").Should().Be("true");
-        first.Query("sort_by").Should().Be("usage_30d");
+        first.Query("sort_by").Should().Be("updated_at");
         first.Query("sort_order").Should().Be("asc");
+    }
+
+    [Fact]
+    public async Task SearchMacros_UsageSort_PagesByOffset()
+    {
+        // Live, Zendesk refuses a usage sort with cursor pagination but honours it page by page.
+        var page1 = $$$"""{"macros":[{{{Macro(1, "One")}}}],"next_page":"https://acme.zendesk.com/api/v2/macros.json?page=2&per_page=100","previous_page":null,"count":2}""";
+        var page2 = $$$"""{"macros":[{{{Macro(2, "Two")}}}],"next_page":null,"previous_page":"x","count":2}""";
+        var (fake, zendesk) = Build(r => r.Path switch
+        {
+            "/api/v2/macros" when r.Query("page[size]") is not null => FakeResponse.WithStatus(System.Net.HttpStatusCode.BadRequest,
+                """{"error":"InvalidPaginationParameter","description":"sort_by=usage_30d is not supported with cursor pagination"}"""),
+            "/api/v2/macros" => FakeResponse.Json(r.Query("page") == "2" ? page2 : page1),
+            "/api/v2/macros/actions" => FakeResponse.Json(Definitions),
+            _ => FakeResponse.NotFound(),
+        });
+        using var _ = fake;
+
+        var result = Parse(await MacrosTools.SearchMacros(zendesk, sort_by: "usage_30d", sort_order: "asc", page_size: 1));
+
+        result["macros"]!.AsArray().Select(m => (long)m!["id"]!).Should().Equal(1);
+        result["note"]!.GetValue<string>().Should().Contain("usage", "the fake returned no usage data");
+        var next = result["pagination_info"]!["next_cursor"]!.GetValue<string>();
+
+        var second = Parse(await MacrosTools.SearchMacros(zendesk, sort_by: "usage_30d", sort_order: "asc", page_size: 1, after_cursor: next));
+
+        second["macros"]!.AsArray().Select(m => (long)m!["id"]!).Should().Equal(2);
+        second["pagination_info"]!["has_more"]!.GetValue<bool>().Should().BeFalse();
+        fake.Requests.Where(r => r.Path == "/api/v2/macros").Should().AllSatisfy(r => r.Query("per_page").Should().Be("100"));
     }
 
     [Fact]
