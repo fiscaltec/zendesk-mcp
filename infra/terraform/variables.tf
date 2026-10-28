@@ -1,5 +1,5 @@
 # Inputs. A value nobody has decided yet is a variable WITHOUT a default, so Terraform stops and asks
-# rather than applying a guess; each one is listed under "Decisions pending" in README.md.
+# rather than applying a guess; README.md, "Decisions", records what was settled and what is open.
 
 # ---- Placement ----
 variable "subscription_id" {
@@ -30,18 +30,27 @@ variable "name_prefix" {
   description = "Resource naming prefix ({prefix}-{type}-uksouth convention)."
   default     = "zendesk-prod"
 
-  # Key Vault names are at most 24 characters, and "-cmk-uksouth" is 12 of them.
+  # Key Vault names are at most 24 characters, and "-kv-uksouth" is 11 of them; 12 leaves headroom.
   validation {
     condition     = length(var.name_prefix) <= 12 && can(regex("^[a-z][a-z0-9-]*$", var.name_prefix))
     error_message = "name_prefix must be lower-case, start with a letter and be at most 12 characters, or the Key Vault names exceed 24."
   }
 }
 
-# Globally unique, alphanumeric-only names, so they cannot follow name_prefix.
+# The container registry is the Vitally MCP estate's, shared (acr.tf explains the trade-off).
 variable "acr_name" {
-  type    = string
-  default = "zendeskproducruksouth"
+  type        = string
+  description = "The shared registry (owned by the Vitally MCP estate's Terraform). This estate's images go in its `zendesk-mcp` repository."
+  default     = "vitallyproducruksouth"
 }
+
+variable "acr_resource_group_name" {
+  type        = string
+  description = "Resource group of the shared registry."
+  default     = "vitally-prod-rg-uksouth"
+}
+
+# Globally unique, alphanumeric-only name, so it cannot follow name_prefix.
 
 variable "flow_log_storage_account_name" {
   type    = string
@@ -50,7 +59,7 @@ variable "flow_log_storage_account_name" {
 
 variable "vnet_address_space" {
   type        = string
-  description = "VNet range (/23). Deliberately NOT Vitally's 10.80.0.0/23, so the two estates can be peered or routed through a hub later without renumbering. Subnets are carved from it in network.tf and ampls.tf."
+  description = "VNet range (/23), confirmed free on 2026-10-28. Deliberately NOT Vitally's 10.80.0.0/23, so the two estates can be peered or routed through a hub later without renumbering. Subnets are carved from it in network.tf and ampls.tf."
   default     = "10.81.0.0/23"
 }
 
@@ -71,7 +80,8 @@ variable "staging_image_tag" {
 # ---- Zendesk ----
 variable "zendesk_subdomain" {
   type        = string
-  description = "Zendesk account subdomain: `fiscaltec` for https://fiscaltec.zendesk.com. Shared by both targets — there is one Zendesk account."
+  description = "Zendesk account subdomain: `fiscalsupport` for https://fiscalsupport.zendesk.com. Shared by both targets — there is one Zendesk account."
+  default     = "fiscalsupport"
 
   validation {
     condition     = can(regex("^[A-Za-z0-9-]+$", var.zendesk_subdomain))
@@ -82,65 +92,68 @@ variable "zendesk_subdomain" {
 variable "zendesk_oauth_client_id" {
   type        = string
   description = "Unique identifier of the Zendesk OAuth client (Admin Centre > Apps and integrations > APIs > OAuth clients). Shared by both targets; its redirect URLs must list BOTH /zendesk/callback URLs. Its secret goes into Key Vault as `zendesk-oauth-client-secret`, never here."
+  default     = "fiscal_zendesk_mcp"
 }
 
 # Account-wide safety switches (ZendeskFeatureOptions). Each guards an action that reaches beyond the
 # agent making it — a customer's inbox, the public Help Center, every agent's macro list, who can see
-# an organisation's tickets — and stays off until someone decides otherwise. Per target, so staging
-# can trial one without production following.
+# an organisation's tickets. The application defaults them all to off; this estate turns all five ON
+# for both targets (decided 2026-10-28), so an agent's Entra tier and Zendesk role are what limit
+# these actions here. Per target, so either can be turned off again without the other following.
+# Staging's writes stay denied anyway while `staging_read_only` is true.
 variable "zendesk_allow_public_replies" {
   type        = bool
   description = "Production: allow public ticket comments, CCs and public macro replies (they email customers)."
-  default     = false
+  default     = true
 }
 
 variable "zendesk_allow_article_publishing" {
   type        = bool
   description = "Production: allow publishing Help Center articles and translations rather than saving drafts."
-  default     = false
+  default     = true
 }
 
 variable "zendesk_allow_help_center_structure_changes" {
   type        = bool
   description = "Production: allow creating and changing Help Center categories and sections, which are public as soon as they exist."
-  default     = false
+  default     = true
 }
 
 variable "zendesk_allow_macro_changes" {
   type        = bool
   description = "Production: allow creating, editing, activating and deactivating macros."
-  default     = false
+  default     = true
 }
 
 variable "zendesk_allow_user_and_organization_changes" {
   type        = bool
   description = "Production: allow new end users from an email, and organisation membership changes."
-  default     = false
+  default     = true
 }
 
 variable "staging_zendesk_allow_public_replies" {
   type    = bool
-  default = false
+  default = true
 }
 
 variable "staging_zendesk_allow_article_publishing" {
   type    = bool
-  default = false
+  default = true
 }
 
 variable "staging_zendesk_allow_help_center_structure_changes" {
   type    = bool
-  default = false
+  default = true
 }
 
 variable "staging_zendesk_allow_macro_changes" {
   type    = bool
-  default = false
+  default = true
 }
 
 variable "staging_zendesk_allow_user_and_organization_changes" {
   type    = bool
-  default = false
+  default = true
 }
 
 variable "staging_read_only" {
@@ -155,9 +168,8 @@ variable "staging_read_only" {
 # permanently: each target publishes its own origin, and sharing those would make staging advertise
 # production's — an RFC 9728 document naming a server it is not, which strict clients reject.
 #
-# The hostnames below are a PROPOSAL (README.md, "Decisions pending"). The Entra app registration is
-# built from these same variables (entra.tf), and preconditions there refuse a combination that does
-# not hang together.
+# The hostnames below were decided on 2026-10-28. The Entra app registration is built from these same
+# variables (entra.tf), and preconditions there refuse a combination that does not hang together.
 variable "oauth_authority" {
   type        = string
   description = "Upstream OIDC issuer — Entra, shared by both targets. Endpoints are read from the issuer's discovery document, not built from this."

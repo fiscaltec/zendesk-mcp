@@ -84,7 +84,7 @@ A successful response carries `ttlMs: 300000` and `cacheScope: "private"` alongs
 
 ## Installing for End Users
 
-FISCAL staff point their MCP client at `https://zendesk-mcp.fiscaltec.com/mcp` (proposed hostname). They sign in with Microsoft, then connect their own Zendesk account through the one-time link the first Zendesk tool returns. [ACCESS.md](ACCESS.md) is the user-facing guide; keep it in step with any change to either sign-in.
+FISCAL staff point their MCP client at `https://zendesk-mcp.fiscaltec.com/mcp` (decided 2026-10-28; live once #3 lands). They sign in with Microsoft, then connect their own Zendesk account through the one-time link the first Zendesk tool returns. [ACCESS.md](ACCESS.md) is the user-facing guide; keep it in step with any change to either sign-in.
 
 ## GitHub issues (issue-driven work)
 
@@ -541,7 +541,7 @@ Zendesk ──302──> /zendesk/callback?code&state ──> exchange code ─�
 
 ### Account-wide feature switches
 
-`Zendesk:Features` — `AllowPublicReplies`, `AllowArticlePublishing`, `AllowHelpCenterStructureChanges`, `AllowMacroChanges`, `AllowUserAndOrganizationChanges`, all **off** by default — guard the actions whose effect reaches beyond the agent: customers' inboxes, the public Help Center (published articles, and categories and sections, which have no draft state), every agent's macros, who can read an organisation's tickets. `ToolJson.RequireFeature` refuses with a message naming the setting so the model reports a setting rather than retrying. They sit on top of the Entra tier and the agent's Zendesk role; they do not replace either.
+`Zendesk:Features` — `AllowPublicReplies`, `AllowArticlePublishing`, `AllowHelpCenterStructureChanges`, `AllowMacroChanges`, `AllowUserAndOrganizationChanges`, all **off** by default in the application and all **on** in FISCAL's deployment (Terraform defaults, decided 2026-10-28) — guard the actions whose effect reaches beyond the agent: customers' inboxes, the public Help Center (published articles, and categories and sections, which have no draft state), every agent's macros, who can read an organisation's tickets. `ToolJson.RequireFeature` refuses with a message naming the setting so the model reports a setting rather than retrying. They sit on top of the Entra tier and the agent's Zendesk role; they do not replace either.
 
 ### Untrusted content
 
@@ -605,7 +605,7 @@ xUnit v3 on **Microsoft.Testing.Platform** (not VSTest): `global.json` selects t
 
 ## Deployment
 
-The same shape as vitally-mcp — Azure Container Apps (production warm, staging scale-to-zero) in a VNet, private Key Vault and ACR, Application Insights behind AMPLS, GitHub Actions deploying through OIDC federated credentials, a staging gate and a release train — defined **greenfield** in `infra/terraform/` (see its README for the apply procedure and pending decisions) and `.github/workflows/`. Nothing has been applied yet.
+The same shape as vitally-mcp — Azure Container Apps (production warm, staging scale-to-zero) in a VNet, private Key Vault, the Vitally estate's private ACR **shared** (`vitallyproducruksouth`, repository `zendesk-mcp`; `infra/terraform/acr.tf` sets out the cross-estate write access that costs), Application Insights behind AMPLS, GitHub Actions deploying through OIDC federated credentials, a staging gate and a release train — defined **greenfield** in `infra/terraform/` (see its README for the apply procedure and pending decisions) and `.github/workflows/`. Nothing has been applied yet.
 
 ### Freezing deploys
 

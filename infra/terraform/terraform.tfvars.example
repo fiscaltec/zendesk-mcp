@@ -1,21 +1,9 @@
 # Copy to terraform.tfvars (gitignored) and fill in, OR supply each value as TF_VAR_<name>.
 # Everything not listed here has a default in variables.tf / entra.tf / keyvault.tf.
 
-# ---- Decided before the first apply (README.md, "Decisions pending") ----
-zendesk_subdomain       = "<subdomain, e.g. fiscaltec for https://fiscaltec.zendesk.com>"
-zendesk_oauth_client_id = "<unique identifier of the Zendesk OAuth client>"
-
-# Department groups admitted at sign-in (Gate 1), display name => object id.
-entra_gate1_group_object_ids = {
-  # "Customer Operations Department" = "00000000-0000-0000-0000-000000000000"
-}
-
 # Tag imported into the ACR for the first create (README.md, step 3). Ignored afterwards.
 image_tag         = "<tag>"
 staging_image_tag = "<tag>"
-
-# Public address of whoever runs terraform apply, for the CMK vault firewall.
-cmk_vault_allowed_ip_cidrs = ["<a.b.c.d/32>"]
 
 # ---- Secrets: prefer the environment over this file ----
 #   export TF_VAR_teams_webhook_url='…'

@@ -5,8 +5,8 @@ output "resource_group_name" {
 }
 
 output "acr_name" {
-  description = "The ACR — the repo-level GitHub variable ACR_NAME."
-  value       = azurerm_container_registry.acr.name
+  description = "The shared ACR (Vitally estate's) — the repo-level GitHub variable ACR_NAME."
+  value       = data.azurerm_container_registry.acr.name
 }
 
 output "key_vault_name" {

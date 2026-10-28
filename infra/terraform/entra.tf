@@ -34,8 +34,9 @@ data "azuread_service_principal" "msgraph" {
 # The department groups that gate sign-in (Gate 1), by object id rather than display name so they
 # are provably the intended groups and not merely same-named ones.
 #
-# NO DEFAULT, deliberately: which departments get the Zendesk MCP server is a decision still to be
-# made (README.md, "Decisions pending"), and the Vitally MCP server's nine are not assumed.
+# Decided 2026-10-28: only the IT & Security Department to begin with (the Vitally MCP server admits
+# nine; they are not assumed here). Its object id is the one vitally-mcp's entra.tf assigns. Add a
+# department by adding its group here AND nesting it into a sg-zendesk-* tier group (ACCESS.md).
 #
 # ⚠️ This map is the ONLY record of who can sign in, and an omission is an outage for that
 # department at its next sign-in (AADSTS50105). vitally-mcp's list drifted twice — both times a
@@ -44,6 +45,9 @@ data "azuread_service_principal" "msgraph" {
 variable "entra_gate1_group_object_ids" {
   type        = map(string)
   description = "Department groups assigned directly to the Zendesk MCP app for the sign-in gate, keyed by display name. The sole record of who can sign in."
+  default = {
+    "IT & Security Department" = "6ba9bf61-e959-4dd9-8a96-d477a35b0d03"
+  }
 }
 
 variable "entra_mcp_access_scope_id" {
@@ -110,8 +114,8 @@ resource "azuread_application" "zendesk_mcp" {
   # resource may not refer to its own attributes), and the two forms must not be mixed, hence the
   # ignore_changes on required_resource_access.
 
-  # The hostnames are still a proposal, so the OAuth origin variables are likely to be edited together.
-  # These refuse a combination that would register one thing and serve another.
+  # If the hostnames ever change, the OAuth origin variables must be edited together. These refuse a
+  # combination that would register one thing and serve another.
   lifecycle {
     ignore_changes = [required_resource_access]
 

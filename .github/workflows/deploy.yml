@@ -3,7 +3,7 @@ name: Deploy
 # Deploys the image to one of the Container Apps targets in `zendesk-prod-rg-uksouth`: `production`
 # (the default, `zendesk-prod-ca-uksouth`) or `staging` (`zendesk-staging-ca-uksouth`). The release
 # train calls it twice -- staging, then production with the digest staging was rolled to (the design
-# comes from vitally-mcp#171). The ACR (`zendeskproducruksouth`) has public network access
+# comes from vitally-mcp#171). The ACR (`vitallyproducruksouth`, shared with the Vitally MCP estate; images in its `zendesk-mcp` repository) has public network access
 # disabled, so the image cannot be built/pushed to it from a GitHub-hosted runner. Instead we build +
 # push to a private GHCR package, then `az acr import` (server-side, works with public access
 # disabled) pulls it into the private ACR, and `az containerapp update` rolls the app. OIDC auth as

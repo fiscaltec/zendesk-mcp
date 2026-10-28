@@ -15,17 +15,18 @@ cite `vitally-mcp#NNN` where a lesson was learned there.
 > linux_amd64, linux_arm64, windows_amd64, darwin_amd64 and darwin_arm64. Move them deliberately with
 > `terraform init -upgrade`, then re-run `terraform providers lock` with the same `-platform` list. `validate` checks syntax and provider schemas only: it does not reach Azure, so values
 > the API rejects (container `cpu`/`memory` pairs, SKUs, region availability) will first show at
-> `terraform plan`. Nothing has been planned or applied.
+> `terraform plan`. Nothing has been planned or applied. Re-validated on 2026-10-28 after the
+> decisions below (shared registry, CMK vault removed), with the same pinned providers.
 
 ## Layout
 | File | Contents |
 |---|---|
-| `providers.tf` | azurerm (~> 4.0) and azuread (~> 3.0) providers; remote state backend (partial configuration) |
+| `providers.tf` | azurerm (~> 4.0) and azuread (~> 3.0) providers; **local** state (no backend block) |
 | `variables.tf` | inputs — undecided values have **no default**, secrets are `sensitive` |
 | `network.tf` | the resource group, VNet, subnets (`snet-app`, `snet-pe`), NAT gateway + PIP, private DNS zones |
 | `identity.tf` | user-assigned managed identity, its role assignments, the GitHub federated credentials |
-| `keyvault.tf` | secret vault (private) + private endpoint + diagnostics; CMK vault (firewalled) + RSA key |
-| `acr.tf` | ACR (Premium, CMK, private) + private endpoint + diagnostics |
+| `keyvault.tf` | secret vault (private) + private endpoint + diagnostics |
+| `acr.tf` | the Vitally estate's ACR, **shared** (a data source) + this VNet's private endpoint onto it |
 | `monitoring.tf` | Log Analytics + Application Insights (private ingestion, local auth off) |
 | `ampls.tf` | Azure Monitor Private Link Scope, its subnet, DNS zones and private endpoint |
 | `diagnostics.tf` | Container Apps environment → Log Analytics (system and console logs) |
@@ -48,78 +49,78 @@ cite `vitally-mcp#NNN` where a lesson was learned there.
   Officer**; `identity.tf` sets out why one vault with that grant was preferred to two.
 - **One Entra app**, `Zendesk MCP`, serving both targets, plus three tier groups
   (`sg-zendesk-readers` / `-editors` / `-admins`) whose ids feed `Authorization__*GroupId`.
-- **Private ACR with CMK**, Log Analytics + Application Insights behind AMPLS, NAT egress, flow logs,
+- **No registry of its own.** Images go into the Vitally estate's private ACR, `vitallyproducruksouth`
+  (repository `zendesk-mcp`), through a second private endpoint from this VNet. `acr.tf` sets out the
+  cost: the deploy identity's Contributor on that registry can overwrite Vitally's images.
+- Its **own** Log Analytics + Application Insights behind AMPLS, NAT egress, flow logs,
   and a weekly Key Vault expiry scanner posting to Teams. The scanner skips per-person token secrets
   (tag `kind=zendesk-user-token`): their expiry is the refresh token's and heals itself — the person
   is offered a connect link and reconnects.
 
-## Decisions pending
-Each of these is a variable **without a default**, or a default that is only a proposal. Nothing
-should be applied until they are settled.
+## Decisions
+Settled on 2026-10-28 and committed as defaults, so a plan needs no further input on them:
 
-1. **Zendesk subdomain** — `zendesk_subdomain`.
-2. **Zendesk OAuth client** — `zendesk_oauth_client_id`, created in Admin Centre (step 0 below).
-3. **Gate 1 departments** — `entra_gate1_group_object_ids`. Which departments may sign in at all.
-   The Vitally MCP server's nine are deliberately not assumed.
-4. **Hostnames and DNS** — the defaults `https://zendesk-mcp.fiscaltec.com` and
-   `https://zendesk-mcp-staging.fiscaltec.com` are a proposal. They feed the Entra identifier URI and
-   redirect URIs, the Zendesk client's redirect URLs, both apps' OAuth settings and the GitHub
-   `PUBLIC_ORIGIN` variables, so change them before the first apply: the identifier URI is
-   effectively permanent once consent has been granted against it. Preconditions in `entra.tf`
-   refuse an inconsistent set.
-5. **Feature switches** — `zendesk_allow_*` and `staging_zendesk_allow_*` (all `false`): public
-   replies, article publishing, macro changes, user and organisation changes. Also whether staging
-   stays read-only (`staging_read_only`, default `true`).
-6. **Shared or separate monitoring and registry** — this configuration builds its own Log Analytics
-   workspace, Application Insights component and Premium ACR. Reusing the Vitally estate's would save
-   their fixed cost (the Premium ACR most of all) at the price of coupling two services' retention,
-   access and private-link scope.
-7. **Zendesk plan rate limit** — the account's API limit per minute depends on the Zendesk plan and
+| Decision | Value | Where |
+|---|---|---|
+| Zendesk subdomain | `fiscalsupport` | `zendesk_subdomain` |
+| Zendesk OAuth client | `fiscal_zendesk_mcp` (confidential, PKCE) | `zendesk_oauth_client_id` |
+| Gate 1 — who may sign in | IT & Security Department only, to begin with | `entra_gate1_group_object_ids` (`entra.tf`) |
+| Gate 2 — tier membership | IT & Security Department nested in `sg-zendesk-readers`; Dan Searle in all three tier groups | out-of-band, step 8 |
+| Hostnames | `https://zendesk-mcp.fiscaltec.com`, `https://zendesk-mcp-staging.fiscaltec.com` | `public_base_url` and friends |
+| Feature switches | all five **on**, on both targets (staging writes stay denied while `staging_read_only` is true) | `zendesk_allow_*`, `staging_zendesk_allow_*` |
+| AI Use Policy | Zendesk ticket data cleared for processing with Claude | — |
+| Monitoring | its own Log Analytics workspace and Application Insights component | `monitoring.tf` |
+| Container registry | **shared** with the Vitally estate (`vitallyproducruksouth`), accepting the cross-estate write access `acr.tf` describes | `acr_name`, `acr_resource_group_name` |
+| State | local, as the Vitally estate keeps it (`providers.tf` sets the handling rules) | — |
+| VNet range | `10.81.0.0/23`, confirmed free | `vnet_address_space` |
+
+Still open:
+
+1. **Zendesk plan rate limit** — the account's API limit per minute depends on the Zendesk plan and
    add-ons, and is shared by everyone connected (and by every other integration on the account).
    Confirm it before the analytics tools (which page through up to 2,000 tickets a call) are opened
    up widely.
-8. **State backend** — which storage account holds `zendesk-mcp.tfstate`. It must not be inside
-   `zendesk-prod-rg-uksouth`, which this configuration creates.
-9. **VNet address space** — `vnet_address_space` defaults to `10.81.0.0/23`, chosen not to overlap
-   the Vitally estate's `10.80.0.0/23`. Confirm against the network's address plan.
+2. **Audit retention** — how long `AppEvents` keeps tool arguments, which can name customers
+   (`monitoring.tf` sets the workspace retention).
+3. **The Teams webhook** for the expiry scanner (`TF_VAR_teams_webhook_url`).
 
 ## Prerequisites
 - Terraform >= 1.6, `az login` against subscription `282207c6-…` (IT-Production), tenant `75bd6050-…`.
 - The applying principal needs, **in Azure**: Owner on the subscription for the first apply (it
   creates the resource group and role assignments; Contributor + Role Based Access Control
-  Administrator also works), and Network Contributor on `NetworkWatcherRG` for the flow log. **In
+  Administrator also works), and Network Contributor on `NetworkWatcherRG` for the flow log. The
+  subscription-level role also covers the **shared registry** in `vitally-prod-rg-uksouth`: this
+  configuration assigns roles on it and approves a private endpoint onto it. **In
   Entra**: Application Administrator, Groups Administrator, and the right to assign the app's
   default role to groups. Through PIM, for the duration of the apply.
 - A Teams Workflows webhook for the scanner (`TF_VAR_teams_webhook_url`).
-- Your public IP for the CMK vault firewall (`cmk_vault_allowed_ip_cidrs`): creating the ACR's key is
-  a data-plane call that the trusted-services bypass does not cover.
 
 > ⚠️ Terraform persists the Entra client secret and the Teams webhook URL in **state**, even though
-> the variables are `sensitive`. The state account needs encryption, no public blob access and tight
-> RBAC. Never commit state or a filled-in `terraform.tfvars`.
+> the variables are `sensitive`. State is local (`infra/terraform/terraform.tfstate`, gitignored): apply
+> only from a FISCAL-managed machine with an encrypted disk, never commit or share the file, and hand
+> the current copy to whoever applies next. Never commit a filled-in `terraform.tfvars` either.
 
 ## Apply procedure
-The order matters because three things cannot exist until something else does: the **Entra client
-secret** needs the app registration; the **first image** needs the ACR; and both Container Apps need
-both (each refuses to plan without the secret, and cannot start without an image).
+The order matters because two things cannot exist until something else does: the **Entra client
+secret** needs the app registration, and the **first image** needs the private endpoint onto the
+shared ACR; and both Container Apps need both (each refuses to plan without the secret, and cannot start without an image).
 
-**0. Before Terraform — the Zendesk OAuth client.** In Zendesk Admin Centre → Apps and integrations
-→ APIs → OAuth clients → Add OAuth client:
-- Name `Zendesk MCP`; **Client kind: Confidential**.
+**0. Before Terraform — the Zendesk OAuth client.** It exists: `fiscal_zendesk_mcp`, created on
+2026-10-28 and used for the live validation. In Zendesk Admin Centre → Apps and integrations → APIs →
+OAuth clients, edit it:
+- **Client kind: Confidential** (it already is). Remove `http://localhost:5099/zendesk/callback`.
 - **Redirect URLs — both targets:**
   `https://zendesk-mcp.fiscaltec.com/zendesk/callback` and
   `https://zendesk-mcp-staging.fiscaltec.com/zendesk/callback`. One client serves both; a missing
   URL fails that target's connect flow at Zendesk.
 - Its **unique identifier** is `zendesk_oauth_client_id`.
-- The **secret** is shown once. Keep it for step 2 — it goes into Key Vault, never into Terraform.
+- **Regenerate the secret** (the current one was handled by hand during validation). It is shown once.
+  Keep it for step 2 — it goes into Key Vault, never into Terraform.
 
 **1. Init, plan, read the plan, then the foundation.**
 ```bash
 cd infra/terraform
-terraform init \
-  -backend-config="resource_group_name=<state RG>" \
-  -backend-config="storage_account_name=<state account>" \
-  -backend-config="container_name=tfstate"
+terraform init
 export TF_VAR_teams_webhook_url='…'
 # Plan to a file, read it line by line, and apply exactly that file. Everything should read as a
 # create, with the names, hostnames and groups you decided. (An untargeted plan stops at the
@@ -141,8 +142,8 @@ terraform plan -out=foundation.tfplan \
   -target=azurerm_federated_identity_credential.github_actions_staging
 terraform apply foundation.tfplan
 ```
-This creates the resource group, network, vaults, CMK key, ACR, identity and the Entra objects. If
-the CMK key fails with a 403, RBAC has not propagated yet — plan and apply again.
+This creates the resource group, network, vault, the private endpoint onto the shared ACR, the
+identity and its roles, and the Entra objects.
 
 **2. Secrets (out-of-band).**
 - Create the Entra client secret, 180-day expiry:
@@ -165,11 +166,12 @@ the CMK key fails with a 403, RBAC has not propagated yet — plan and apply aga
   apps as `entra-oauth-client-secret`; the vault copy is the record, not a reference.
 
 **3. The first image.** `deploy.yml` rolls an *existing* app, so the first image is imported by hand.
-Build from `main` and push to GHCR, then import server-side (ACR public access is off):
+Build from `main` and push to GHCR, then import server-side into the shared ACR (public access is
+off). Name the `zendesk-mcp` repository explicitly: the registry also holds `vitally-mcp`.
 ```bash
 tag="sha-$(git rev-parse --short HEAD)"
 docker build -t ghcr.io/fiscaltec/zendesk-mcp:$tag . && docker push ghcr.io/fiscaltec/zendesk-mcp:$tag
-az acr import --name zendeskproducruksouth --source ghcr.io/fiscaltec/zendesk-mcp:$tag \
+az acr import --name vitallyproducruksouth --source ghcr.io/fiscaltec/zendesk-mcp:$tag \
   --image zendesk-mcp:$tag --username <github user> --password <PAT with read:packages>
 ```
 Set `image_tag` and `staging_image_tag` to `$tag`. If the GHCR package was created by this push,
@@ -209,11 +211,17 @@ create managed certificates, which is why this is out-of-band. If a later plan p
 binding, add it to that app's `ignore_changes` rather than applying.
 
 **8. Tier membership.** Nest each admitted department group into one `sg-zendesk-*` group (Gate 2)
-— see `ACCESS.md`. Gate 1 (`entra_gate1_group_object_ids`) must name the department groups
+— see `ACCESS.md`. As decided, the IT & Security Department reads, and Dan Searle holds every tier
+(tiers are cumulative, so `sg-zendesk-admins` alone would do; all three keeps the record explicit):
+```bash
+az ad group member add --group sg-zendesk-readers --member-id 6ba9bf61-e959-4dd9-8a96-d477a35b0d03
+me=$(az ad user show --id dsearle@fiscaltec.com --query id -o tsv)
+for g in readers editors admins; do az ad group member add --group "sg-zendesk-$g" --member-id "$me"; done
+``` Gate 1 (`entra_gate1_group_object_ids`) must name the department groups
 **directly**: the app-assignment gate ignores nesting, so assigning a tier group would admit only its
 direct members.
 
-**9. GitHub.** Repo variables `ACR_NAME=zendeskproducruksouth`,
+**9. GitHub.** Repo variables `ACR_NAME=vitallyproducruksouth`,
 `RESOURCE_GROUP=zendesk-prod-rg-uksouth`, `IMAGE_NAME=zendesk-mcp`; repo secrets `AZURE_CLIENT_ID`
 (`managed_identity_client_id`), `AZURE_TENANT_ID`, `AZURE_SUBSCRIPTION_ID`. Environments
 `production` and `staging`, each with `CONTAINER_APP` (`zendesk-prod-ca-uksouth` /
@@ -234,13 +242,13 @@ Each target needs a federated credential on the managed identity whose subject i
 Container App (`identity.tf`), and `CONTAINER_APP` + `PUBLIC_ORIGIN` as environment-scoped GitHub
 variables. The identity also holds `ContainerApp Reader` on the resource group, so the train can tell
 a missing staging app from a failed lookup. Deploys build to GHCR and `az acr import` by digest into
-the private ACR.
+the shared private ACR.
 
 ## Known limitations
 - **Managed certificates and DNS** are out-of-band (step 7).
 - **Secret values** — the Zendesk OAuth client secret, the Entra client secret's vault copy and every
   per-person token live only in Key Vault; Terraform manages none of them.
-- **CMK key management** needs the runner's address in `cmk_vault_allowed_ip_cidrs` for every plan
-  that refreshes the key, not only the first.
+- **The registry belongs to the Vitally estate.** Its CMK, retention and diagnostics are managed in
+  fiscaltec/vitally-mcp; a change there (a rename, a network rule, a purge task) reaches this estate.
 - **Graph app permission and admin consent** are out-of-band (steps 5–6), deliberately: both need a
   more privileged principal than routine applies should run as.

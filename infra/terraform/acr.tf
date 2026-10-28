@@ -1,29 +1,30 @@
-resource "azurerm_container_registry" "acr" {
-  name                          = var.acr_name
-  resource_group_name           = azurerm_resource_group.rg.name
-  location                      = var.location
-  sku                           = "Premium" # private endpoints and CMK both need Premium
-  admin_enabled                 = false
-  public_network_access_enabled = false
-  # Trusted Azure services through with public access off, as in the Vitally estate (it keeps ACR
-  # Tasks usable). Images arrive by `az acr import` — deploy.yml, and the first image in the apply
-  # procedure — which runs server-side and needs no data-plane path from the caller.
-  network_rule_bypass_option = "AzureServices"
-
-  identity {
-    type         = "UserAssigned"
-    identity_ids = [azurerm_user_assigned_identity.app.id]
-  }
-
-  # Customer-managed key encryption (versionless key id = auto-rotation).
-  encryption {
-    key_vault_key_id   = azurerm_key_vault_key.acr_cmk.versionless_id
-    identity_client_id = azurerm_user_assigned_identity.app.client_id
-  }
-
-  depends_on = [azurerm_role_assignment.mi_cmk_crypto]
+# The registry is the Vitally MCP estate's, `vitallyproducruksouth` in `vitally-prod-rg-uksouth`,
+# SHARED rather than duplicated (decided 2026-10-28). This configuration does not manage it: it adds
+# a private endpoint into this VNet, and grants this estate's identity the roles it needs on it.
+# Images live in their own repository, `zendesk-mcp`, beside Vitally's `vitally-mcp`.
+#
+# ⚠️ THE COST OF SHARING, accepted with the decision: `az acr import` needs Contributor on the
+# REGISTRY (AcrPush lacks importImage, and ACR cannot scope that action to one repository), so this
+# estate's identity — the apps' runtime identity as well as the deploy identity — can overwrite
+# Vitally's tags. A Container App re-resolves its tag when a replica starts, and Vitally's staging
+# scales to zero, so an overwritten `vitally-mcp` tag would be served at its next cold start. A
+# compromise of this estate's identity therefore reaches the Vitally MCP server's code. The
+# alternative is a Premium registry of this estate's own (about £40 a month); acr.tf in git history
+# before this change built one, with CMK, and could be restored as it was.
+#
+# Vitally's Terraform owns the registry itself, its CMK, its diagnostics and its own private
+# endpoint. None of what is added here is an attribute of the registry resource, so neither
+# configuration plans changes to the other's objects.
+data "azurerm_container_registry" "acr" {
+  name                = var.acr_name
+  resource_group_name = var.acr_resource_group_name
 }
 
+# A second private endpoint onto the same registry, from this VNet. The Vitally endpoint registers
+# in the Vitally estate's privatelink.azurecr.io zone, linked only to its VNet; this one registers in
+# this estate's zone (network.tf), linked only to this VNet, so each estate resolves the registry to
+# its own endpoint. `is_manual_connection = false` approves the connection on creation, which needs
+# the applying principal to hold rights on the registry (README.md, Prerequisites).
 resource "azurerm_private_endpoint" "acr" {
   name                = "${var.name_prefix}-pe-acr-uksouth"
   resource_group_name = azurerm_resource_group.rg.name
@@ -32,7 +33,7 @@ resource "azurerm_private_endpoint" "acr" {
 
   private_service_connection {
     name                           = "acr-conn"
-    private_connection_resource_id = azurerm_container_registry.acr.id
+    private_connection_resource_id = data.azurerm_container_registry.acr.id
     subresource_names              = ["registry"]
     is_manual_connection           = false
   }
@@ -40,14 +41,4 @@ resource "azurerm_private_endpoint" "acr" {
     name                 = "acr-zg"
     private_dns_zone_ids = [azurerm_private_dns_zone.acr.id]
   }
-}
-
-resource "azurerm_monitor_diagnostic_setting" "acr" {
-  name                       = "to-law"
-  target_resource_id         = azurerm_container_registry.acr.id
-  log_analytics_workspace_id = azurerm_log_analytics_workspace.law.id
-
-  enabled_log { category = "ContainerRegistryRepositoryEvents" }
-  enabled_log { category = "ContainerRegistryLoginEvents" }
-  enabled_metric { category = "AllMetrics" }
 }

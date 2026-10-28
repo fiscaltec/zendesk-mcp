@@ -12,14 +12,14 @@ It is built to the same standard as FISCAL's [Vitally MCP server](https://github
 
 - **44 tools** — tickets (search, count, read, create, update, conversation, attachments), KPI and SLA reporting (metrics summary, SLA summary, SLA queue, CSAT), macros (search, preview, apply, create, update, activate), users and organisations, ticket fields/forms/triggers/brands, and the Help Center (articles, translations, categories, sections, segments, permission groups, images, export). See [Tool catalogue](#tool-catalogue).
 - **Every call is made as you.** Each person connects their own Zendesk account once (per-user Zendesk OAuth). Ticket updates, comments and macro use are attributed to the agent who asked for them, and Zendesk's own role, group and brand restrictions apply on top of this server's permissions. There is no shared Zendesk service account.
-- **Two layers of permission.** Your Entra group decides which tools you see and may call (`zendesk:read` / `zendesk:write`); your Zendesk role decides what Zendesk lets that agent do. Account-wide switches (public replies, article publishing, macro changes, user and organisation changes) are off by default.
+- **Two layers of permission.** Your Entra group decides which tools you see and may call (`zendesk:read` / `zendesk:write`); your Zendesk role decides what Zendesk lets that agent do. Account-wide switches (public replies, article publishing, Help Center structure, macro changes, user and organisation changes) are off by default in the application; FISCAL's deployment turns all five on.
 - **Per-user audit trail** in Application Insights, keyed on your Entra object id — including reads, which Zendesk does not log.
 - **Prompt-injection guards.** Ticket and article content is untrusted: write tools say so to the model, `brand_url` and attachment URLs can only ever reach this account's own Zendesk hosts (so a URL planted in a ticket cannot carry your token away), and free-text search can only match words, never rewrite a filter.
 - **Rate-limit aware** — retries `429`s honouring `Retry-After` and warns as Zendesk's per-account budget runs low.
 
 ## Using the server (FISCAL users)
 
-Point your MCP client at (proposed hostname, pending DNS):
+Point your MCP client at (live once DNS and staging validation are done):
 
 ```
 https://zendesk-mcp.fiscaltec.com/mcp
@@ -138,14 +138,9 @@ Everything vitally-mcp documents about the Entra façade, live group RBAC, the `
 
 ## Before production
 
-Pending decisions and validation, also listed in [`infra/terraform/README.md`](infra/terraform/README.md):
+The decisions are settled (2026-10-28) and recorded in [`infra/terraform/README.md`](infra/terraform/README.md#decisions): subdomain `fiscalsupport`, the `fiscal_zendesk_mcp` OAuth client, IT & Security as the only department admitted to begin with, the hostnames above, all five feature switches on, Zendesk ticket data cleared under the AI Use Policy, and the Vitally estate's container registry shared. Still open: the Zendesk plan's API rate limit, audit retention for tool arguments, and the scanner's Teams webhook.
 
-1. Confirm the Zendesk subdomain and create the Zendesk OAuth client (redirect URLs for both targets).
-2. Decide which departments may sign in (Gate 1) and who goes in `sg-zendesk-readers` / `-editors` / `-admins`.
-3. Confirm the hostnames and DNS.
-4. Decide the feature switches for production.
-5. Confirm that Zendesk ticket data is cleared for processing under the AI Use Policy, and the audit-trail retention for tool arguments that may contain customer names.
-6. Apply the Terraform to a reviewed plan, deploy to staging, and run the staging validation in [CLAUDE.md](CLAUDE.md#staging-validation): every tool against the real tenant, now as an ordinary agent rather than an admin, plus the endpoints still marked *unverified against the live API* in code.
+1. Apply the Terraform to a reviewed plan, deploy to staging, and run the staging validation in [CLAUDE.md](CLAUDE.md#staging-validation): every tool against the real tenant, now as an ordinary agent rather than an admin, plus the endpoints still marked *unverified against the live API* in code.
 
 ## Licence
 

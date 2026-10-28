@@ -95,7 +95,7 @@ resource "azurerm_container_app" "app" {
   }
 
   registry {
-    server   = azurerm_container_registry.acr.login_server
+    server   = data.azurerm_container_registry.acr.login_server
     identity = azurerm_user_assigned_identity.app.id
   }
 
@@ -140,7 +140,7 @@ resource "azurerm_container_app" "app" {
 
     container {
       name   = "zendesk-mcp"
-      image  = "${azurerm_container_registry.acr.login_server}/zendesk-mcp:${var.image_tag}"
+      image  = "${data.azurerm_container_registry.acr.login_server}/zendesk-mcp:${var.image_tag}"
       cpu    = 0.5
       memory = "1Gi"
 

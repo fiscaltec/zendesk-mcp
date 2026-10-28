@@ -2,8 +2,9 @@
 
 How to connect to the Zendesk MCP server, and how access is granted.
 
-> **Not yet live.** The hostname below is the proposed one, and the department list and group
-> object ids are filled in once the Entra objects exist (`infra/terraform/entra.tf` outputs them).
+> **Not yet live.** The hostname below is decided but not yet serving (it goes live with staging,
+> issue #3). The group object ids are filled in once the Entra objects exist (`infra/terraform/entra.tf`
+> outputs them).
 
 ## Connecting
 
@@ -84,7 +85,9 @@ switches also apply to everyone, whatever their tier:
 | Macro changes | creating, editing, activating and deactivating macros |
 | User and organisation changes | creating end users from an email address, organisation memberships |
 
-All five are **off** until the Infrastructure team turns them on (`Zendesk__Features__*`).
+All five are **on** in FISCAL's deployment (decided 2026-10-28), so what limits these actions is your
+tier and your Zendesk role. The Infrastructure team can turn any of them off again
+(`Zendesk__Features__*`; the `zendesk_allow_*` Terraform variables).
 
 Group object ids (filled in from Terraform outputs once created):
 
@@ -98,8 +101,9 @@ Group object ids (filled in from Terraform outputs once created):
 
 Before a tier applies you must be able to **authenticate**. Sign-in is gated by the Entra enterprise
 application **Zendesk MCP**: only users whose **department group** is assigned to it can sign in.
-Which departments are assigned is a decision still to be made (`entra_gate1_group_object_ids` in
-`infra/terraform/entra.tf`).
+To begin with, only the **IT & Security Department** is assigned (`entra_gate1_group_object_ids` in
+`infra/terraform/entra.tf`, decided 2026-10-28). Its members get the read tier through
+`sg-zendesk-readers`; other departments are added by the procedure below.
 
 > **Direct assignment only.** The app requires assignment (`appRoleAssignmentRequired = true`),
 > and Entra honours only **direct** members of an assigned group for sign-in — nested groups do not
@@ -168,6 +172,6 @@ instead — vitally-mcp's ACCESS.md explains why `ReadOnly` misbehaves during a 
   the tier used, the outcome and a correlation id. Records go to Application Insights `AppEvents`.
   Zendesk response bodies are never recorded. Zendesk's own audit log separately shows every change
   under your agent's name.
-- **Hosting:** Azure Container Apps + Azure Key Vault, proposed hostname `zendesk-mcp.fiscaltec.com`.
+- **Hosting:** Azure Container Apps + Azure Key Vault, hostname `zendesk-mcp.fiscaltec.com` (staging: `zendesk-mcp-staging.fiscaltec.com`).
 
 Group membership is managed in Entra by the IT & Security team. Questions: contact the Infrastructure team.

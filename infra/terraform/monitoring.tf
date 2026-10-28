@@ -1,6 +1,8 @@
 # A Log Analytics workspace and Application Insights component of this estate's own. Sharing the
 # Vitally estate's instead would save their fixed cost but couple two services' retention, access
-# and AMPLS scope — an open decision (README.md, "Decisions pending").
+# and AMPLS scope, so this estate keeps its own (decided 2026-10-28) while sharing the registry.
+# Retention is 30 days; how long tool arguments, which can name customers, should be kept is still
+# open (README.md, "Decisions").
 
 resource "azurerm_log_analytics_workspace" "law" {
   name                = "${var.name_prefix}-law-uksouth"

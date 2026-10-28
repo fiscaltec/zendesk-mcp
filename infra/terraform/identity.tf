@@ -1,5 +1,5 @@
 # User-assigned managed identity: the runtime identity of both Container Apps and the scanner Job,
-# the ACR's CMK identity, and the GitHub Actions deploy identity (federated credentials below).
+# and the GitHub Actions deploy identity (federated credentials below).
 resource "azurerm_user_assigned_identity" "app" {
   name                = "${var.name_prefix}-id-uksouth"
   resource_group_name = azurerm_resource_group.rg.name
@@ -33,17 +33,11 @@ resource "azurerm_role_assignment" "mi_kv_secrets_officer" {
   principal_id         = azurerm_user_assigned_identity.app.principal_id
 }
 
-# Runtime: pull the container image.
+# Runtime: pull the container image from the shared registry (acr.tf). AcrPull is registry-wide, so
+# this also reads Vitally's images; reading them is not the risk — the Contributor grant below is.
 resource "azurerm_role_assignment" "mi_acr_pull" {
-  scope                = azurerm_container_registry.acr.id
+  scope                = data.azurerm_container_registry.acr.id
   role_definition_name = "AcrPull"
-  principal_id         = azurerm_user_assigned_identity.app.principal_id
-}
-
-# ACR CMK: wrap/unwrap the customer-managed key in the dedicated CMK vault.
-resource "azurerm_role_assignment" "mi_cmk_crypto" {
-  scope                = azurerm_key_vault.cmk.id
-  role_definition_name = "Key Vault Crypto Service Encryption User"
   principal_id         = azurerm_user_assigned_identity.app.principal_id
 }
 
@@ -95,8 +89,12 @@ resource "azurerm_federated_identity_credential" "github_actions_staging" {
 
 # Deploy: `az acr import` the built image into the private ACR. AcrPush does NOT include the
 # importImage action, so the deploy identity needs Contributor on the registry.
+#
+# ⚠️ The registry is SHARED with the Vitally MCP estate, so this is Contributor over Vitally's images
+# too — see acr.tf for what that exposes and why it was accepted. Creating it needs the applying
+# principal to be able to assign roles on the Vitally estate's registry.
 resource "azurerm_role_assignment" "mi_acr_contributor" {
-  scope                = azurerm_container_registry.acr.id
+  scope                = data.azurerm_container_registry.acr.id
   role_definition_name = "Contributor"
   principal_id         = azurerm_user_assigned_identity.app.principal_id
 }
