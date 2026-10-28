@@ -53,11 +53,11 @@ public static class HelpCenterMediaTools
             throw new ArgumentException($"file_size must be between 1 and {MaxImageBytes} bytes (got {file_size}).");
         }
 
-        // Unverified against the live API (docs-checked, not live-tested): the request body
-        // ({content_type, file_size}) matches the documentation, but the documentation gives the
-        // response two ways: its prose puts headers beside upload_url as an object, its example puts
-        // them inside upload_url as a JSON-encoded string. Both are read, and an upload whose headers
-        // cannot be read is refused rather than handed out without them (the URL is signed over them).
+        // Confirmed against the live API: the request body is {content_type, file_size} and the answer
+        // is {upload_url: {asset_upload_id, url, headers}} with headers a JSON-encoded string, as the
+        // documentation's example shows (its prose puts them beside upload_url as an object, which is
+        // read too). An upload whose headers cannot be read is refused rather than handed out without
+        // them, because the URL is signed over them.
         var response = await zendesk.PostAsync(
             "/api/v2/guide/medias/upload_url",
             new JsonObject { ["content_type"] = content_type, ["file_size"] = file_size },
@@ -116,9 +116,8 @@ public static class HelpCenterMediaTools
         HelpCenterJson.Text(alt_text, "alt_text", 500);
         var alt = string.IsNullOrWhiteSpace(alt_text) ? validFilename : alt_text;
 
-        // Unverified against the live API (docs-checked, not live-tested): the request body
-        // {asset_upload_id, filename} and the answer {media: {id, url, name, content_type, size, ...}}
-        // match the documentation.
+        // Confirmed against the live API: the request body {asset_upload_id, filename} and the answer
+        // {media: {id, url (a relative /guide-media/… path), name, content_type, size, ...}}.
         var response = await zendesk.PostAsync(
             "/api/v2/guide/medias",
             new JsonObject { ["asset_upload_id"] = uploadId, ["filename"] = validFilename },

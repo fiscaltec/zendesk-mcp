@@ -549,9 +549,8 @@ public static class MacrosTools
         ticketBody["safe_update"] = true;
         ticketBody["updated_stamp"] = current["updated_at"]?.DeepClone();
 
-        // Unverified against the live API (docs-checked, not live-tested): Zendesk documents macro_ids
-        // as a write-only ticket property recorded in the audit, not as a creation-only one; it is sent
-        // on this update in the expectation that it is honoured.
+        // macro_ids is honoured on an update: the audit records an AgentMacroReference for the macro
+        // (confirmed against the live API).
         ticketBody["macro_ids"] = new JsonArray(macro_id);
 
         var response = await zendesk.PutAsync($"/api/v2/tickets/{Id(ticket_id)}", new JsonObject { ["ticket"] = ticketBody }, cancellationToken: cancellationToken);

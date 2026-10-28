@@ -6,7 +6,7 @@ It is built to the same standard as FISCAL's [Vitally MCP server](https://github
 
 [![CI](https://github.com/fiscaltec/zendesk-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/fiscaltec/zendesk-mcp/actions/workflows/ci.yml)
 
-> **Status: built, not yet deployed.** The Azure estate in `infra/terraform/` is greenfield and has not been applied (it passes `terraform validate`). The Zendesk endpoints were implemented from the API documentation; every read tool has since been run against FISCAL's Zendesk in read-only mode and corrected where it differed, but the write tools and per-user sign-in have not been tried against a tenant. Staging validation is the next step — see [Before production](#before-production).
+> **Status: built, not yet deployed.** The Azure estate in `infra/terraform/` is greenfield and has not been applied (it passes `terraform validate`). The Zendesk endpoints were implemented from the API documentation; every read tool, and the ticket, attachment, macro-apply and Help Center image writes on a test ticket, have since been run against FISCAL's Zendesk and corrected where they differed. The remaining write tools and per-user sign-in have not been tried against a tenant. Staging validation is the next step — see [Before production](#before-production).
 
 ## Features
 
@@ -145,7 +145,7 @@ Pending decisions and validation, also listed in [`infra/terraform/README.md`](i
 3. Confirm the hostnames and DNS.
 4. Decide the feature switches for production.
 5. Confirm that Zendesk ticket data is cleared for processing under the AI Use Policy, and the audit-trail retention for tool arguments that may contain customer names.
-6. Apply the Terraform to a reviewed plan, deploy to staging, and run the staging validation in [CLAUDE.md](CLAUDE.md#staging-validation): every tool against the real tenant — the write tools above all, since only the reads have been checked live — plus the endpoints still marked *unverified against the live API* in code.
+6. Apply the Terraform to a reviewed plan, deploy to staging, and run the staging validation in [CLAUDE.md](CLAUDE.md#staging-validation): every tool against the real tenant — above all the write tools not yet checked live (macro, article, category, section and organisation changes) — plus the endpoints still marked *unverified against the live API* in code.
 
 ## Licence
 

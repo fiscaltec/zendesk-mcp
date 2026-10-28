@@ -53,7 +53,8 @@ public class HelpCenterMediaToolsTests
     }
 
     [Theory]
-    // The two forms Zendesk's documentation gives: headers beside upload_url, and inside it as a JSON string.
+    // The two forms Zendesk's documentation gives: headers beside upload_url, and inside it as a JSON
+    // string. The live API sends the second.
     [InlineData("""{"headers":{"Content-Type":"image/png","X-Amz-Server-Side-Encryption":"AES256"},"upload_url":{"url":"https://uploads.example-storage.com/abc","asset_upload_id":"up-1"}}""")]
     [InlineData("""{"upload_url":{"asset_upload_id":"up-1","headers":"{\"Content-Type\":\"image/png\",\"X-Amz-Server-Side-Encryption\":\"AES256\"}","url":"https://uploads.example-storage.com/abc"}}""")]
     public async Task RequestUpload_ReadsEitherDocumentedHeaderForm(string response)
