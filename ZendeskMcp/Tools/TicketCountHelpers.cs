@@ -19,12 +19,15 @@ public static class TicketCountHelpers
     /// <summary>Most counts one call will run; each is a search request made as the caller.</summary>
     public const int MaxGroupValues = 200;
 
-    // Unverified against the live API: the exact set of values the `via:` search keyword accepts.
-    // These are the channel names Zendesk reports in via.channel.
-    public static readonly string[] Channels =
+    // The channel names Zendesk reports in via.channel, each with the value the `via:` search keyword
+    // takes for it. Confirmed against the live API: every value here is accepted, except that the email
+    // channel is searched as via:mail (via:email is refused as invalid). An unknown value is refused
+    // outright, so a wrong one fails the whole breakdown rather than counting zero.
+    public static readonly (string Channel, string SearchValue)[] Channels =
     [
-        "email", "web", "api", "voice", "native_messaging", "chat", "mobile", "mobile_sdk", "sms",
-        "facebook", "twitter", "whatsapp", "web_widget",
+        ("email", "mail"), ("web", "web"), ("api", "api"), ("voice", "voice"), ("native_messaging", "native_messaging"),
+        ("chat", "chat"), ("mobile", "mobile"), ("mobile_sdk", "mobile_sdk"), ("sms", "sms"), ("facebook", "facebook"),
+        ("twitter", "twitter"), ("whatsapp", "whatsapp"), ("web_widget", "web_widget"),
     ];
 
     /// <summary>One value of the grouped dimension.</summary>
@@ -73,20 +76,22 @@ public static class TicketCountHelpers
                 return new GroupPlan(Fixed("ticket_type", ["question", "incident", "problem", "task"]), false, "(none)", []);
 
             case "channel":
-                return new GroupPlan(Fixed("via", Channels), true, "(other)", []);
+                return new GroupPlan(
+                    Channels.Select(c => new GroupValue(JsonValue.Create(c.Channel), c.Channel, $"via:{c.SearchValue}")).ToList(),
+                    true, "(other)", []);
 
             case "satisfaction":
             {
-                // Unverified against the live API: the with-comment keywords (goodwithcomment,
-                // badwithcomment), and that satisfaction:good includes the good ratings with a
-                // comment. The with-comment values are treated as subsets so the remainder is not
-                // double-counted.
+                // Confirmed against the live API: the four rating keywords are disjoint.
+                // satisfaction:good matches only good ratings without a comment and
+                // satisfaction:goodwithcomment only those with one (likewise bad), so every value
+                // counts towards the total and the CSAT summary adds each pair.
                 var values = new List<GroupValue>
                 {
-                    new(JsonValue.Create("good"), "good", "satisfaction:good"),
-                    new(JsonValue.Create("good_with_comment"), "good_with_comment", "satisfaction:goodwithcomment", InSum: false),
-                    new(JsonValue.Create("bad"), "bad", "satisfaction:bad"),
-                    new(JsonValue.Create("bad_with_comment"), "bad_with_comment", "satisfaction:badwithcomment", InSum: false),
+                    new(JsonValue.Create("good"), "good (no comment)", "satisfaction:good"),
+                    new(JsonValue.Create("good_with_comment"), "good_with_comment", "satisfaction:goodwithcomment"),
+                    new(JsonValue.Create("bad"), "bad (no comment)", "satisfaction:bad"),
+                    new(JsonValue.Create("bad_with_comment"), "bad_with_comment", "satisfaction:badwithcomment"),
                     new(JsonValue.Create("offered"), "offered", "satisfaction:offered"),
                     new(JsonValue.Create("unoffered"), "unoffered", "satisfaction:unoffered"),
                 };
@@ -187,8 +192,8 @@ public static class TicketCountHelpers
         long CountOf(string key) =>
             plan.Values.Select((v, i) => (v, i)).Where(p => ToolJson.String(p.v.Key) == key).Select(p => counts[p.i]).FirstOrDefault();
 
-        var good = CountOf("good");
-        var bad = CountOf("bad");
+        var good = CountOf("good") + CountOf("good_with_comment");
+        var bad = CountOf("bad") + CountOf("bad_with_comment");
         return new JsonObject
         {
             ["rated"] = good + bad,
@@ -247,6 +252,7 @@ public static class TicketCountHelpers
 
             case "checkbox":
                 // Unverified against the live API: searching a checkbox field as custom_field_<id>:true / :false.
+                // The validation account has no checkbox ticket field.
                 return new GroupPlan(
                 [
                     new GroupValue(JsonValue.Create("true"), "checked", $"{term}:true"),
@@ -279,7 +285,8 @@ public static class TicketCountHelpers
         // Date-only search terms are read in a time zone, so the buckets are reported in the connected
         // person's own Zendesk time zone, which is what they see in the agent interface.
         // Unverified against the live API: that search reads date-only terms in the user's time zone
-        // rather than the account's.
+        // rather than the account's. In the validation account both are Europe/London and no ticket
+        // fell in an hour where London and UTC days differ, so the live check could not tell.
         var me = await zendesk.GetAsync("/api/v2/users/me", cancellationToken: cancellationToken);
         var timeZone = ToolJson.String(me["user"]?["time_zone"]);
         var ianaTimeZone = ToolJson.String(me["user"]?["iana_time_zone"]);

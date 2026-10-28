@@ -236,12 +236,31 @@ public class TicketsToolsTests
     }
 
     [Fact]
+    public async Task CountTickets_GroupByChannel_SearchesEmailAsMail()
+    {
+        // Live, via:email is refused as an invalid search; the email channel is via:mail.
+        using var fake = TestHelpers.CreateFakeZendesk(r => r.Query("query")!.Split(' ').Last() switch
+        {
+            "via:email" => FakeResponse.WithStatus(System.Net.HttpStatusCode.BadRequest, """{"error":"invalid","description":"Invalid search"}"""),
+            "via:mail" => Count(7),
+            "via:web" => Count(3),
+            "type:ticket" => Count(10),
+            _ => Count(0),
+        });
+        var result = JsonNode.Parse(await TicketsTools.CountTickets(TestHelpers.BuildZendeskService(fake.Client), group_by: "channel"))!;
+
+        var groups = result["groups"]!.AsArray();
+        groups.Select(g => g!["key"]?.GetValue<string>()).Should().Equal("email", "web");
+        groups[0]!["count"]!.GetValue<long>().Should().Be(7);
+    }
+
+    [Fact]
     public async Task CountTickets_GroupBySatisfaction_AddsCsat()
     {
         var counts = new Dictionary<string, long>
         {
             ["satisfaction:good"] = 8, ["satisfaction:goodwithcomment"] = 3, ["satisfaction:bad"] = 2,
-            ["satisfaction:badwithcomment"] = 1, ["satisfaction:offered"] = 5, ["satisfaction:unoffered"] = 5,
+            ["satisfaction:badwithcomment"] = 1, ["satisfaction:offered"] = 5, ["satisfaction:unoffered"] = 1,
         };
         using var fake = TestHelpers.CreateFakeZendesk(r =>
         {
@@ -251,9 +270,11 @@ public class TicketsToolsTests
         });
         var result = JsonNode.Parse(await TicketsTools.CountTickets(TestHelpers.BuildZendeskService(fake.Client), group_by: "satisfaction"))!;
 
-        result["csat"]!["rated"]!.GetValue<long>().Should().Be(10);
-        result["csat"]!["score_pct"]!.GetValue<double>().Should().Be(80.0);
-        result["groups"]!.AsArray().Should().HaveCount(6, "with-comment counts are subsets, so good+bad+offered+unoffered = total and there is no remainder");
+        // Live, the rating keywords are disjoint: good is good without a comment.
+        result["csat"]!["rated"]!.GetValue<long>().Should().Be(14);
+        result["csat"]!["good"]!.GetValue<long>().Should().Be(11);
+        result["csat"]!["score_pct"]!.GetValue<double>().Should().Be(78.6);
+        result["groups"]!.AsArray().Should().HaveCount(6, "the six values partition the total, so there is no remainder");
     }
 
     [Fact]
