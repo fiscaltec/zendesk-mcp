@@ -650,7 +650,7 @@ Where each step stands, mapped to its issue (2026-10-28):
 
 | Step | State | Issue |
 |---|---|---|
-| Staging itself | not applied; blocked on decisions recorded in the issue | #3 |
+| Staging itself | not built yet; decisions recorded, build runbook ready (`docs/runbooks/build-the-estate.md`) | #3 |
 | 1 — sign-in, connect, mismatched login refused and revoked | not exercised; becomes a standing runbook, `docs/runbooks/zendesk-oauth-staging-validation.md`, modelled on vitally-mcp's `entra-cutover-staging-validation.md` | #4 |
 | 2 — every read and write tool | **done live** with a development token (PR #1), as an **admin**; repeating the reads as an ordinary agent is open | #6 |
 | 3 — `Unverified` markers | read-side settled; eight remain that need data the account lacks | #7 |
