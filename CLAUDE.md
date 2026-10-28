@@ -4,18 +4,20 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-This is a Model Context Protocol (MCP) server implementation in C# that provides full CRUD access to the Vitally customer success platform. The server is a **remote HTTP MCP server** whose OAuth façade is built for Microsoft Entra directly; users connect to it by URL rather than installing a binary. **Both targets authenticate against Entra directly, and Entra is the only identity provider.** vitally-mcp#108 merged the cutover code on 2026-09-03 and the production configuration flip was applied on 2026-09-16; staging had run Entra since 2026-09-03. The previous provider's objects were retained as a rollback through the soak; vitally-mcp#156 abandoned that rollback, removed every reference to it from this repository and from both Container Apps, and **deleted the tenant objects on 2026-09-22** — the client, both Resource Servers and the post-login Action. There is nothing to roll back to. Read the provider off the live metadata (`curl https://vitally.fiscaltec.com/.well-known/oauth-authorization-server | jq .jwks_uri`) rather than trusting this file: it asserted the wrong state for twelve days once already, in the other direction.
+A Model Context Protocol (MCP) server in C# giving FISCAL staff access to Zendesk Support and the Help Center. It is built to the standard of [fiscaltec/vitally-mcp](https://github.com/fiscaltec/vitally-mcp) — the same host, OAuth façade, RBAC, audit, telemetry, CI/CD and Azure shape, ported rather than reinvented — and reproduces the functionality of Swifteq's hosted Zendesk MCP server.
+
+**Status: built, not deployed.** The Azure estate in `infra/terraform/` is greenfield and has not been applied; the Zendesk endpoints were written from the API documentation with no tenant to test against (code marks each uncertain one `// Unverified against the live API`). See *Staging validation* before trusting any tool against production.
+
+**Provenance.** Issue references written `vitally-mcp#NNN` point at fiscaltec/vitally-mcp, where the lesson was learnt; the design and the code that carries it came across together. vitally-mcp's own `CLAUDE.md` holds the full history — dates, measurements, incident write-ups — behind the rules stated here more briefly. When this file and that one disagree about a shared component, check the code here.
 
 **Key characteristics:**
-- Full CRUD API access to Vitally resources (accounts, organisations, users, conversations, notes, projects, tasks, admins, NPS responses, project templates, project categories, messages, custom objects, meetings — including participants and transcripts — custom traits, custom surveys)
-- Permission management via `ReadOnly` and `Destructive` flags on every tool, for MCP clients to enforce per-category permissions
-- **Streamable HTTP transport** (MCP 2026-07-28) on the `ModelContextProtocol.AspNetCore` package, stateless mode
-- **OAuth 2.1 protection** via JwtBearer on `/mcp`, against Entra on both targets; publishes RFC 9728 protected-resource metadata at `/.well-known/oauth-protected-resource`. An in-process OAuth proxy fronts whichever upstream provider `OAuth:Authority` names when `OAuth:SharedClientId` is set — Entra on both targets — and it implements an RFC 7591 DCR shim so every MCP client converges on one pre-registered first-party app (skipping the per-session consent screen and accepting any RFC 8252 loopback port). Non-loopback `redirect_uri` values must be in `OAuth:AllowedClientRedirectUris`. The proxy *validates* the RFC 8707 `resource` parameter (vitally-mcp#105) and then **terminates** it, naming the API upstream by scope instead. `OAuth:UpstreamResourceScope` is the switch that does this — empty would relay the parameter instead, which is the RFC 8707 default a conforming provider expects — see the `resource` section under Architecture for why relaying it to Entra is a hard failure.
-- **On-demand Vitally API key fetch**: the server fetches the `vitally-shared` secret from Azure Key Vault via its user-assigned managed identity (with a short in-memory cache) and uses it to call Vitally on behalf of all authenticated users. Future per-user keys can be added by reintroducing claim-based secret resolution.
-- .NET 10 ASP.NET Core, framework-dependent — runs in any .NET 10 container
-- Built on the official `ModelContextProtocol` C# SDK 2.2.0 + `ModelContextProtocol.AspNetCore` 2.2.0
-- Multi-region support: EU (default, `rest.vitally-eu.io`) and US (`{subdomain}.rest.vitally.io`)
-- Rate-limit-aware HTTP pipeline: auto-retries on `429 Too Many Requests` and logs a warning when `X-RateLimit-Remaining` drops below threshold
+- About 45 tools over tickets, KPI/SLA/CSAT reporting, macros, users and organisations, configuration and the Help Center — see *Tools*.
+- **Per-user Zendesk OAuth.** Every Zendesk call is made with the signed-in person's own Zendesk token. There is no shared Zendesk credential in a deployed target, so Zendesk attributes every change to the agent and applies their role, group and brand restrictions. This is the main architectural difference from vitally-mcp, which calls Vitally with one shared key.
+- **Two OAuth relationships, never mixed:** Entra signs people in to *this server* (`/oauth/*`, unchanged from vitally-mcp); Zendesk OAuth lets the server act *as them* (`/zendesk/connect`, `/zendesk/callback`).
+- **Streamable HTTP transport** (MCP 2026-07-28), stateless, on `ModelContextProtocol.AspNetCore`.
+- RBAC tiers from live Entra group membership (`zendesk:read` / `zendesk:write` / `zendesk:delete`), enforced at `ZendeskService.SendAsync` and used to filter `tools/list` per caller.
+- Per-user audit trail to Application Insights `AppEvents`, reads included.
+- .NET 10 ASP.NET Core; `ModelContextProtocol` SDK — check `ZendeskMcp.csproj` for the version rather than this line.
 
 ## Common Development Commands
 
@@ -25,19 +27,21 @@ This is a Model Context Protocol (MCP) server implementation in C# that provides
 # Restore + build + run the test suite
 dotnet test ZendeskMcp.sln -c Debug
 
-# Build only (Debug)
-dotnet build ZendeskMcp.sln
-
 # Run a single test class
-dotnet test ZendeskMcp.sln -c Debug --filter-class "*MeetingsToolsTests"
+dotnet test ZendeskMcp.sln -c Debug --filter-class "*TicketsToolsTests"
 
-# Start the server in dev mode (no identity provider, no Key Vault)
+# Start the server in dev mode: no Entra, no Key Vault, every call made with ONE Zendesk API token
 $env:OAuth__NoAuth = "true"
-$env:Vitally__Region = "EU"
-$env:Vitally__DevelopmentApiKey = "sk_live_your_key"
+$env:Zendesk__Subdomain = "your-subdomain"
+$env:Zendesk__DevelopmentEmail = "you@fiscaltec.com"
+$env:Zendesk__DevelopmentApiToken = "<a Zendesk API token>"
 $env:ASPNETCORE_URLS = "http://localhost:5099"
 dotnet run --project ZendeskMcp/ZendeskMcp.csproj
 ```
+
+`StartupGuards.EnsureDevelopmentTokenIsLocal` refuses the development token unless `OAuth:NoAuth=true` **and** no `Zendesk:KeyVaultUri` is set. Behind real sign-in it would turn a per-user server back into a shared service account, attributing everyone's changes to the token's owner. Do not weaken that guard.
+
+To exercise per-user OAuth locally instead, leave `NoAuth` off, set `Zendesk:OAuthClientId` and `Zendesk:DevelopmentOAuthClientSecret` (in-memory token store; nothing survives a restart), and add `http://localhost:5099/zendesk/callback` to the Zendesk OAuth client's redirect URLs.
 
 ### Smoke-testing the server
 
@@ -50,7 +54,6 @@ Invoke-RestMethod http://localhost:5099/.well-known/oauth-protected-resource
 # MCP initialise. This deliberately requests 2025-06-18: the `initialize` handshake exists only in
 # revisions up to 2025-11-25, because 2026-07-28 removed it in favour of per-request `_meta` and
 # headers. So this is a legacy-path smoke test, and the server replies with a revision it supports.
-# Do NOT substitute 2026-07-28 here — that revision has no `initialize` method and the call errors.
 $body = @{ jsonrpc='2.0'; id=1; method='initialize'; params=@{ protocolVersion='2025-06-18'; capabilities=@{}; clientInfo=@{ name='smoke'; version='0.0.1' } } } | ConvertTo-Json -Depth 10 -Compress
 Invoke-RestMethod -Method Post -Uri http://localhost:5099/mcp -ContentType 'application/json' -Headers @{ Accept='application/json, text/event-stream' } -Body $body
 
@@ -59,27 +62,12 @@ $body = @{ jsonrpc='2.0'; id=2; method='tools/list' } | ConvertTo-Json -Compress
 Invoke-RestMethod -Method Post -Uri http://localhost:5099/mcp -ContentType 'application/json' -Headers @{ Accept='application/json, text/event-stream' } -Body $body
 ```
 
-**Exercising the 2026-07-28 path itself.** The revision above replaced the `initialize` handshake with
-per-request metadata, and the server enforces the full contract — so a bare request is *not* enough.
-All of the following are required together, and the server rejects each omission with a distinct
-error (verified against the running container):
-
-1. the `MCP-Protocol-Version: 2026-07-28` header — omit it and you get
-   `-32020 "The MCP-Protocol-Version header is required when the request body declares a per-request metadata protocol version."`
-2. `_meta/io.modelcontextprotocol/protocolVersion` in `params` — omit it and you get
-   `-32602 "Requests using protocol version '2026-07-28' must include '_meta/io.modelcontextprotocol/protocolVersion'."`
-3. `_meta/io.modelcontextprotocol/clientCapabilities` as a JSON object — omit it and you get a
-   matching `-32602`.
-
-`Mcp-Method` must also equal the body's `method`; a mismatch is rejected with
-`"Header mismatch: Mcp-Method header value 'x' does not match body value 'y'."`
-
-⚠️ **A `tools/call` needs a fourth thing the list above does not mention: `Mcp-Name`, carrying the
-tool name.** Omit it and the request is rejected with
-`-32020 "Missing required Mcp-Name header."` — *before* the tool runs, so nothing is audited and the
-failure looks like the tool was never invoked. The three requirements above were verified against
-`tools/list`, which needs no `Mcp-Name`, which is why this went unrecorded until a `tools/call`
-integration test hit it (vitally-mcp#147).
+**The 2026-07-28 path** needs, together: the `MCP-Protocol-Version: 2026-07-28` header;
+`_meta/io.modelcontextprotocol/protocolVersion` and `_meta/io.modelcontextprotocol/clientCapabilities`
+(an object) in `params`; `Mcp-Method` equal to the body's `method`; and, for `tools/call`, an
+`Mcp-Name` header carrying the tool name — omit that and the call is rejected *before* the tool
+runs, so nothing is audited (vitally-mcp#147). Each omission has its own error; vitally-mcp's
+`CLAUDE.md` lists them.
 
 ```powershell
 $meta = @{
@@ -97,15 +85,7 @@ A successful response carries `ttlMs: 300000` and `cacheScope: "private"` alongs
 
 ## Installing for End Users
 
-FISCAL employees point their MCP client at `https://vitally.fiscaltec.com/mcp`. The client handles the OAuth flow automatically on first use via the protected-resource metadata document. Everyone signs in with their FISCAL Entra account on both targets. See the current-state note at the top of this file.
-
-| Client | How to connect |
-|---|---|
-| Claude Desktop / claude.ai | Already published to the FISCAL workspace as the organisation connector **FISCAL Vitally MCP** (renamed from *Vitally MCP* on 2026-10-07, when Vitally's official connector was enabled alongside it — that one is listed as **Vitally MCP** and now owns the old `mcp__claude_ai_Vitally_MCP__*` tool prefix, so stale wildcard allow entries auto-approve its write tools; see ACCESS.md) — Connectors → FISCAL Vitally MCP → Connect |
-| Claude Code | Inherits the claude.ai connector (tools `mcp__claude_ai_FISCAL_Vitally_MCP__*`), or standalone: `claude mcp add --transport http fiscal-vitally https://vitally.fiscaltec.com/mcp` (older entries named `vitally` still work) |
-| VS Code / Cursor / other | Add an MCP server entry pointing at the URL; client handles OAuth |
-
-To update: nothing for end users. The server is the source of truth; new deploys ship automatically.
+FISCAL staff point their MCP client at `https://zendesk-mcp.fiscaltec.com/mcp` (proposed hostname). They sign in with Microsoft, then connect their own Zendesk account through the one-time link the first Zendesk tool returns. [ACCESS.md](ACCESS.md) is the user-facing guide; keep it in step with any change to either sign-in.
 
 ## GitHub issues (issue-driven work)
 
@@ -145,7 +125,9 @@ that assumes prior conversation is an issue that cannot be worked.
    from one closed as won't-fix or duplicate.
 6. If work stalls, swap the status for `status: blocked` and comment what's blocking.
 
-**What actually gates a merge** (the `Secure branches` ruleset, verified 2026-08-18):
+**What actually gates a merge** — the `Secure branches` ruleset as vitally-mcp runs it (verified
+there 2026-08-18). ⚠️ **This repository needs that ruleset applied before the first merge to `main`**;
+until then nothing below is enforced by GitHub, only by the hook. In vitally-mcp:
 `required_approving_review_count` is **0** — no approving review is needed. What is required is all
 review threads resolved, the branch up to date with `main` (`strict_required_status_checks_policy`),
 and these checks green: `Analyze (csharp)`, `Validate PR title`, `Build and test (ubuntu-latest,
@@ -216,7 +198,7 @@ Three things determine whether the agents are worth the tokens:
   unprompted. ⚠️ **Confirm your Azure elevation first** (`/infra-pims`): an agent hitting a lapsed
   PIM gets `AuthorizationFailed` and, per the `silent-failure-hunter` row above, is liable to report
   that as a definite negative rather than "could not assess". See the note under
-  `docs/runbooks/entra-cutover-staging-validation.md`.
+  vitally-mcp's `docs/runbooks/entra-cutover-staging-validation.md`.
 - **Argue with them.** They revise: one withdrew a DRY-based recommendation once told its cited
   precedent (`verify-oauth-metadata.sh`, a CI-executed script) did not transfer to human diagnostics.
 - **Expect truncated reports.** Every agent run so far has cut off mid-finding and needed a
@@ -245,7 +227,7 @@ never `APPROVED`. So it can never satisfy an approval-count rule, and the rulese
 it. Two consequences, both of which have cost real time in this repo and its siblings:
 
 - **`mergeStateStatus: CLEAN` does NOT mean Copilot has finished.** It reflects the ruleset only.
-  `searledan/rosetechnologies.co.uk` records its own version of this: PR vitally-mcp#24 merged 15 seconds before
+  `searledan/rosetechnologies.co.uk` records its own version of this: PR #24 there merged 15 seconds before
   Copilot's second review posted two valid comments. Here, **vitally-mcp#117 merged with Copilot having reviewed
   only the first pushed commit** — the two fixes Copilot itself asked for went in unseen, while
   `CLEAN` held the whole time because the threads had been resolved.
@@ -265,7 +247,7 @@ it. Two consequences, both of which have cost real time in this repo and its sib
       n=<PR>; head=$(git ls-remote origin "refs/pull/$n/head" | awk '{print $1}')
       gh pr view "$n" --json reviewRequests \
         --jq '[.reviewRequests[].login] | index("copilot-pull-request-reviewer") != null'   # false = not pending
-      gh api graphql -f owner=fiscaltec -f name=vitally-mcp -F number="$n" \
+      gh api graphql -f owner=fiscaltec -f name=zendesk-mcp -F number="$n" \
         -f query='query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){pullRequest(number:$number){reviews(last:100){nodes{author{login} commit{oid} submittedAt}}}}}' \
         --jq '[.data.repository.pullRequest.reviews.nodes[] | select(.author.login=="copilot-pull-request-reviewer")] | sort_by(.submittedAt) | last | .commit.oid'
       ```
@@ -305,7 +287,7 @@ it. Two consequences, both of which have cost real time in this repo and its sib
    3. Work every open thread: fix and reply, or reply with the reasoning — then **resolve** it.
    4. **If you pushed code in (3), re-request and go back to (1):**
       ```bash
-      gh api repos/fiscaltec/vitally-mcp/pulls/$n/requested_reviewers \
+      gh api repos/fiscaltec/zendesk-mcp/pulls/$n/requested_reviewers \
         -f 'reviewers[]=copilot-pull-request-reviewer[bot]'
       ```
       **`gh pr edit --add-reviewer` silently no-ops on the Copilot bot** — use the REST endpoint.
@@ -319,7 +301,7 @@ it. Two consequences, both of which have cost real time in this repo and its sib
       timestamp and the re-request looks as though it never registered. Always `--paginate`:
 
       ```bash
-      gh api --paginate repos/fiscaltec/vitally-mcp/issues/$n/timeline \
+      gh api --paginate repos/fiscaltec/zendesk-mcp/issues/$n/timeline \
         --jq '.[] | select(.event=="review_requested") | .created_at' | tail -1
       ```
 
@@ -409,7 +391,7 @@ the current head (58afb2b…)"* — which is the mistake that prompted the port.
 Filenames match the label they preset, and the shared four match the sibling repos. Each form
 presets its type label plus `status: ready`, and its title with the matching Conventional-Commits
 prefix; add a `priority:` label after creating. Blank issues stay enabled for quick notes and for
-`ux`. Bug and Feature carry Vitally-specific fields (region, MCP client, server URL, a failure
+`ux`. Bug and Feature carry server-specific fields (MCP client, server URL, a failure
 timestamp for correlating with Application Insights) — keep those if you edit the forms.
 
 `documentation` and `content` both map to `docs/…` branches but cover different audiences:
@@ -436,1402 +418,163 @@ defects rather than cosmetics; the form asks for the observed effect to keep tha
 
 ## Architecture
 
-### Hosting and transport (Program.cs)
+### Hosting and wiring (Program.cs)
 
-The server uses ASP.NET Core 10 with `WebApplication.CreateBuilder` + `Microsoft.NET.Sdk.Web`. Key wiring:
+ASP.NET Core 10, `WebApplication.CreateBuilder`. Everything vitally-mcp's `Program.cs` does is here unchanged in behaviour, with the same comments: options bound and validated at startup (`Zendesk:`, `OAuth:`, `Authorization:`, `Audit:`, `ToolsListCache:`); `DefaultAzureCredential` shared by Key Vault and Graph; the Application Insights exporter and its audit routing, sampling (`EnableTraceBasedLogsSampler = false`, 10% traces) and console suppression; the Graph group resolver; JwtBearer with the single-challenge 401 and the type-only authentication-failure log; the policy handler and `AddAuthorizationFilters()` registered **unconditionally**; the call-tool filters (error surfacing, then the audit record); forwarded headers; the RFC 9728 / RFC 8414 documents and the `/oauth/*` façade.
 
-- Binds `ZendeskServerOptions` from the `Vitally:` configuration section, calls `Validate()` at startup to fail-fast on bad config.
-- Binds `OAuthOptions` from `OAuth:` (provider-agnostic — works with Entra, Keycloak, Okta, etc.; only `OAuth:UpstreamResourceScope` differs between them, and it is a value rather than a branch).
-- Conditionally registers `SecretClient` (Azure Key Vault) as singleton when `Vitally:KeyVaultUri` is set; uses `DefaultAzureCredential` so it works with managed identity in production and `az login` locally.
-- `IMemoryCache` registered for the API key cache and OAuth proxy state cache.
-- Authorisation policy plumbing: `ZendeskPermissionRequirement.cs` carries one `vitally:*` permission,
-  and `ZendeskPermissionHandler.cs` evaluates it by delegating to `ToolAuthorizer`, so tool discovery
-  filtering and the `ZendeskService.SendAsync` backstop share one resolution path.
-- `ToolsListCacheOptions.cs` binds the `ToolsListCache:` section for the `tools/list` cache hints.
-- `ProtectedResourceMetadataBuilder.cs` builds the RFC 9728 document served from both well-known paths.
-- `UpstreamOidcMetadata.cs` resolves the *upstream* provider's `authorization_endpoint`, `token_endpoint`, `jwks_uri` and `userinfo_endpoint` from its OIDC discovery document, cached in `IMemoryCache` (12 h). Registered singleton with its own named `HttpClient`. `StartupGuards.EnsureUpstreamOidcEndpointsAsync` resolves it once after `builder.Build()` and **refuses to start** if the document is unreachable or missing any of the four — see the discovery section below.
-- `VitallyApiKeyProvider` registered scoped.
-- `ZendeskRateLimitHandler` registered transient and attached to the `HttpClient` used by `ZendeskService`.
-- `JwtBearer` authentication added unless `OAuth:NoAuth=true`.
-- `ForwardedHeadersOptions` configured to honour `X-Forwarded-Proto` / `X-Forwarded-Host` / `X-Forwarded-For` from the Container Apps ingress (trust model: network isolation, not header authentication — see comments in `Program.cs`).
-- MCP server registered via `AddMcpServer().WithHttpTransport(o => o.Stateless = true).WithToolsFromAssembly()`.
-- Publishes server-level usage guidance in the MCP `initialize` response via `McpServerOptions.ServerInstructions` (text in `ZendeskServerInstructions.Text`): steers clients toward organisation-level data, the traits-vs-custom-objects distinction, the name/date-range filters, and the read-only/permission model.
-- OAuth proxy endpoints (only active when `OAuth:SharedClientId` is set):
-  - `GET /.well-known/oauth-protected-resource` — RFC 9728 metadata, serialised with `McpJsonUtilities.DefaultOptions`. That is load-bearing, not incidental: the ASP.NET Core defaults write every unset optional as an explicit `null`, and RFC 9728 §3.2 requires an unused parameter to be *omitted* — strict clients reject the whole document over the difference.
-  - `GET /.well-known/oauth-authorization-server` — RFC 8414 metadata declaring **our own origin** as `issuer` (see the façade section below), pointing `authorization_endpoint` / `token_endpoint` / `registration_endpoint` at our own proxy endpoints, and advertising `authorization_response_iss_parameter_supported: true`. `userinfo_endpoint` and `jwks_uri` still point upstream — **read from the provider's discovery document**, not concatenated onto `Authority`.
-  - `GET /oauth/authorize` — validates the client `redirect_uri` against `OAuth:AllowedClientRedirectUris` (plus implicit loopback exemption), validates any RFC 8707 `resource` against the identifier we publish (rejecting a mismatch with `invalid_target`; see the `resource` section below), stashes it keyed by `state`, and proxies to the **discovered** upstream `authorization_endpoint` with our own fixed callback.
-  - `GET /oauth/callback` — reverses the stash, **replaces any upstream `iss` with our own origin**, and redirects to the original client URI.
-  - `POST /oauth/token` — proxies code/refresh exchanges to the **discovered** upstream `token_endpoint`, server-side-injecting `SharedClientSecret`. Applies the same `resource` validation to the form body.
-  - `POST /oauth/register` — RFC 7591 DCR shim returning `SharedClientId` plus filtered `redirect_uris`.
-- `MapMcp("/mcp").RequireAuthorization()` — auth requirement is dropped when `NoAuth=true`.
-- The 401 challenge on `/mcp` carries a single `WWW-Authenticate` value pointing at the protected-resource metadata document (`resource_metadata="{PublicBaseUrl}/.well-known/oauth-protected-resource/mcp"`), adding `error="invalid_token"` when a token was presented and failed validation. The metadata document is served from both `/.well-known/oauth-protected-resource` and the `/mcp`-suffixed path (`ProtectedResourceMetadataBuilder.MetadataPath`). The status stays exactly 401 — `.github/workflows/deploy.yml` smoke-tests that and rolls back if it changes, so don't alter it. That smoke **also** pins the RFC 8414/9728 documents (`.github/scripts/verify-oauth-metadata.sh`): the `issuer`, its byte-for-byte equality with `authorization_servers`, the advertised `iss` flag, the façade endpoints naming our origin, `jwks_uri`/`userinfo_endpoint` being absolute https without a fragment, and no null-serialised optionals. Those are deploy-gating contracts now, not only test-suite ones.
+Added for Zendesk:
 
-
-### The OAuth proxy is a complete authorisation-server façade
-
-From a client's point of view this server *is* the authorisation server: `/oauth/authorize`,
-`/oauth/token` and `/oauth/register` are all ours. So the RFC 8414 document declares **our own
-origin** as `issuer` (`PublicBaseUrl`, falling back to the request origin) — the same string
-`ProtectedResourceMetadataBuilder` publishes as `authorization_servers`. Entra still issues the
-tokens and `jwks_uri` / `userinfo_endpoint` still point there; the façade covers identity and
-discovery, not issuance.
-
-It previously declared the **upstream provider's** issuer while being served from our origin, which violates RFC 8414
-§3.3 (an anti-mix-up control: a metadata document can only ever speak for itself) and made strict
-clients — including **MCP Inspector** — abort before reaching DCR. Fixed 2026-08-21 (vitally-mcp#90).
-
-**Three pieces that must stay together.** Changing any one alone breaks the flow:
-
-| Piece | Why |
+| Registration | Why |
 |---|---|
-| `issuer` = our origin | RFC 8414 §3.3. Must equal `authorization_servers` in the RFC 9728 document byte for byte — the check is simple string equality, tolerating only a trailing slash *on the expected value*. |
-| `/oauth/callback` strips any upstream `iss` and appends our own | RFC 9207. **Mandatory, not defensive.** Clients compare a *present* `iss` against the metadata `issuer` even when support is not advertised — so an upstream `iss` forwarded through would now be a hard failure, and appending ours alongside would leave two values. |
-| `authorization_response_iss_parameter_supported: true` | Honest only because of the row above. Advertising it and then omitting `iss` reads as a stripped-parameter attack and the client aborts. |
+| `IZendeskTokenStore` → `KeyVaultZendeskTokenStore` when `Zendesk:KeyVaultUri` is set, else `InMemoryZendeskTokenStore` | one secret per connected person |
+| `ZendeskOAuthClient` (singleton, named `HttpClient` `zendesk-oauth`) | authorise URL, code/refresh exchange, identity check, revoke |
+| `ZendeskConnectLinks`, `ZendeskUploadSlots` (singletons over `IDistributedCache`) | one-shot capabilities for the browser and curl halves |
+| `ZendeskCredentialProvider` (scoped) | the caller's own token for this request |
+| `AddDistributedMemoryCache()` | backs the two above — **in-memory, so single replica** (below) |
+| `app.MapZendeskConnect()`, `app.MapZendeskUploads()` | `/zendesk/connect`, `/zendesk/callback`, `PUT /uploads/{slot}` — mapped before `UseAuthentication` and not behind the bearer requirement, because a browser or curl has no Entra token; each authenticates with a capability issued to a signed-in tool caller |
 
-**Verified 2026-08-21** against `@modelcontextprotocol/client` 2.0.0 — the package MCP Inspector 2.3.0
-actually depends on — driving a local container: the RFC 9728 document parses, `discoverAuthorizationServerMetadata`
-passes §3.3, **DCR is reached and returns the shared `client_id`** (it was never called before), and
-`validateAuthorizationResponseIssuer` accepts the `iss` we emit. A control assertion confirms the same
-function still rejects the upstream issuer, so the passes are not a skipped check.
+⚠️ **Single replica is a correctness constraint, not a cost choice.** The `/oauth/*` proxy state (inherited from vitally-mcp), connect links, connect attempts and upload slots all live in process memory, and a token removed on one replica stays cached on another for up to `Zendesk:TokenCacheDuration`. `containerapps.tf` pins `max_replicas = 1`. Scaling out means registering a shared `IDistributedCache` (Redis) first and moving the OAuth proxy's `IMemoryCache` state onto it — a registration change for the Zendesk parts, a small code change for the proxy.
 
-Two things were verified rather than assumed, both of which the design had flagged as open:
+### The Entra façade, RBAC, logging and audit — as vitally-mcp
 
-- **No client validates the access token's `iss` against the metadata `issuer`.** The SDK's client
-  auth module never decodes a JWT or fetches JWKS — access tokens are opaque to it — so `jwks_uri`
-  pointing upstream while we claim the issuer is safe. Our own `JwtBearer` validates against the
-  provider's `Authority` internally and is unaffected either way.
-- **The published SDK 1.x does not enforce §3.3 at all**; the enforcement ships in the 2.x packages.
-  So this was latent for Claude Desktop / Claude Code and immediately fatal for anything on 2.x.
+These components are ported without behavioural change, and their rules hold here exactly. vitally-mcp's `CLAUDE.md` carries the evidence for each; the short form:
 
-**Validated against the live identity provider on 2026-08-22**, which the local run could not cover. MCP
-Inspector 2.3.0 completed the whole flow against the server behind an HTTPS tunnel with
-`PublicBaseUrl` set: metadata 200, DCR `201`, a real federated sign-in, `/oauth/callback` 302 carrying
-`iss=<our origin>` which the client *accepted*, `/oauth/token` 200, and authenticated `POST /mcp` 200.
-That is the acceptance test in vitally-mcp#90, and it is past the point where the flow previously aborted.
+- **The OAuth proxy is a complete authorisation-server façade.** `issuer` is our origin (RFC 8414 §3.3) and equals `authorization_servers` byte for byte; `/oauth/callback` strips any upstream `iss` and appends ours (RFC 9207); `authorization_response_iss_parameter_supported: true` is honest only because of that. Change none of the three alone (vitally-mcp#90).
+- **`redirect_uri` validation is the only thing between the proxy and an open redirector** — loopback on any port plus `OAuth:AllowedClientRedirectUris`. Never widen it.
+- **RFC 8707 `resource` is validated, then terminated.** `OAuth:UpstreamResourceScope` set (Entra) drops a matching `resource` and names the API by scope on both `/oauth/authorize` and `/oauth/token` — on a refresh that is what keeps the token's audience right. Relaying `resource` to Entra fails with AADSTS9010010 whatever its spelling (vitally-mcp#105, vitally-mcp#108).
+- **`Audience` (no trailing slash, the App ID URI) and `Resource` (with the slash, what Claude Code normalises to) differ by one character on purpose.** Do not reconcile them.
+- **Upstream endpoints come from OIDC discovery**, checked against `Authority` (§4.3), cached 12 h with last-known-good fallback; startup refuses to boot without them (vitally-mcp#104).
+- **`/oauth/token` services only `authorization_code` and `refresh_token`** — it injects the confidential secret, so any other grant would mint tokens without a sign-in.
+- **Entitlement comes from live Entra group membership via Graph** (`Authorization:LiveGroupCheck`, transitive, keyed on `oid` — never `sub`), fresh → stale (up to `LiveGroupStaleSeconds`) → deny. No claim authorises while the live check is on (vitally-mcp#106, vitally-mcp#108, vitally-mcp#156).
+- **`ZendeskService.SendAsync` is the enforcement point**; `[Authorize]` discovery filtering shares `HasEffectivePermissionAsync` with it so they cannot disagree. `Authorization:ReadOnly` denies every non-GET for everyone.
+- **Log levels are a security control and live in `Program.cs`**, not `appsettings.json` (excluded from the image) or environment variables (lost on a recreate). Failure records log the exception *type*, the status and the resource *type* — never a message, an attached exception, a body or the rest of the path (vitally-mcp#94).
+- **Four audit record shapes** — tool call (primary: caller `oid`, tool, arguments, record ids touched, tier, staleness, outcome, correlation id), action (per upstream call), service denial, tier denial. Tool arguments are recorded; upstream response bodies never are. Records route to `AppEvents` when `ApplicationInsights__ConnectionString` is set, and must not depend on trace sampling (vitally-mcp#147, vitally-mcp#178).
 
-**If you touch this,** re-run that validation rather than reasoning about it — `npx @modelcontextprotocol/inspector`
-against a local container is now a working end-to-end client, which is the practical payoff.
+What changed in porting them: the policy names (`zendesk:*`), the default custom-permissions claim, the Graph tier groups (`sg-zendesk-*`), the meter and counter names (`ZendeskMcp`, `zendesk.*`), and `AuditRecordIds` (below). `IncludeReads` matters more here than in vitally-mcp: Zendesk's own audit log records changes, not reads, so this trail is the only record of who read which ticket.
 
-**Validate identity-provider changes against staging, not against a tunnel.** An identifier URI is
-immutable and must equal the server origin (the client throws when the RFC 9728 `resource` does not
-match what it fetched), so an ephemeral tunnel URL orphans one registration per run — which cost two
-sessions during vitally-mcp#90. `https://vitally-staging.fiscaltec.com` has a stable hostname and is already
-carried in the Entra app's `identifierUris`/redirect URIs, so it can be reused run after run. Reach
-for a tunnel only for something staging genuinely cannot cover, and budget for the cleanup if you do.
-
-**How far a validation can get without a browser** — worth knowing before assuming the whole flow
-needs a human. Everything up to the credential prompt is scriptable, and that covers most of what
-breaks: the metadata documents (`verify-oauth-metadata.sh`), the proxy's upstream redirect (read the
-`Location` and assert on its query), and **Entra's own acceptance of that redirect** — follow it and
-Entra answers with either its sign-in page or an `AADSTS` error, which is a real test of `client_id`,
-`redirect_uri`, `scope` and `resource` handling. What genuinely needs a person is a token: `az account
-get-access-token --scope https://vitally.fiscaltec.com/mcp.access` fails with `AADSTS65001`, because
-Azure CLI is not a pre-authorised client on this API, and adding it would grant a broad first-party
-client permanent silent access — not a change to make for a test.
-
-### The RFC 8707 `resource` parameter is validated here — and terminated here
-
-`OAuthOptions.IsResourceIndicatorAllowed(value)` is the single check, reading
-`PublishedResourceIdentifier` (`OAuth:Resource`, falling back to `OAuth:Audience`) — the same
-property `ProtectedResourceMetadataBuilder` publishes, so the value validated against is by
-construction the value clients were told to send. `/oauth/authorize` (query) and `/oauth/token`
-(form body) both apply it and reject a mismatch with `invalid_target`; every value is checked when
-the parameter repeats, and a present-but-empty one is a mismatch rather than an absence. An absent
-`resource` is untouched — RFC 8707 is optional for clients.
-
-**Why it is a real control and not paperwork.** It governs what audience a caller may ask to be
-bound to. Until vitally-mcp#105 the parameter was relayed unvalidated, so a client could name an audience this
-server never published and the proxy would pass the request on. That check is unchanged by the
-cutover and is deliberately independent of what happens to the value afterwards — the two questions
-are separate, and conflating them is how the validation would quietly become "ignore it".
-
-**Comparison rules** — component-wise per RFC 3986 §6.2.2, not one string compare. Scheme and host
-case-insensitive; port, path and query exact; a fragment rejected outright (RFC 8707 §2); a single
-trailing slash tolerated on either side. That last one is load-bearing: Entra refuses to register an
-`identifierUris` value ending in a slash, while Claude Code normalises a bare-host resource *to* the
-trailing-slash form, so the two forms have to name one resource. Nothing else is normalised. With
-neither `Resource` nor `Audience` configured — only possible under `NoAuth` — there is nothing to
-compare against and every value is accepted.
-
-**A malformed identifier fails at boot**, not at the first sign-in. `OAuth:Resource` (or `Audience`
-standing in for it) must be an absolute **http(s)** URI with no fragment or `OAuthOptions.Validate()`
-throws — because it is no longer only *published*: an unparseable value would refuse every request carrying
-`resource`, an authentication outage discovered at sign-in time. An Entra-style client-ID GUID is a
-perfectly good `aud` but not a resource identifier, and lands here whenever `Resource` is left unset;
-set `Resource` to the server origin in that case.
-
-The **scheme** is checked, not merely absoluteness, and that is not fussiness:
-`Uri.TryCreate("/mcp", UriKind.Absolute)` *succeeds* on Unix — as `file:///mcp` — and fails on
-Windows. An absoluteness-only check therefore passes locally and is inert on the Linux containers
-this runs on; CI on `ubuntu-latest` caught exactly that in vitally-mcp#122. `http` is allowed alongside `https`
-so loopback development still works.
-
-**What happens to a value that passes: `OAuth:UpstreamResourceScope` decides.** It is one setting
-because neither half is usable alone.
-
-| | unset | set (production and staging) |
-|---|---|---|
-| Provider it suits | a conforming RFC 8707 provider | Entra |
-| A matching `resource` is | relayed verbatim | **dropped at the façade** |
-| The API is named upstream by | that relayed `resource` | this scope, merged into `scope` |
-
-`Program.cs` sends **no `audience` parameter anywhere**, so something has to name the API. Under a
-conforming provider that is the relayed `resource`, consumed at the tenant; under Entra it is the
-scope. Dropping `resource` without the scope leaves the token bound
-to nothing; adding the scope while still relaying `resource` is the failure below. Hence one switch,
-and hence it is **configuration rather than a check on `OAuth:Authority`** — which is what keeps the
-provider difference a value this server can be pointed at another provider with, rather than a branch
-in `Program.cs`. It is a portability property, not an operational fallback: there is no rollback, and
-an identity failure is fixed forwards (vitally-mcp#156).
-
-**Relaying `resource` to Entra is a hard failure, and the reason is not the one vitally-mcp#105/#107 recorded.**
-Verified against the live tenant on 2026-09-02 by driving `/oauth2/v2.0/authorize` directly:
+### Per-user Zendesk OAuth
 
 ```
-error=invalid_target&error_description=AADSTS9010010: The resource parameter provided in the
-request doesn't match with the requested scopes.
+tool call ──> ZendeskService ──> ZendeskCredentialProvider ──(no token)──> ZendeskConnectionRequiredException
+                                                                              carries /zendesk/connect?ticket=…
+person's browser ──> /zendesk/connect ──302──> {sub}.zendesk.com/oauth/authorizations/new (PKCE S256, state)
+                                                         │ sets HttpOnly SameSite=Lax cookie = state
+Zendesk ──302──> /zendesk/callback?code&state ──> exchange code ──> GET /api/v2/users/me with the new token
+                                                         ├─ agent/admin AND email == Entra sign-in name → store
+                                                         └─ otherwise → revoke at Zendesk, refuse
 ```
 
-Two corrections to what was written before the cutover:
+| Component | Rule |
+|---|---|
+| `ZendeskConnectLinks` | A link is 256 random bits naming the Entra `oid` and sign-in name it was issued to, valid `ConnectLinkLifetime` (15 min), spent only on a successful store. Issued **only** inside an authenticated caller's own tool result. |
+| `/zendesk/connect` | Peeks the link (an abandoned Zendesk sign-in can be retried), starts an attempt with a fresh PKCE verifier, pins `state` to the browser with a cookie. |
+| `/zendesk/callback` | Requires cookie == `state` (fixed-time compare) — a code completed in another browser is login CSRF. Spends the attempt. Exchanges the code with the client secret **and** the verifier. Reads `/api/v2/users/me` with the new token and refuses unless the role is agent/admin and, with `RequireEmailMatch` (default on), the email equals the sign-in name case-insensitively. A refused token is revoked immediately. Result pages HTML-encode everything Zendesk returned. |
+| Why the email match matters | Without it, anyone who opens a person's link — forwarded, leaked, or planted in a ticket — attaches **their** Zendesk account to that person's identity, and every later call that person makes acts as the opener. The cookie stops a planted *code*; the email match stops a planted *link*. Keep both. |
+| `ZendeskCredentialProvider` | Reads the caller's `oid` (no `oid` → refused); no token → connect link; token within 2 min of expiry → refresh **under a per-person lock** (Zendesk rotates the refresh token, so a second concurrent refresh would present a spent token, fail `invalid_grant`, and disconnect someone who did nothing wrong); refresh refused with `invalid_grant`/`invalid_token`/`unauthorized_client` → forget the token and hand back a link. |
+| `ZendeskService` on a `401` | The caller's own token was refused: `OnTokenRejectedAsync` forgets it and the call fails with a fresh connect link rather than Zendesk's bare 401. |
+| `ZendeskConnectionRequiredException` | Surfaced verbatim by `ToolErrorResult` — its message *is* the link. `ZendeskServerInstructions` tells the model to hand it over unchanged. |
+| `KeyVaultZendeskTokenStore` | One secret per person, `{TokenSecretPrefix}{oid}` (`zendesk-user-` in production, `zendesk-staging-user-` in staging, so the targets never share a token), JSON, tagged `kind=zendesk-user-token`, `ExpiresOn` = refresh expiry. Reads cached `TokenCacheDuration`, including "not connected". **Removal writes a tombstone version, never a delete**: soft delete is on, and a soft-deleted name cannot be set again until purged, so a delete would make reconnecting fail for the whole retention window. Older versions keep the old token, which is why disconnecting revokes at Zendesk first. |
+| Scopes and lifetimes | `read write`; access tokens requested at 2 h and refresh tokens at 90 days (`AccessTokenExpiresInSeconds` null requests Zendesk's legacy non-expiring token instead). |
+| Managed identity | Needs **Key Vault Secrets Officer** on the vault (it writes), which also lets it overwrite `zendesk-oauth-client-secret`. Accepted: the identity already holds every person's token; see `infra/terraform/identity.tf`. |
 
-- **Both spellings fail, not just the trailing-slash one.** `https://vitally.fiscaltec.com/` and
-  `https://vitally.fiscaltec.com` both return **400**, as does a resource naming nothing at all. The
-  v2 endpoint cross-checks `resource` against `scope`; it is not comparing against `identifierUris`,
-  so the slash is beside the point. Dropping the parameter is therefore *required*, not merely
-  tidier — a version that only normalised the slash would still be broken.
-- **A bare `mcp.access` scope does not fail at `/authorize`** — Entra returns its sign-in page. It
-  resolves an unqualified scope against Microsoft Graph, so the flow completes and hands back a token
-  for the wrong resource. That is why both metadata documents advertise the App ID URI-qualified form
-  in `scopes_supported`: the failure it prevents is a silent wrong audience, not a visible rejection.
+### ZendeskService — the one path to Zendesk
 
-The scope is merged on `/oauth/token` as well as `/oauth/authorize`. On a code exchange that is
-redundant; on a **refresh** it is load-bearing, because Entra issues the new access token for
-whatever resource `scope` names — so a client refreshing with only the OIDC scopes would silently be
-handed a Graph-audience token, and the failure would surface at `/mcp` an hour after a sign-in that
-looked fine.
+`AddHttpClient<ZendeskService>()` behind `ZendeskRateLimitHandler`. Every call:
 
-The relay half of that switch is retained deliberately, not vestigially: it is the RFC 8707 default,
-and keeping Entra's deviation a value rather than a branch is what makes this server portable (vitally-mcp#156).
+1. **RBAC backstop** — `ToolAuthorizer.EnsureAuthorizedAsync(verb)`: GET → read, POST/PUT/PATCH → write, DELETE → delete. Tools keep that mapping faithful: reads (macro preview included) are GETs, and **a write tool never issues a DELETE** — `Add_user_to_organization` moves a user with a `PUT`, for instance — so the write tier never needs the delete tier.
+2. **Credential** — the caller's own `Authorization` header from `ZendeskCredentialProvider`, per request; the shared `HttpClient` is never mutated.
+3. **Audit** — `LogAction` per upstream call; record ids captured from the **raw** body by `AuditRecordIds` before any tool reshapes it.
+4. **Errors** — a non-2xx becomes `HttpRequestException` carrying Zendesk's body (truncated to 1 KB), which `ToolErrorResult` surfaces: `{"error":"RecordInvalid","details":…}` is what the model needs to correct its call. The server-side record logs status and resource type only.
 
-### Upstream endpoints come from OIDC discovery, not from `Authority`
+**Credential boundaries.** The base URL decides where the caller's token goes, and tool arguments can come from a model that has just read untrusted ticket content:
 
-The façade above owns `/oauth/authorize`, `/oauth/token` and `/oauth/register`; those keep naming our
-own origin and are unaffected by anything here. This section is about the *other* half — the four
-**upstream** URLs the proxy needs, which used to be string-concatenated onto `OAuth:Authority` in
-the previous provider's path shapes and are now read from `{Authority}/.well-known/openid-configuration`
-(`UpstreamOidcMetadata.cs`, vitally-mcp#104).
+- `ResolveBrandBaseUrlAsync(brand_url)` accepts only `https` hosts named by the account's own `/api/v2/brands` (`brand_url` hosts and host mappings, cached 10 min). A Help Center tool passes `brand_url` through the `brandUrl` parameter — never builds a host itself.
+- `DownloadAsync(url)` (attachments, embedded article images) refuses any host that is not the account's own or one of its brands', before sending anything.
+- `ZendeskService.Segment()` escapes caller strings used in paths; `BuildUrl` escapes every query value.
 
-| Endpoint | Read by | Was |
+**`AuditRecordIds` for Zendesk shapes:** ids are numbers (rendered as raw text); the primary collection is the first array of objects in the body (`tickets`, `results`, `articles` — Zendesk serialises it before sideloads such as `users`), `meta`/`links` ignored; a single record is bare or wrapped (`{"ticket":{…}}`). The mutation-URL fallback accepts only a **numeric** last segment — Zendesk paths also end in locales and collection names, and recording `en-gb` as a record id would be a fabricated identifier.
+
+**Paging.** Tools that page for the caller pass Zendesk's cursor through (`after_cursor` → `page[after]`, `pagination_info {has_more, next_cursor, page_size}`). `GetAllPagesAsync` pages on the server's behalf (sideloads merged) up to `MaxAutoPageFetches`, marking the audit record truncated when it stops early. Analytics tools read at most `MaxAnalyticsTickets` tickets and refuse beyond it, saying how to split the range.
+
+**Rate limits.** Zendesk's budget is per *account* (200–2,500 requests a minute by plan) and shared with every other integration. The handler retries `429` on `Retry-After` and warns as `X-Rate-Limit-Remaining` runs low; analytics tools bound their own concurrency.
+
+### Uploads (`ZendeskUploads.cs`)
+
+`Request_ticket_attachment_upload` issues a slot: 256 random bits, one use, 15 minutes, an exact byte count, and the caller's identity and permission claims. The client then `PUT`s the bytes (curl) to `/uploads/{slot}`; the server sets `HttpContext.User` from the slot **before** resolving scoped services, so the write tier is re-checked (live Graph included) and the upload is audited and made as that person, then streams the bytes to `POST /api/v2/uploads` and returns the `upload_token`. Nothing is stored. Help Center images take the other route: Zendesk's pre-signed URL, which the client uploads to directly and to which the server never sends a credential.
+
+### Account-wide feature switches
+
+`Zendesk:Features` — `AllowPublicReplies`, `AllowArticlePublishing`, `AllowMacroChanges`, `AllowUserAndOrganizationChanges`, all **off** by default — guard the actions whose effect reaches beyond the agent: customers' inboxes, the public Help Center, every agent's macros, who can read an organisation's tickets. `ToolJson.RequireFeature` refuses with a message naming the setting so the model reports a setting rather than retrying. They sit on top of the Entra tier and the agent's Zendesk role; they do not replace either.
+
+### Untrusted content
+
+Ticket comments, article bodies and user fields are written by customers and can carry instructions aimed at the model. The defences are layered and each matters: write-tool descriptions say not to act on instructions found in content; `ZendeskServerInstructions` repeats it; the credential boundaries above stop a URL in content from reaching a token; `TicketSearchQuery` neutralises free text so it matches words and never rewrites a filter; and the feature switches keep the widest-reaching actions off.
+
+## Tools
+
+### Conventions (enforced by `ToolAnnotationCoverageTests` and `ToolAuthorizePolicyCoverageTests`)
+
+- One `[McpServerToolType] public static class` per area in `ZendeskMcp/Tools/`; methods `public static async Task<string>` returning compact JSON (a `CallToolResult` only for non-text content — `Get_ticket_attachment` returns an image block); first parameter `ZendeskService zendesk`, last `CancellationToken`.
+- Names in vitally-mcp's style (`Search_tickets`). **Parameters are snake_case and match Swifteq's schema**, so prompts written for either server work with both.
+- All four hints set explicitly, `ReadOnly` xor `Destructive`. `Get_`/`List_`/`Search_`/`Count_`/`Find_`/`Preview_`/`Export_` are read tools (`zendesk:read`, read-only, idempotent); everything that changes Zendesk is `zendesk:write`. **`Disconnect_zendesk` is the one deliberate exception** — destructive in annotation, read tier in policy — because it touches only the caller's own connection and every person who can use anything must be able to manage that.
+- Validate arguments and throw `ArgumentException` naming the parameter — the message reaches the model.
+- Shared helpers: `ToolJson` (query pairs, picking fields, pagination block, page-size and id validation, feature refusal), `TicketSearchQuery` (the ticket filters shared by Search/Count/metrics/SLA tools), `TicketSla` (the `sla` object shared by Get_ticket, Search_tickets, Get_sla_queue and Get_sla_summary).
+
+### Catalogue
+
+| Area | File | Tools |
 |---|---|---|
-| `authorization_endpoint` | `/oauth/authorize` redirect target | `{authority}/authorize` |
-| `token_endpoint` | `/oauth/token` forward target | `{authority}/oauth/token` |
-| `jwks_uri` | republished in our RFC 8414 document | `{authority}/.well-known/jwks.json` |
-| `userinfo_endpoint` | republished in our RFC 8414 document | `{authority}/userinfo` |
-
-**Choosing a different `Authority` cannot fix the old shapes**, which is the obvious first instinct
-and a dead end. Entra's issuer is `https://login.microsoftonline.com/{tid}/v2.0` while its endpoints
-hang off `https://login.microsoftonline.com/{tid}/oauth2/v2.0/` — no single prefix yields both — and
-its `userinfo_endpoint` is on `graph.microsoft.com` entirely. The discovery *path* is the one
-concatenation that is safe, because OIDC Discovery §4 standardises it.
-
-The bottom two rows are why this is a correctness fix rather than tidying: they are published to every
-MCP client as fact, so a wrong value is advertised, not merely used.
-
-**The document must speak for `Authority`.** `issuer` in the fetched document is checked against
-`OAuth:Authority` before any endpoint is read (OIDC Discovery §4.3) — the same anti-mix-up control as
-the RFC 8414 §3.3 rule the façade section describes, and for the same reason: a metadata document can
-only ever speak for its own issuer. It is load-bearing rather than decorative, because the discovery
-client follows redirects; without the check a redirect could hand us another provider's endpoints,
-which we would cache and then republish to clients as *this* provider's. Trailing slashes are
-normalised on both sides and nothing else is — providers differ on it and Entra's carries none, so that
-much drift is tolerated and no more.
-
-**Fail-fast.** `StartupGuards.EnsureUpstreamOidcEndpointsAsync` resolves the document once after
-`builder.Build()` (15 s cap) and throws if it is unreachable or missing any of the four, so the
-container refuses to start rather than serve unverified endpoints. It is a no-op when
-`OAuth:SharedClientId` is unset — no proxy, nothing reads the document, no reason to depend on the
-provider at boot. `proxyEnabled` is taken from the **resolved** `IOptions<OAuthOptions>`, not from
-`oauthSection[...]` alongside `noAuth`: that composition-time read happens before
-`WebApplicationFactory` injects test configuration, so reading it raw would silently skip the guard
-in every integration test.
-
-After startup the endpoints are cached for 12 h; a *failed refresh* falls back to the last resolved
-copy rather than failing the request, since startup already proved those values good. The fail-fast
-that matters is the one before the server accepts traffic.
-
-Two details of that fallback are easy to get wrong and are pinned by tests:
-
-- The stale copy is **re-cached** for `FailedRefreshRetryInterval` (1 min) before being returned.
-  Without that, a prolonged provider outage would put a fresh discovery attempt — and a wait of up to
-  the 10 s client timeout — in front of *every* proxy request once the TTL lapsed, turning a fallback
-  meant to absorb the outage into an amplifier of it.
-- The fallback is gated on **the caller's cancellation token**, not on the exception type. An
-  `HttpClient` timeout surfaces as `TaskCanceledException` — an `OperationCanceledException` — so
-  filtering that type out would have excluded a slow provider, which is precisely the case the
-  fallback exists for. Only a genuinely cancelled caller skips it, because there is then no one left
-  to serve.
-
-`UpstreamOidcMetadata` funnels every failure mode — transport errors included — into
-`InvalidOperationException`, so `StartupGuards` catches two specific types rather than a catch-all.
-
-### Configuration (ZendeskServerOptions.cs + OAuthOptions.cs)
-
-`ZendeskServerOptions` (singleton, bound from `Vitally:` section):
-- `Region` — `EU` (default) or `US`. Validated at startup.
-- `Subdomain` — required only when `Region=US`.
-- `KeyVaultUri` — Azure Key Vault URI. When unset, the server requires `DevelopmentApiKey` instead (local dev only).
-- `DefaultSecretRef` — Key Vault secret name to fetch (default `vitally-shared`).
-- `SecretCacheDuration` — TTL for the in-memory API key cache (default 5 min).
-- `DevelopmentApiKey` — local-only fallback used when `KeyVaultUri` is unset.
-- `BaseUrl` — computed: EU → `https://rest.vitally-eu.io`; US → `https://{Subdomain}.rest.vitally.io`.
-- `MaxAutoPageFetches` — hard cap on page fetches per server-side filtered call (default 10; 100 items/page). Bounds fan-out against Vitally's 1000 req/min budget.
-
-`OAuthOptions` (singleton, bound from `OAuth:` section):
-
-> **The targets now agree on the five IDENTITY settings** — `Authority`, `Audience`,
-> `UpstreamResourceScope`, `SharedClientId` and the secret *value*. They diverged while vitally-mcp#108 was
-> half-applied and the 2026-09-16 flip reunified them, so those five are what vitally-mcp#102 collapses.
->
-> ⚠️ **`Resource` and `PublicBaseUrl` are not among them and must not be swept into that collapse.**
-> Each names its own origin: give staging production's `Resource` and it publishes an RFC 9728
-> document naming a server it is not, which every strict client rejects. Same for `PublicBaseUrl` — and
-> the *Container App secret name* behind `SharedClientSecret` is now the **same** on both —
-> `entra-oauth-client-secret` — since vitally-mcp#156 normalised staging onto production's name and removed the
-> retained rollback credential that had occupied the other one.
->
-> | | Production (Entra, since 2026-09-16) | Staging (Entra, since 2026-09-03) |
-> |---|---|---|
-> | `Authority` | `https://login.microsoftonline.com/75bd…/v2.0` | *same* |
-> | `Audience` | `https://vitally.fiscaltec.com` (no slash) | *same* |
-> | `Resource` | `https://vitally.fiscaltec.com/` | `https://vitally-staging.fiscaltec.com/` |
-> | `UpstreamResourceScope` | `https://vitally.fiscaltec.com/mcp.access` | *same* |
-> | `SharedClientId` | `c3812e7d-a413-4169-b57e-803326611ba3` | *same* |
-> | `SharedClientSecret` | `secretref:entra-oauth-client-secret` | *same* |
->
-> `infra/terraform/variables.tf` defined these as `oauth_*` / `staging_oauth_*` pairs until vitally-mcp#156
-> collapsed them onto the shared `oauth_*` set, closing vitally-mcp#102. Only `oauth_resource` and
-> `public_base_url` remain per-target.
-
-- `Authority` — the provider's OIDC **issuer** identifier (see the per-target table above; Entra's is `https://login.microsoftonline.com/75bd6050-92a8-4bde-a406-50000b310c86/v2.0`). It is *not* a prefix the endpoint URLs are built from: `{Authority}/.well-known/openid-configuration` is fetched and the endpoints come from that document. The trailing slash is whatever the provider's own issuer carries — Entra's has none.
-- `Audience` — the identifier validated against the JWT `aud`. Under **Entra** that is the App ID URI `https://vitally.fiscaltec.com` — **with NO trailing slash**, because Entra refuses to register a slash-suffixed `identifierUris` value. Validated against the JWT `aud` claim, though not alone: `OAuthOptions.ValidAudiences` also accepts `SharedClientId`, and that is what a **v2** access token actually carries (a v1 token carries this App ID URI). One registration is both the OAuth client and the API resource, so the two are the same object. See the divergence warning below for why this must not be reconciled with `Resource`.
-- `Resource` — canonical resource identifier published in `/.well-known/oauth-protected-resource` (falls back to `Audience` if empty). Set explicitly when MCP clients validate metadata `resource` against the server URL/origin (RFC 8707 + RFC 9728 compliance) — the published client rejects the whole document on a mismatch. **It must not be reconciled with `Audience`** — see the divergence warning below.  Second role: `PublishedResourceIdentifier` (this value, falling back to `Audience`) is what an incoming RFC 8707 `resource` parameter is validated *against* on `/oauth/authorize` and `/oauth/token` — so it is now a control on what audience a caller may ask to be bound to, not only a value published. `PublicBaseUrl` is the odd one out: it is an origin, so no trailing slash (and `Validate()` trims one anyway).
-
-> ⚠️ **`Audience` and `Resource` differ by exactly one character and must stay that way.** They were
-> equal under the previous provider — its API identifier happened to carry a trailing slash, as does
-> the form clients normalise to — so they read as one setting, and `infra/terraform/` fed both from a
-> single `oauth_audience` variable. vitally-mcp#108 split that variable, which is what makes the difference
-> structural rather than a convention someone has to remember.
->
-> | | Historical posture (retired provider) | Entra posture (both targets, live) |
-> |---|---|---|
-> | `OAuth:Audience` — validated against JWT `aud` | `https://vitally.fiscaltec.com/` | `https://vitally.fiscaltec.com` — **no slash**, Entra refuses to register one on `identifierUris` |
-> | `OAuth:Resource` — published in RFC 9728, and validated against | `https://vitally.fiscaltec.com/` | `https://vitally.fiscaltec.com/` — **unchanged**, Claude Code normalises to it |
->
-> Reconciling them "for consistency" breaks token validation in one direction and the metadata
-> document in the other. On staging they diverge by *host* as well, because one app registration
-> serves both origins (vitally-mcp#107), so a staging token's `aud` is production's App ID URI — expected, not
-> drift. `OAuthOptions.IsResourceIndicatorAllowed` tolerating exactly one trailing slash is what lets
-> the two forms name one resource — see `docs/runbooks/entra-app-registration.md`.
-- `UpstreamResourceScope` — `https://vitally.fiscaltec.com/mcp.access` on **both** deployed targets. Setting it makes the proxy **terminate** the RFC 8707 `resource` parameter and name the API by this scope instead; leaving it empty relays `resource`, which is the RFC 8707 default and what a conforming provider expects. Entra is the outlier that requires it set. It stays a configured *value* rather than a branch in `Program.cs`, which is what lets this server front another provider without a code change (vitally-mcp#156). One switch, because neither half works alone — see the `resource` section above. Validated at boot as a single whitespace-free token.
-- `SharedClientId` — the pre-registered client every MCP client converges on via the DCR shim: the Entra app registration `c3812e7d-a413-4169-b57e-803326611ba3` on **both** targets. When set, the OAuth proxy endpoints become active. It is also a valid `aud` — see `Audience`.
-- `SharedClientSecret` — confidential-client secret for `SharedClientId`, injected server-side at `/oauth/token`. On both targets its value comes from the Key Vault secret `entra-mcp-client-secret`, but the app does **not** read the vault for it: the value was **copied** into a Container App secret named `entra-oauth-client-secret` on **both** targets (vitally-mcp#156 normalised staging onto production's name) and `OAuth__SharedClientSecret` is a `secretRef` to that copy. That is not the `vitally-shared` pattern, and it means **rotating the Key Vault secret alone changes nothing the app sends** — the runbook carries the corrected, mechanically-verified procedure (vitally-mcp#138). Two traps it records, both measured 2026-09-21: `az containerapp secret set` does **not** roll a revision, and **staging cannot rehearse the step that needs one** — staging is `minReplicas: 0` so a cold start reads the new value and the roll looks optional, while production's warm replica keeps the old value until restarted. One app registration serves both targets, so the final credential delete is global and cannot be rehearsed in isolation either: staging is the first half of the real rotation, not a dry run of it. It **expires 2027-03-01** — a hard outage date, but not for the reason the vault pattern would suggest: the app never reads the vault for it, so the failure is **Entra** rejecting the expired credential at `/oauth/token` with `invalid_client`, and no Key Vault state affects it. Rotation is in `docs/runbooks/entra-app-registration.md`.
-- `AllowedClientRedirectUris` — non-loopback `redirect_uri` allowlist for the OAuth proxy. Loopback URIs (`localhost`, `127.0.0.1`, `[::1]`) on any port are always allowed per RFC 8252 §7.3; this list covers hosted MCP clients like `https://claude.ai/api/mcp/auth_callback`. `OAuthOptions.IsRedirectUriAllowed(uri)` is the single check; `/oauth/authorize` and `/oauth/register` both use it. **This is the only thing standing between the proxy and an open redirector with authorisation-code theft — never bypass it.**
-- `PublicBaseUrl` — canonical public origin (e.g. `https://vitally.fiscaltec.com`). When set, `/.well-known/*` metadata and the OAuth proxy callback are built from this instead of the request `Host`, defending against Host-header injection into the metadata documents. Empty in local dev (falls back to request scheme+host so loopback works). Validated as absolute https.
-- `NoAuth` — local-only dev flag that bypasses JWT validation entirely.
-
-`ToolAuthorizationOptions` (singleton, bound from `Authorization:` section):
-- `Enabled` (default `true`), `ReadPermission` (`zendesk:read`), `WritePermission` (`zendesk:write`), `DeletePermission` (`zendesk:delete`), `CustomPermissionsClaim` (default `https://vitally.fiscaltec.com/permissions`).
-- `ReadOnly` (default `false`) — deployment-level read-only kill switch. When true, **every** mutating tool call (create/update/delete) is denied in `ToolAuthorizer` (checked before the `Enabled`/`NoAuth` gate, so it holds even with RBAC off), and the destructive tools are hidden from `tools/list` via an `AddListToolsFilter`. A blunt safety net for read-only deployments that doesn't depend on the per-user Entra-group RBAC. Denials are audited via `LogDenied`.
-- `LiveGroupCheck` (default `false`), `LiveGroupCacheSeconds` (default `60`), `LiveGroupStaleSeconds` (default `3600`; `0` disables stale serving), `ReaderGroupId`/`EditorGroupId`/`AdminGroupId` (Entra group object ids).
-- **Entitlement comes from Entra group membership, resolved live from Graph — nothing in the token grants access.** `LiveGroupCheck` is `true` on every deployed target, and that flag alone chooses the mode: on, permissions come from Graph; off, from the token's `permissions` / `CustomPermissionsClaim` / `scope` claims. The claim path is a *different mode*, not a fallback beneath the live one, and there is no route from one to the other — including when the resolver is missing entirely, which denies rather than quietly selecting the claim mode. Those claim settings are inert on every deployed target, for two independent reasons: vitally-mcp#108 removed the code path that read any claim while `LiveGroupCheck` is on (PR vitally-mcp#125, `45a51db`), and vitally-mcp#156 removed the provider hook that used to mint one. Nothing mints such a claim, and nothing would read it if it did.
-- **Live group check (preferred for prompt propagation):** when `LiveGroupCheck=true`, `ToolAuthorizer` resolves permissions from the caller's *current* Entra group membership via `GraphGroupPermissionResolver` (Microsoft Graph — it lists each configured group's `transitiveMembers` filtered to the caller's object id, using the managed identity, cached `LiveGroupCacheSeconds` per user) instead of the token claim — so grants and **revocations** take effect within the cache window regardless of token/refresh age (a claim is frozen at login and does not refresh with the token). **`transitiveMembers` expands nested groups**, so a user who gets a tier via a department group nested inside an `sg-vitally-*` group is authorised, not only users assigned to the `sg-vitally-*` group directly. The object id is taken from the `oid` claim alone — `CallerIdentity` never parses `sub` (vitally-mcp#156) — so a token without `oid` resolves to nothing and the call is denied. Requires the managed identity to hold Graph `GroupMember.Read.All`.
-- **A Graph failure degrades in one step, then denies** (vitally-mcp#106, vitally-mcp#108). The order is **fresh Graph → stale Graph → deny**: `GraphGroupPermissionResolver` keeps each successful lookup with the time it was resolved and, when a Graph call fails, serves that caller's last known-good set for up to `LiveGroupStaleSeconds` (default 1 h) before giving up and returning null — at which point `ToolAuthorizer` denies, explicitly and with a log line saying which of the two fail-closed routes was taken. Serving stale logs **one** warning carrying the caller's Entra **object id** — the same `oid` `CallerIdentity` resolves for the audit record, not the JWT `sub`, so a stale-serve line joins to the audit trail and to the membership that caused it — and how stale the result is in seconds. Never the email, never two lines per **resolver invocation** — but a single `tools/call` invokes the resolver at least three times during an outage (see `TierServedStale` under `AuditOptions`), so expect three warnings per call, not one. It also **reports** the stale serve back to its caller (`ResolvedPermissions.ServedStale`, vitally-mcp#161), which is what lets the tool-call audit record say `tierStale=True` — see `AuditOptions` below.
-  - **Why it exists:** the stale copy is the only thing between a Graph outage and a total denial, now that no claim can authorise. Bounded staleness is the trade — a revoked user could retain access for up to the window, but only while Graph is unavailable, which is strictly tighter than the 8-hour frozen claim the design tolerated before the live check existed. `LiveGroupStaleSeconds: 0` turns the protection off and denies immediately.
-  - **The two windows are separate on purpose, and must stay separate.** `LiveGroupCacheSeconds` governs answering *without asking Graph*; `LiveGroupStaleSeconds` is consulted *only after a Graph call has failed*. Collapsing them — e.g. by simply lengthening the cache TTL to an hour — would stop revocations propagating, which is the whole reason the live check exists. `ReHitsGraph_OnceTheFreshTtlLapses_DespiteRetainingAStaleCopy` is the regression guard.
-  - Age is measured against an injected `TimeProvider`, not by cache expiry: the warning needs the age itself, and `IMemoryCache` expiry cannot be wound forward in a test. The cache entry is keyed per user, which is what stops one caller's retained tier being served to another during an outage (`DoesNotServeOneUsersStaleResult_ToAnother`).
-  - **The degraded path is observed, not just unit-tested** (`StaleEntitlementCompositionTests`). vitally-mcp#106 shipped it with unit coverage alone and it had never been seen working; staging cannot induce a Graph failure in isolation, because it shares the managed identity and CAE with production. vitally-mcp#108 closed that gap with a composed-host test that drives the real wiring — DI, the typed Graph client, the singleton `IMemoryCache` that carries the retained copy *between requests*, the authorizer, the policy handler, the SDK filter — and reads the outcome off `tools/list` across an outage that starts, is survived, and then outlasts its window. A resolver handed a fresh cache per request would pass the unit tests and fail that one.
-  - **The claim tier used to sit beneath the stale cache and was removed at the cutover (vitally-mcp#108).** While the provider's post-login hook minted the claim it genuinely authorised, which is why vitally-mcp#106 added the stale cache *beneath* rather than in place of it. vitally-mcp#108 removed the code that reads any claim while `LiveGroupCheck` is on, so no minted claim could authorise anyone; vitally-mcp#156 then deleted the hook itself, so none is minted. A fall-through could therefore only ever have denied, leaving code that read like a working fallback and behaved like a silent denial. Do not reinstate it "as a safety net".
-- Server-side RBAC backstop. `ToolAuthorizer.EnsureAuthorizedAsync(method, ct)` is awaited from **`ZendeskService.SendAsync`** — the single point every Vitally call funnels through — so all 93 tools are covered without per-tool annotation. The HTTP verb maps to the tier: GET → read, POST/PUT/PATCH → write, DELETE → delete (unknown verbs fall back to the strictest). Resolution is `HasEffectivePermissionAsync`, exactly as for discovery filtering (see above), so the two cannot disagree. Bypassed when `Enabled=false` or `OAuth:NoAuth=true`. **The `ReadOnly`/`Destructive` tool attributes are advisory client hints; this is the actual enforcement — when adding a new call path, route it through `ZendeskService.SendAsync` so it stays covered, and never call the Vitally API around it.**
-- **Per-caller discovery filtering.** All 93 tools carry `[Authorize(Policy = "zendesk:read|write|delete")]` (56 read / 25 write / 12 delete). `mcpBuilder.AddAuthorizationFilters()` makes the SDK evaluate that attribute on each tool, so `tools/list` shows only the tools the caller may actually invoke and an unauthorised call is rejected before the handler runs. **It and `AddAuthorizationBuilder()` are registered unconditionally — never guarded on `OAuth:NoAuth`.** Once any tool carries `[Authorize]`, the SDK *fails closed*: it throws ("Authorization filter was not invoked for tools/call operation, but authorization metadata was found on the tool") so a guarded registration yields a dev server that can neither list nor call any tool. Dev mode stays unfiltered instead via `ZendeskPermissionHandler`, which succeeds when `ToolAuthorizer.IsAuthorizationBypassedAsync()` reports RBAC disabled or `NoAuth`. `ZendeskPermissionHandler` resolves those policies through `ToolAuthorizer.HasEffectivePermissionAsync`, so discovery and the `ZendeskService.SendAsync` backstop cannot drift apart. This is **discovery filtering** — the security boundary remains `SendAsync`. Distinct from the deployment-wide `Authorization:ReadOnly` switch, which hides destructive tools from everyone.
-- A denial refused at this SDK authorisation checkpoint is audited separately: see `LogToolCallDenied` under `AuditOptions` below — `SendAsync`'s own `LogDenied` never fires for a tier mismatch, because the SDK rejects the call before `SendAsync` runs.
-
-> ⚠️ **Log levels are a security control here, and they live in `Program.cs`. Do not move them.**
->
-> ⚠️ **vitally-mcp#143 raised `builder.Logging.AddFilter("System.Net.Http.HttpClient", LogLevel.Warning)` as a
-> PII control. That premise was wrong**, and it is recorded here because the mistaken version is the
-> intuitive one: the concern was that `Search_users` / `Search_admins` terms reach logs via the
-> outbound request URI. **.NET redacts query values by default** — the logged form is
-> `GET .../users/search?*`, where `?*` is the redaction marker, not a truncation. Verified 2026-09-18
-> by probe and against live production logs, in which every query is `?*`; nothing here disables it.
->
-> So the filter is **noise reduction** (19.5% of console bytes), with defence-in-depth as a footnote
-> should redaction ever be turned off. Path segments are *not* redacted. They usually carry record
-> ids, which `AuditLogger` deliberately records anyway — **but not always**: tools put caller strings
-> into the path unescaped, so on a mistyped id the segment is whatever the model typed, a customer
-> name or an email (found in vitally-mcp#94). That is why the vitally-mcp#94 failure record below logs only the resource
-> type. ⚠️ The same reasoning reaches `AppDependencies`, whose client spans carry the path:
-> `QueryStringRedactingProcessor` covers only the query string, so caller-typed segments can land in
-> that table. Not addressed by vitally-mcp#94.
-> Four `Microsoft.AspNetCore.*` noise filters sit beside it, all `Warning` rather than `None` so
-> framework *warnings* still surface: the application's own fault reports cover the paths it owns
-> and nothing else, so hosting and routing faults surface only through those categories.
->
-> **The application's own failure records (vitally-mcp#94).** Until vitally-mcp#94 there was exactly one `LogError` call
-> site (`ToolAuthorizer`, no resolver registered), and a *surfaceable* tool failure — a Vitally
-> error, a rejected argument — reached the client and left no server-side trace at all:
->
-> | Record | Category | Fires on |
-> |---|---|---|
-> | Tool-call failure | `ZendeskMcp.ToolCallFailures` (`ToolCallFailureLog`) | any failed `tools/call` that reaches the filter pipeline, bar RBAC denials and a cancelled caller |
-> | Upstream non-2xx | `ZendeskMcp.ZendeskService` | every non-2xx from Vitally, per upstream call |
-> | Absorbed summary section | `ZendeskMcp.ZendeskService` | a `Get_organization_summary` section that became `{error: …}` inside a successful result |
-> | Key Vault fetch | `ZendeskMcp.VitallyApiKeyProvider` | a failed or valueless `vitally-shared` fetch |
->
-> Alongside them, and not replaced: `ToolAuthorizer`'s own sites (that one `LogError` and two
-> `Warning`s), `AuditLogger`'s `LogDenied` / `LogToolCallDenied` `Warning`s, the `Warning` sites in
-> `GraphGroupPermissionResolver`, `UpstreamOidcMetadata` and `ZendeskRateLimitHandler`, and the
-> `ZendeskMcp.Authentication` re-emit below. **The MCP SDK also logs** any exception our filter does
-> not convert — once, at `Error`, under `ModelContextProtocol.Server.McpServer`, with the exception
-> attached. Pinned (exactly one, exception attached) by
-> `AnUnexpectedException_IsLoggedAtError_AndStillLeftToTheSdk`, because the counts below rest on it.
->
-> ⚠️ **Our records log the exception _type_, the status and the resource _type_ — never the
-> exception message, never an attached exception, never the rest of the path.** The message is what
-> the client is shown, and it carries a truncated upstream body (`HttpRequestException`) or the
-> caller's own input (`ArgumentException`); an attached exception leaks the same text, since the
-> console formatter and the exporter both render it. The path is cut to `/resources/<type>/…` because
-> tools put caller strings into it unescaped, and `<type>` is checked against the set this code
-> builds rather than read from a parsed `Uri` — `Uri` normalises `../` first, so an id of
-> `../Alice Smith` would otherwise *become* the resource type; anything unknown reads
-> `(unrecognised)`. An invented tool name is logged as `unrecognised`, checked against
-> `KnownToolNames` as the audit breadcrumb is. These categories stay on the console, unlike
-> `ZendeskMcp.AuditLogger`, which is why they may carry less than it does. The tool-call and upstream
-> records carry the correlation id that joins them to the audit record; the Key Vault record does
-> not, and joins through the `ToolCallFailures` line of the same call. **Do not "improve" a failure
-> record with `ex.Message`, `LogError(ex, …)` or the full path** — `CapturingLogger.Exceptions`
-> exists so the tests can see the second of those.
->
-> **Every one of these writes is best-effort and swallows _every_ exception, cancellation
-> included** — a throwing sink must not replace the tool's result, the `HttpRequestException` that
-> carries Vitally's body, Azure's Key Vault error, or a summary's per-section isolation. Do not add
-> `when (ex is not OperationCanceledException)` to those guards: the caller cancelling is decided
-> on the caller's token inside `ToolCallFailureLog`, so a cancellation reaching a guard came from the
-> sink (Copilot on vitally-mcp#177). Like the audit records, they are exported whether or not the request's
-> trace was sampled (vitally-mcp#178).
->
-> The **Key Vault record is the deliberate exception**: it attaches the exception, because Azure's
-> error carries its status and code — the difference between a missing role and an unreachable vault
-> — and never the secret or customer data. (A transport-level failure carries neither, only the
-> connection error.)
->
-> ⚠️ **The SDK's own line does not follow these rules**, and is not ours to change here: its
-> attached exception carries the message and stack, and on an unknown tool it logs the caller's
-> invented name at `Error`. Today the exceptions that reach it — `RequestFailedException`,
-> `JsonException`, `InvalidOperationException`, a timeout's `TaskCanceledException` — do not carry
-> customer data, but the console is only as clean as that remains true.
->
-> **Levels.** `Error` for what is ours or Vitally's to fix: a 5xx, a 401/403 (the shared key), a
-> 407/408, a 429 (the budget), no response at all (with `HttpRequestError` saying which of DNS,
-> refused or TLS), a timeout (logged as *"timed out"*, not *"failed upstream"* — it is a
-> `TaskCanceledException`, not an `HttpRequestException`), or an unexpected exception, which includes
-> an `ArgumentOutOfRangeException` / `ArgumentNullException` (almost always our bug). `Warning` for
-> the caller's input: any other 4xx, a plain `ArgumentException`, a protocol refusal such as an
-> unknown tool, and an absorbed summary section. **Not logged:** an RBAC denial (`LogDenied` records
-> it, when `Audit:Enabled`), and a cancelled caller — but a **timeout** *is* logged: both are
-> `OperationCanceledException`, so the test is the caller's token, not the type. (No `ZendeskService`
-> method forwards a caller token today, so upstream calls and Key Vault fetches are never cancelled
-> by a disconnect; the gate is a safeguard for when one does.) `ToolCallFailureLog.LevelFor` is the
-> one mapping, shared by both upstream records.
->
-> ⚠️ **Two known blind spots for an `Error`-only alert.** A 4xx on a request the *caller did not
-> shape* — Vitally renaming an endpoint, or rejecting a parameter this server adds — is a `Warning`.
-> And an argument of the **wrong JSON type** (`{"limit":"abc"}`) fails in the SDK's binding as a
-> `JsonException`, which is indistinguishable here from our own parse of a bad upstream body, so it
-> is logged as unexpected at `Error` — twice, with the SDK's.
->
-> **`Error` lines per event**, so vitally-mcp#159 alerts knowingly. `ZendeskMcp.ToolCallFailures` alone sees
-> every row that fails the call; add `ZendeskMcp.ZendeskService` for the absorbed-summary rows,
-> which the tool-call log cannot see because the call succeeds:
->
-> | Event | `Error` lines |
-> |---|---|
-> | Vitally 5xx / 401 / 403 / 407 / 408 / 429 | 2 — `ToolCallFailures` + `ZendeskService` |
-> | No response (DNS, refused, TLS) | 1 — `ToolCallFailures` |
-> | Timeout | 2 — `ToolCallFailures` (*timed out*) + the SDK |
-> | Unexpected exception, including a wrong-typed argument | 2 — `ToolCallFailures` + the SDK |
-> | Key Vault outage | 3 — `VitallyApiKeyProvider` + `ToolCallFailures` + the SDK |
-> | Unknown tool | 1 — the SDK only, with the invented name; ours is a `Warning` |
-> | A summary sub-call 5xx | 1 — `ZendeskService`, plus a `Warning` per absorbed section; the tool succeeds |
-> | A summary sub-call with no response or a timeout | **0** — only the section `Warning`s |
-> | Graph outage beyond `LiveGroupStaleSeconds` | **0** — every call is denied, and every line is a `Warning` |
->
-> The last two rows are total or partial outages an `Error`-only alert cannot see; vitally-mcp#159 needs a
-> `Warning`-rate rule for them. The summary rows are why the upstream record is per upstream call
-> rather than per tool call. Unverified: the Azure Monitor exporter may route a record *with an
-> attached exception* to `AppExceptions` rather than `AppTraces`, which would split the Key Vault and
-> SDK lines from ours — check before building a query on one table.
->
-> ⚠️ **But two framework signals are logged at `Information`, and these filters do suppress them.**
-> An earlier version of this note claimed all faults stay visible; that was wrong, and the exception
-> matters when reading an incident:
->
-> | Suppressed | Replacement |
-> |---|---|
-> | `Microsoft.AspNetCore.Authorization` — *"Authorization failed. These requirements were not met…"* | For an **authenticated** caller, `AuditLogger.LogToolCallDenied` at `Warning` with the object id, tool and required permission. For an **anonymous** one, **nothing** — that is the normal MCP probe, and it still returns a 401 |
-> | `JwtBearerHandler` — *"Bearer was not authenticated. Failure message…"* | `Program.cs`'s own `OnAuthenticationFailed`, at `Warning` under `ZendeskMcp.Authentication`, logging the exception **type only** |
->
-> The authentication one is re-emitted because nothing else would record it: an unauthenticated
-> caller never reaches `SendAsync` or the `[Authorize]` checkpoint, so a signing-key rotation, clock
-> skew or a run of forged tokens would otherwise be indistinguishable from silence. It logs the type
-> and **never** `Exception.Message` — IdentityModel builds those from the token's own claims, so the
-> text carries caller-controlled values that may contain newlines.
->
-> What is genuinely given up: a flood of anonymous 401s is invisible in logs. If that needs watching
-> it belongs in a counter or `ContainerAppHTTPLogs`, not Information-level framework text.
->
-> **Two places it must not move to, both of which look reasonable and silently do nothing:**
->
-> - **`appsettings.json`** — `.gitignore` and `.dockerignore` both exclude it (under *"Strong-name
->   keys, certificates and other secrets - do NOT commit"*, beside `*.pfx` and `.env`). A file added
->   there works on a developer machine and never reaches the image. `appsettings.Example.json` *does*
->   carry a `Logging` section; it is a template ASP.NET Core never loads, and is marked **NOT IN
->   FORCE** for this reason.
-> - **Environment variables** — a Container App recreate does not inherit them, so the control would
->   lapse on any target someone forgot. Same reasoning as the `IncludeReads` default (vitally-mcp#139).
->
-> `LoggingFilterTests` pins all of it against the composed host, including that `AuditLogger` still
-> logs at `Information`: a filter on the wrong prefix would delete the audit trail while looking like
-> tidying.
-
-`AuditOptions` (singleton, bound from `Audit:` section):
-- `Enabled` (default `true`), `IncludeReads` (default **`true`** since 2026-09-17 — see below).
-- **`IncludeReads` defaults to true, and the default is the control.** Reads are 56 of the 93 tools, so a target that does not audit them has no meaningful trail — and `AuditLogger` is the only attribution mechanism, because the shared Vitally key means Vitally's own log cannot name a FISCAL user. It defaulted to `false` until 2026-09-17 and no deployed target ever overrode it, so no read had ever been recorded (vitally-mcp#139). ⚠️ **It governs the per-upstream-call records only — `LogAction` — and deliberately not `LogToolCall`.** The tool-call record is emitted for every call whatever the verb, because it is what the acceptance criterion rests on; gating it would let a deployment silently stop recording that reads happened at all, which is vitally-mcp#139's failure again. The lever exists over *volume*, and the volume is in the upstream records — `Get_organization_summary` makes four and the auto-pager can make ten, against one tool-call record. That decoupling is what makes auditing reads affordable. It stays configurable as the ingest-cost lever, but **do not re-solve this with a per-deployment environment variable**: a Container App recreate does not inherit them, so coverage would lapse silently — the same trap this file records for `Authorization__ReadOnly` on staging.
-- `AuditLogger` is invoked from **`ZendeskService.SendAsync`** (same choke point): `LogAction` after each upstream response and `LogDenied` on an RBAC denial. Records the caller's identity, HTTP verb, resource path (query string stripped), status code and duration (vitally-mcp#94) via structured logging. **The identity is resolved in a specific order and only the first step yields an Entra object id** — `CallerIdentity.TryGetObjectId` (the `oid` claim alone, since vitally-mcp#156), then the raw `sub`, then `ClaimTypes.NameIdentifier`, then the literal `unknown`; an unauthenticated caller is `anonymous`. The fallbacks guard against an unexpected token shape rather than a supported path — an Entra token always carries `oid` — and a consistent-but-opaque key beats none. Read a record keyed on anything but a GUID as *"this token shape had no object id"*, not as a defect — so the named properties are *shaped* to become queryable dimensions — and **on production they are now genuinely queryable**, in `AppEvents`, since the 2026-09-25 switch-on (vitally-mcp#147). Staging was switched on the same day and its records are in the same table, separated by `AppRoleName`. ⚠️ Staging is an **on-demand** app and the variable does **not** survive a recreate, so that describes the staging app that exists today, not any future one — a spin-up must set it alongside `Authorization__ReadOnly`. Records predating 2026-09-25 do not exist anywhere — nothing was ever persisted — so the trail begins at that date. **Never log upstream request/response *bodies* here — they can contain customer PII (traits, transcripts).** Note the boundary precisely, because the two rules meet at writes: what is excluded is the **HTTP payload** `ZendeskService` exchanges with Vitally. **Tool arguments are in scope** under the policy below, including a create/update `jsonBody` — *"alice set these fields on this account"* is the audit record for a modification, and omitting it would lose the thing the trail exists to show. This is the attribution mechanism while a single shared Vitally key is in use.
-
-  > ⚠️ **The "keep personal data out of telemetry" rule was withdrawn on 2026-09-17** (decision: dsearle), because it left the trail unable to answer the question it exists for. The replacement is an outcome, not a field list: *the audit trail must show that **this user** called **this tool** and accessed, modified or deleted data for **these customers***. Tool arguments — including free-text search terms that may carry names or email addresses — are in scope. **Response bodies remain excluded**, and that is not the old rule returning: Vitally holds meeting transcripts and arbitrary traits, so logging bodies would put a second copy of the customer database into telemetry under weaker access control, which is a different thing from an audit trail.
-  >
-  > **The tool-call record is implemented (vitally-mcp#147), and it is now the primary record.** `AuditLogger.LogToolCall` is emitted once per **executed** `tools/call` from a filter in `Program.cs` — ⚠️ *executed*, because the SDK's `[Authorize]` checkpoint rejects an out-of-tier call **outside** the filter pipeline, so a **tier-denied call produces only `LogToolCallDenied`**: caller, tool and required permission, but no arguments, correlation id or touched records. The trail is not blind on a denial, but it cannot say what the caller was reaching for. Deliberate boundary, not an oversight. It carries the caller's object id, the tool name, the arguments, the record ids touched, `recordsFetched`/`idsRecorded`/`truncated`, outcome, duration, a correlation id and the permission tier the authorisation decision actually used. `LogAction` is kept as **corroboration** — it shows what the server actually did — rather than as the mechanism.
-  >
-  > Four details worth knowing before changing any of it, each of which is a test:
-  >
-  > | | |
-  > |---|---|
-  > | Ids come from the **raw** upstream body | `GetResourcesAsync` applies `FilterJsonFields` afterwards, so `fields=name` yields results with no `id` at all. Capturing downstream would name nobody on exactly the calls a narrow projection was used for |
-  > | `truncated` ≠ the id cap | It means the **pager** stopped at `MaxAutoPageFetches`, so the matching total is *unknowable* (Vitally exposes only `next`). The id cap shortens the list while `recordsFetched` stays true |
-  > | `ToolCallAuditContext` is **scoped** | The tool's `ZendeskService` writes into it and the filter reads it back. A singleton merges callers together; a transient records nothing. Pinned by `ToolCallAuditCompositionTests`, not unit tests |
-  > | `PermissionTier` is written by `ToolAuthorizer` | The tier must be the one the decision was made against. Re-deriving it would mean a second Graph lookup that could answer differently — and entitlement is resolved live, so nothing could afterwards say which was right. **Unbackfillable**, which is why it could not wait |
-  >
-  > ⚠️ **`TierServedStale` is tri-state, and `unknown` is not a synonym for `False`.** Since vitally-mcp#161 the resolver reports it: `IGroupPermissionResolver` returns a `ResolvedPermissions` record carrying the permissions, `ServedStale` and `Age` in **one** value — a separate "was the last one stale?" query was rejected because it invites the two to be read at different moments. `ToolAuthorizer` passes `ServedStale` straight through, so on the live path the record reads `True` (served from the retained copy after a Graph failure) or `False` (Graph confirmed it, on this call or within `LiveGroupCacheSeconds`). `unknown` remains for the claim path and for a call admitted with RBAC bypassed (`Authorization:Enabled=false` or `OAuth:NoAuth` — the local-dev mode, where the tier reads `unresolved` too), and must stay that way. A call *denied* before any tier resolved never produces this record at all — the SDK checkpoint refuses it and only `LogToolCallDenied` is written. The rule: recording `false` where nothing checked would assert the tier was fresh — a weaker claim dressed as a stronger one, which is the opposite of what the field is for. `RecordResolvedTier`'s `servedStale` parameter is **required**, not defaulted, so a new call site has to say which it is. Null from the resolver still means **deny**. `ToolCallAuditCompositionTests` walks a caller through an outage to prove `False` → `True` → denied through the composed host, and separately splits one call's first check (fresh) from its later ones (stale) to prove the record carries the **first admitting** check's staleness. ⚠️ There are more later checks than the code suggests: **SDK 2.2.0 evaluates the `[Authorize]` policy twice per `tools/call`** (`ConfigureCallToolFilter`, then `ConfigureOrdinaryCallToolFilter`) before the `SendAsync` backstop runs, so during a Graph outage one simple tool call makes at least three Graph attempts and logs three stale warnings — observed by stack trace on 2026-09-29, and pinned by that test's request count. `ResolvedPermissions` is built only through `Confirmed`/`Retained`, so no return site writes `false` by reflex. ⚠️ **Production records written before vitally-mcp#161 deployed all read `unknown`** — the field existed and nothing reported it — so they cannot say whether a tier was stale. `Age` is on the result but **not** in the audit record; the resolver's warning line carries it.
-  >
-  > **Routing is built, and switched on by configuration.** Every audit record carries the `microsoft.custom_event.name` attribute, which the Azure Monitor OpenTelemetry exporter uses to write it to **`AppEvents`** rather than `AppTraces`; `Program.cs` registers the exporter and suppresses the whole `ZendeskMcp.AuditLogger` category from the console **only when `ApplicationInsights__ConnectionString` is set** — **set on both targets on 2026-09-25** (production revision 39, staging revision 17), each verified by reading rows back out of `AppEvents`. ⚠️ Staging is an **on-demand** app and the variable does **not** survive a recreate, so that describes the staging app that exists today, not any future one — a spin-up must set it alongside `Authorization__ReadOnly`. ⚠️ **vitally-mcp#142's console export is ungated on production as of that flip**, because the console stream is now customer-data-free: a breadcrumb stays there carrying the object id, tool name, outcome and correlation id and nothing else, since OpenTelemetry export is asynchronous and a lost export cannot be detected in-process. Design: `docs/superpowers/specs/2026-09-17-logging-observability-design.md`.
-  >
-  > ⚠️ **The audit trail does not depend on trace sampling, and must not start to (vitally-mcp#178).** The distro's
-  > default — read off the 1.6.0 package, because the distro's docs do not state it — is
-  > `EnableTraceBasedLogsSampler = true`: a log record is exported only if its trace was sampled. All
-  > four audit record types (`ZendeskToolCall`, `ZendeskUpstreamCall`, `ZendeskToolCallDenied`,
-  > `ZendeskUpstreamDenied`) are logged inside the request's trace, and traces are rate-limited to
-  > **5 a second** by default — an adaptive sampler, so under sustained load above that rate a
-  > *proportion* of requests lost their records from `AppEvents`, silently. Only the console
-  > breadcrumb survived, and only from 2026-09-26 when the console export went live (vitally-mcp#142); for the
-  > day before that, nothing persisted. `Program.cs` now sets it `false`, pinned by
-  > `LoggingFilterTests.WithAConnectionStringConfigured_TheExporterBranchIsActuallyWiredUp`.
-  >
-  > That makes trace sampling a cost lever that no longer touches the audit trail — set to 10% by vitally-mcp#94's
-  > phase 6, see *Metrics and tracing* under Architecture — but **mind how the
-  > lever works**: `TracesPerSecond` (default 5) **takes precedence** over `SamplingRatio` whenever both
-  > are set, so percentage sampling needs `TracesPerSecond = null` as well, or `SamplingRatio = 0.1F`
-  > silently does nothing. ⚠️ **The `OTEL_TRACES_SAMPLER` / `OTEL_TRACES_SAMPLER_ARG` environment
-  > variables are not a runtime lever here**, whatever Microsoft's docs say: probed against distro 1.6.0 on
-  > 2026-10-01 (vitally-mcp#94), `rate_limited`, `always_on` and `fixed_percentage` were each set as real process
-  > variables and the sampler stayed at the code's 10%. They were not honoured even with the code setting
-  > nothing. Change sampling in `Program.cs`. Never turn `EnableTraceBasedLogsSampler` back on.
-  >
-  > Records emitted **before** vitally-mcp#178 deploys may be missing individually under load — not as whole time
-  > bins, so a coverage check by bin cannot reveal it (see `ACCESS.md`). The gap is **measurable from
-  > 2026-09-26**: every tool call's breadcrumb, carrying its correlation id, has persisted to
-  > `ContainerAppConsoleLogs` since then, so a breadcrumb with no matching `ZendeskToolCall` row in
-  > `AppEvents` is a dropped record. For 2026-09-25 to 2026-09-26 it is unknowable. Not yet measured.
-  >
-  > Verified by behaviour as well as by option (vitally-mcp#178's PR): a probe pointing the exporter at a local
-  > listener, with trace sampling at 0%, received **0 of 5** in-request logs under the default and **5 of
-  > 5** with the switch off. No environment variable overrides it, in either direction — probed for
-  > both `AzureMonitor__EnableTraceBasedLogsSampler` and `AzureMonitorExporter__EnableTraceBasedLogsSampler`
-  > (the downstream exporter's key, which Copilot on vitally-mcp#181 believed was bound after the distro copies its
-  > options): with the code at `false` and that key `true`, 20 of 20 in-request logs were still exported;
-  > with the code at its default and that key `false`, 0 of 20 were. So no `PostConfigure` of the
-  > exporter options is needed, and adding one would guard a path that does not exist. Re-probe on any
-  > distro version bump. A sampled-out request's log carries no `sampleRate`, so `count()` over `AppEvents`
-  > stays an exact audit count however far trace sampling is reduced.
-  >
-  > The reversal is **conditional on access control**, which is therefore part of the design rather than an operational afterthought: the workspace carries **no** role assignments of its own and inherits from the subscription and management group. **Reviewed 2026-09-21 (vitally-mcp#146)**, superseding the 2026-09-17 estimate of "5 users and 28 service principals", which counted a group and an external principal as users and counted assignments rather than principals. Actual: **4** named IT administrators, whose `Owner`/`Contributor` is **PIM-eligible rather than permanent**, plus **2** by-design break-glass accounts; **22** service principals with a read-capable role, of which ~13 are Microsoft platform automation and 8 are FISCAL-controlled (two Azure DevOps connections holding `Owner`); and **one external MSP holding `Owner`** through delegated administration. The review also found **4 orphaned principals** — deleted from the directory, permanently, with 14 live role assignments between them; **13 were removed on 2026-09-21** (80 → 67 effective assignments at the workspace), the 14th held because it sits at management-group scope. ⚠️ `Testing Dan Dan Dan`'s `Reader` was flagged and then **deliberately left in place** (dsearle, 2026-09-21) — do not "tidy" it. ⚠️ **Table-level RBAC cannot fence the audit table off** — Azure RBAC is allow-only, so it adds narrow readers and never subtracts from an inherited `*/read`; the design said otherwise until this review. The data is acceptable to store because it is restricted; if that stops being true, so does the policy.
-  - **It records `oid`, not `sub`, and the difference is not cosmetic.** An Entra v2 `sub` is a *pairwise* identifier — unique per (user, application), and **not resolvable to a person by any Entra lookup**. Keying the audit trail on it gives you records that are consistent and unattributable, which defeats the purpose of keeping one. `oid` is the directory object id: a GUID, stable across every app in the tenant, resolvable with `az ad user show --id`, and carrying no more personal data than the pairwise value. Found by decoding a real staging token during the vitally-mcp#108 validation, *before* the production flip could start writing such records.
-  - **`CallerIdentity` is shared with `ToolAuthorizer` on purpose.** The identifier in an audit record has to be the one the authorisation decision was made against, or a denial cannot be joined to the group membership that caused it. Two components reading claims independently is how those drift apart.
-  - **Every record is keyed on `oid`, and nothing parses a subject for one.** An Entra token always carries `oid`, so a record keyed on anything but a GUID means an unexpected token shape rather than a second provider's format. The federated-`sub` fallback that once existed for the retired provider was removed by vitally-mcp#156; no record predating that is affected, because none was ever persisted (see the Logs row in the Deployment table).
-- A separate call, `AuditLogger.LogToolCallDenied`, is invoked from `ZendeskPermissionHandler` for a denial at the SDK's per-tool `[Authorize]` checkpoint (see the discovery-filtering note above) — it records the caller's Entra object id (resolved by the same `CallerIdentity` the authorizer used, so a denial joins to the membership that caused it), the tool name and the required permission, never the email, request bodies or tool arguments. This exists because that checkpoint rejects out-of-tier calls before `ZendeskService.SendAsync` runs, so `LogDenied` there would never see a tier mismatch.
-
-### API key resolution (VitallyApiKeyProvider.cs)
-
-Scoped. Resolution order on each call to `GetApiKeyAsync()`:
-
-1. If no `SecretClient` is registered (i.e. `KeyVaultUri` not set) and `DevelopmentApiKey` is set, return it. If neither is set, throw.
-2. Check `IMemoryCache` for `"vitally-api-key::{DefaultSecretRef}"`. Return if hit.
-3. Call `SecretClient.GetSecretAsync(DefaultSecretRef)` (uses the Container App's user-assigned managed identity), cache the value for `SecretCacheDuration`, return.
-
-This means: rotating the Vitally key is a `Set-AzKeyVaultSecret` away (cache expires on its own). Per-user keys could be re-introduced by extending the provider to select a different secret name per caller, keyed off a claim or the caller's group membership — no other architecture changes needed. (A provider hook used to mint a `secret_ref` claim for this. This code stopped reading that claim at the vitally-mcp#108 cutover, and vitally-mcp#156 deleted the hook. Vitally API keys are tenant-global anyway, so the idea needs a new motivation before it needs a mechanism.)
-
-### HTTP Service (ZendeskService.cs)
-
-Scoped via `AddHttpClient<ZendeskService>()`. Per-request auth: the constructor takes the per-request `VitallyApiKeyProvider`, and the private `SendAsync(method, url, content?)` helper builds each `HttpRequestMessage`, fetches the API key from the provider, sets the `Authorization: Basic` header on the message, and dispatches via `_httpClient.SendAsync`. The shared `HttpClient` is *not* mutated — there's no `DefaultRequestHeaders.Authorization`, so multi-user safety is preserved.
-
-On non-2xx responses `SendAsync` reads the response body, disposes the response, and throws `HttpRequestException` with `StatusCode` set and a message that includes a truncated copy of the response body. This deliberately replaces `EnsureSuccessStatusCode()` because Vitally returns the actual failure reason (e.g. `{"message":"externalId is required"}`) in the body, and surfacing it gives the LLM something concrete to act on. The MCP SDK only forwards an exception's own message to the client when it is an `McpException`, so a CallTool request filter (`ToolErrorResult` + `AddCallToolFilter` in `Program.cs`) is what actually delivers this body — and the read-only/RBAC denial and `ArgumentException` validation messages — to the client; other (unexpected) exceptions still yield the SDK's generic error. The filter also logs the failure before returning (vitally-mcp#94), by exception type and never by message; `SendAsync` separately logs each non-2xx with the status and the resource type, never the body or the rest of the path. See the log-levels note under *Configuration*.
-
-Standard methods (apply field/trait filtering and the `{results, next}` envelope):
-- `GetResourcesAsync` — list with pagination, sorting, filtering
-- `GetResourceByIdAsync`
-- `CreateResourceAsync` / `UpdateResourceAsync` / `DeleteResourceAsync`
-
-Raw pass-through methods (no field filtering — for endpoints whose response shape is not the standard `{results, next}` envelope, e.g. surveys returning `{data, next}`, customFields returning a bare array, or for sub-resource paths like meeting participants):
-- `GetRawAsync(path, queryParams)` — GET with URL-encoded query string
-- `PostRawAsync(path, jsonBody)`
-- `DeleteRawAsync(path)`
-
-### Rate-Limit Handler (ZendeskRateLimitHandler.cs)
-
-Vitally's documented limit is **1000 requests / minute (sliding window)**. The handler is a `DelegatingHandler` registered via `AddHttpMessageHandler<ZendeskRateLimitHandler>()` in `Program.cs`, so all HTTP calls made by `ZendeskService` go through it transparently.
-
-Behaviour:
-- **On HTTP 429 Too Many Requests:** waits and retries up to `MaxRetries` (default 3). Wait time is taken from `Retry-After` (preferred), then `X-RateLimit-Reset` (Unix seconds), falling back to `FallbackRetryDelay` (default 5s). The wait is capped at `MaxRetryDelay` (default 60s).
-- **On any non-429 response:** if `X-RateLimit-Remaining` is below `LowRemainingThreshold` (default 50), logs a warning via `ILogger` so callers can throttle themselves.
-- **When retries are exhausted:** the 429 response is returned to the caller, and `SendAsync` turns it into an `HttpRequestException` carrying Vitally's body, like any other non-2xx.
-
-All thresholds are public mutable properties, so they can be tweaked in tests or future configuration without touching the handler internals.
-
-Each retry and each exhaustion is also **counted** (`vitally.ratelimit.retries` / `vitally.ratelimit.exhausted`, vitally-mcp#94). They fire only once the limit *has* been hit, so they say how often the server exceeds the 1000 req/min budget, not how close it runs — that is `X-RateLimit-Remaining`, which is still only logged. The advantage over the log lines is a pre-aggregated, dimensioned series rather than message text to parse.
-
-### Metrics and tracing (vitally-mcp#94, phase 6)
-
-Exported to Application Insights only when `ApplicationInsights__ConnectionString` is set, like the audit
-records. (The upstream duration is part of the audit record, so without the exporter it goes to stdout
-with the rest of that record.)
-
-| Signal | Name | What it answers |
-|---|---|---|
-| Upstream call duration | `durationMs` on the `ZendeskUpstreamCall` record (`AuditDurationMs` in `AppEvents`) | Which of a composite tool's upstream calls was slow, joined to the tool-call record by correlation id. Send to body read, 429 waits included |
-| 429 retries / exhaustion | `vitally.ratelimit.retries`, `vitally.ratelimit.exhausted` | How often the server exceeds Vitally's 1000 req/min |
-| Pager truncations | `vitally.autopager.truncations`, tag `resource` | Whether `Vitally:MaxAutoPageFetches` is set where users hit it |
-| Cache hit/miss | `vitally.cache.lookups`, tags `cache` = `api_key` / `group_membership` / `oidc_discovery`, `result` = `hit` / `miss` | Per *lookup*. A miss means the cache did not answer, so an external lookup was required and attempted — counted before the call, so a pre-cancelled request or a credential failure is a miss with no network round-trip. A stale Graph serve after a failed call is a miss |
-| MCP spans | activity source `Experimental.ModelContextProtocol` | A span per request, tool calls included — sampled, and sanitised (see below) |
-
-Three caveats on reading those, each of which would otherwise send a query wrong:
-
-- **The duration is missing for calls that throw.** A timeout, DNS failure or refused connection never
-  reaches `LogAction`, so it has no `ZendeskUpstreamCall` row at all — and timeouts are the slowest calls
-  there are; the failure records are where those appear. It also starts *after* the API key is resolved,
-  so a cold Key Vault fetch shows in the tool-call duration and in no upstream one. It is also gated by `Audit:Enabled` / `Audit:IncludeReads`, so
-  turning reads off as the ingest-cost lever removes every GET's duration too. `AuditDurationMs` is the
-  same property name on `ZendeskToolCall`, so filter on `Name`. Values are truncated to whole
-  milliseconds, so `0` is a real sub-millisecond measurement; `-1` means unmeasured and is unreachable
-  from `SendAsync`, which always passes the elapsed time.
-- **The `group_membership` hit rate counts lookups, and is inflated by design.** `ToolAuthorizer` does not
-  memoise, and SDK 2.2.0 runs at least three checks per `tools/call`, so a single cold call records one miss
-  and two hits; a `tools/list` checks every tool. Read it as "how often Graph was spared", never as "how
-  well `LiveGroupCacheSeconds` is tuned".
-- **The `oidc_discovery` hit rate looks healthy during a provider outage.** After a failed refresh the
-  last-known-good copy is re-cached for a minute, and reads in that minute are hits.
-
-Our counters live on one `Meter`, `ZendeskMcp` (`ZendeskMetrics`), created through `IMeterFactory`. Every
-consumer takes it as an **optional** constructor parameter, so a registration that never resolved would
-leave them recording nothing while every unit test passed.
-`TheComposedHost_InjectsTheCounters_IntoTheComponentsThatRecordThem` proves it through the real wiring for
-`ZendeskService` and the Graph resolver; the OIDC resolver, the API-key provider and the rate limiter are
-not reachable from that harness and rely on their unit tests.
-
-⚠️ **The MCP SDK's activity source is `Experimental.ModelContextProtocol` in 2.2.0, not the bare
-`ModelContextProtocol` vitally-mcp#94's issue gave.** A source registered under a name nothing publishes is accepted
-silently and captures nothing. `TheMcpSdk_PublishesTheSourceWeRegister_AndNoSanitisedSpanCarriesCallerText`
-fails if it stops being published, so an SDK bump that drops the prefix is a red test rather than traces
-that quietly stop. Names live in `TelemetrySources`, shared by `Program.cs` and that test.
-
-⚠️ **The SDK's meter (same name) is deliberately NOT registered.** Its `mcp.server.operation.duration`
-histogram has `gen_ai.tool.name` as a dimension, and a `tools/call` naming a tool that does not exist puts
-the invented name there — caller text, unbounded cardinality, every one recorded, because metrics are never
-sampled. A span processor cannot rewrite metric tags. Per-tool latency is already queryable, unsampled, from
-`AuditDurationMs` on `ZendeskToolCall`. The exporter test pins it as unregistered, so re-adding it is a red
-test. If vitally-mcp#159 wants per-*method* failure rates (`mcp.method.name`, `error.type`), the way to get them is a
-view that drops `gen_ai.tool.name` — which keeps those dimensions and loses only the per-tool split that
-`AuditDurationMs` already provides. Never register it as-is.
-
-⚠️ **Metric tags carry only values this code fixes.** A tag stores every distinct value it is given, so a
-caller-controlled one is a cardinality explosion and customer text in a metrics store. That is not
-hypothetical: the by-account and by-organisation list tools page `accounts/{accountId}/conversations` and
-`organizations/{organizationId}/conversations`, so the pager's `resourceType` carries the caller's id. The
-truncation tag therefore uses the tool layer's fixed `defaultsKey`, checked against the same
-`KnownResourceTypes` allowlist the failure log uses.
-
-**Sampling: 10% head sampling of traces.** `SamplingRatio = 0.1F` **and** `TracesPerSecond = null` —
-`TracesPerSecond` (default 5) overrides the ratio whenever set, so the ratio alone does nothing. It is safe
-only because of vitally-mcp#178: logs (the audit records among them) are exported regardless of trace sampling, and
-metrics are never sampled. Two consequences for anyone querying:
-
-- **Count sampled tables with `sum(ItemCount)`, not `count()`.** `AppRequests` and `AppDependencies` rows
-  each stand for about ten. `AppEvents` / `AppTraces` are logs and stay exact, so `count()` is right there.
-- **"Errors at 100%" is not available.** Head sampling decides before the outcome is known, so a trace of a
-  particular failure may not have been kept. Failures stay visible, unsampled, through the vitally-mcp#94 failure
-  records — not through the counters, which count rate-limit exhaustion and nothing else that fails.
-
-**Spans are sanitised before export — `SpanSanitisingProcessor`**, because they go to `AppRequests` /
-`AppDependencies` — different tables from the audit records, with their own retention, where tool
-arguments are not permitted. (Same workspace: table-level RBAC cannot fence them apart, as recorded under
-`AuditOptions`.) Probes of SDK 2.2.0 found caller text reaching spans by seven routes — the first review
-found three and its re-run four more — which is why the MCP branch is **allowlist-based** rather than a list
-of known leaks:
-
-| Where | What the SDK does | The processor |
-|---|---|---|
-| `StatusDescription`, any span | copies a failed tool call's whole error text there — the caller's input (`got 'alice@example.com'`) and Vitally's response body | clears it; the status code stays |
-| `mcp.method.name`, MCP spans | records whatever method the caller named, including unknown methods and notifications | keeps it only if the SDK defines it (read from its own `RequestMethods` / `NotificationMethods` constants), else `unrecognised` |
-| `gen_ai.tool.name`, MCP spans | records an invented tool name verbatim | keeps it only if it is in `KnownToolNames`, else `unrecognised` |
-| every other MCP tag | `jsonrpc.request.id`, `mcp.resource.uri`, `gen_ai.prompt.name` all carry caller values | dropped unless on `SpanSanitisingProcessor.AllowedMcpTags`, so a future SDK tag is dropped by default |
-| the span name, MCP spans | `<method>` or `<method> <target>`, the target being the caller's tool, prompt or resource | **rebuilt** from the cleaned method and tool — never patched |
-
-The Azure Monitor exporter in 1.6.0 does not appear to read `StatusDescription` (inferred from its
-metadata, not observed), so that row is defence against a future exporter rather than a known live leak.
-
-**Order is pinned too.** OpenTelemetry runs processors in the order they were added. Today the distro
-appends Live Metrics and the batch exporter after all user configuration, so a processor added in a second
-`AddOpenTelemetry()` call runs first — but that is a distro implementation detail, and the exporter test now
-asserts both `SpanSanitisingProcessor` and `QueryStringRedactingProcessor` precede them. (Mutating in
-`OnEnd` is race-free: the batch processor only enqueues there.)
-
-`TheMcpSdk_PublishesTheSourceWeRegister_AndNoSanitisedSpanCarriesCallerText` runs the processor by hand over
-real SDK spans from a successful call (the baseline), a failing call, an unknown tool, an unknown method, an
-unknown notification, `prompts/get` and `resources/read`. Its controls show the sentinel reached the raw span
-by each of those six routes, and that a span carries `gen_ai.tool.name` at all, so it cannot pass by
-scanning nothing; disabling the tag allowlist fails it. `jsonrpc.request.id` is unit-tested only, because the
-harness sends a constant id. ⚠️ **Its scope is MCP SDK and ASP.NET Core server spans.** The harness stubs the
-primary HTTP handler, so no `HttpClient` dependency span exists there, and the caller-typed **path segment**
-gap in `AppDependencies` noted under the log levels still stands.
-
-⚠️ **The exporter test disposes its `TracerProvider` and `MeterProvider` explicitly**, because inside the
-test suite disposing the `WebApplicationFactory` does not (observed 2026-10-01, sync and async alike, with
-no exception). A standalone process showed the factory's disposal *does* dispose the provider, so the cause
-depends on the suite context and was not established — do not generalise it. The leaked provider stayed
-subscribed to the MCP source and ran `SpanSanitisingProcessor` over later tests' spans, which failed the PII
-test whenever it ran afterwards. A post-dispose guard in that test catches a recurrence (removing the explicit
-disposal fails it), and `TelemetryRedactionTests` is in the serialised collection so the guard cannot flake.
-
-**What this adds to the earlier "slow requests" diagnosis.** That diagnosis *was* measured — about 5 s
-per `/mcp` call from the `Request finished` lines, against about 70 s of model time per tool turn — and
-vitally-mcp#143's `Microsoft.AspNetCore.Hosting.Diagnostics` filter has since suppressed those lines. Request
-(`AppRequests`) and dependency (`AppDependencies`) spans have been exported since vitally-mcp#147, so a sampled
-per-upstream breakdown already existed by joining on `operation_Id`. What phase 6 adds is that breakdown
-**unsampled**, as `AuditDurationMs` joined by correlation id, plus the MCP SDK's own spans. ⚠️ It also
-**reduced** span coverage: the default 5 traces a second kept roughly every trace at this server's volume,
-and 10% keeps one in ten — a deliberate cost trade, made safe for the audit trail by vitally-mcp#178.
-
-**Vitally API Parameters:**
-- Pagination uses `from` parameter (not `cursor`) - pass the `next` value from previous response
-- Sorting via `sortBy` parameter: `"createdAt"` or `"updatedAt"` (default: updatedAt)
-- Resource-specific filters (e.g., `status` for accounts: active, churned, activeOrChurned)
-
-**Client-Side Filtering:**
-- The Vitally API does NOT support field or trait selection natively
-- `ZendeskService` implements client-side JSON filtering after receiving full API response
-- Uses `System.Text.Json.JsonDocument` to parse and filter fields and traits
-- Only includes fields that actually exist on the resource (via `TryGetProperty`)
-- Preserves pagination metadata (`next` field) in filtered responses
-- **Trait filtering:** When traits parameter is specified, filters the traits object to include only requested trait keys
-- **Default behaviour:** Traits are excluded by default to reduce response size - use traits parameter to include specific traits
-- Reduces response size before returning to LLM
-
-**Resource-Specific Default Fields:**
-
-When no fields are specified, each resource type returns an optimised field set:
-
-| Resource | Default Fields |
-|----------|----------------|
-| **Accounts** | id, name, createdAt, updatedAt, externalId, organizationId, healthScore, mrr, accountOwnerId, lastSeenTimestamp |
-| **Organizations** | id, name, createdAt, updatedAt, externalId, healthScore, mrr, lastSeenTimestamp |
-| **Users** | id, name, createdAt, updatedAt, externalId, email, accountId, organizationId, lastSeenTimestamp |
-| **Conversations** | id, externalId, subject, status, source, authorId, accountId, organizationId |
-| **Notes** | id, createdAt, updatedAt, externalId, subject, noteDate, authorId, accountId, organizationId, categoryId, archivedAt |
-| **Tasks** | id, name, createdAt, updatedAt, externalId, dueDate, completedAt, assignedToId, accountId, organizationId, archivedAt |
-| **Projects** | id, name, createdAt, updatedAt, accountId, organizationId, archivedAt |
-| **Admins** | id, name, email |
-| **NPS Responses** | id, externalId, userId, score, feedback, respondedAt |
-| **Project Templates** | id, name, createdAt, updatedAt, projectCategoryId, description |
-| **Project Categories** | id, name, createdAt, updatedAt |
-| **Messages** | id, type, externalId, timestamp, message, from, to |
-| **Custom Objects** | id, name, createdAt, updatedAt |
-| **Note Categories** | id, name, createdAt, updatedAt |
-| **Task Categories** | id, name, createdAt, updatedAt |
-| **Meetings** | id, title, externalId, startDateTime, endDateTime, location, source, accountIds, organizationIds, participants, createdAt, updatedAt |
-| **Meeting Transcripts** | id, meetingId, createdAt, updatedAt |
-| **Custom Object Instances** | id, name, externalId, createdAt, updatedAt, organizationId, customerId, archivedAt |
-| **Admins / Admins Search** | id, name, email |
-
-These defaults balance usefulness (business context, relationships, key metrics) with response size (excluding large fields like traits objects, rich text content, transcript bodies, and meeting summaries).
-
-**Resources NOT using field filtering** (raw pass-through):
-- **Custom Traits** (`customFields` endpoint) — returns a bare array of trait definitions; client-side filtering does not apply.
-- **Custom Surveys** (`surveys/:id/responses`, `surveyResponses/:id`, `surveyQuestions/:id`) — uses a `{data}` envelope rather than `{results, next}`.
-- **Meeting sub-resources** (`meetings/:id/participants`, `meetings/:id/transcript`) — body is returned as-is from the API.
-
-**Trait Filtering:**
-
-Resources supporting traits: **Accounts, Organizations, Users, Tasks, Notes, Projects, Project Templates**
-
-Traits are excluded by default to minimise response size. To include specific traits:
-1. Add `"traits"` to the `fields` parameter
-2. Specify desired trait names in the `traits` parameter (comma-separated)
-
-Example: To get account name and payment method trait:
-- `fields="id,name,traits"`
-- `traits="paymentMethod"`
-
-This will return only the `paymentMethod` trait, filtering out all other traits from the response.
-
-### Tool Structure (Tools/*.cs)
-
-Each resource type has a dedicated tool class:
-- Decorated with `[McpServerToolType]` for discovery
-- Static methods decorated with `[McpServerTool]` and `[Description]`
-- Pattern: `List{Resource}` and `Get{Resource}` methods
-- Dependency injection: `ZendeskService` injected as method parameter
-- All parameters use `[Description]` attributes for MCP tool schema generation
-
-**Example tool pattern:**
-```csharp
-[McpServerToolType]
-public static class AccountsTools
-{
-    [McpServerTool, Description("List Vitally accounts...")]
-    public static async Task<string> ListAccounts(
-        ZendeskService vitallyService,
-        [Description("Maximum number...")] int limit = 20,
-        [Description("Pagination cursor from previous response (use the 'next' value)")] string? from = null,
-        [Description("Comma-separated fields... Client-side filtering.")] string? fields = null,
-        [Description("Sort by field: 'createdAt' or 'updatedAt'")] string? sortBy = null,
-        [Description("Filter by account status: 'active', 'churned', 'activeOrChurned'")] string? status = null,
-        [Description("Comma-separated trait names... Client-side filtering.")] string? traits = null)
-    {
-        var additionalParams = new Dictionary<string, string>();
-        if (!string.IsNullOrEmpty(status))
-            additionalParams["status"] = status;
-
-        return await vitallyService.GetResourcesAsync("accounts", limit, from, fields, sortBy, additionalParams, traits);
-    }
-}
-```
-
-**Note:** The `status` parameter is specific to `AccountsTools`, and `archived` is specific to `MeetingsTools`. The `traits` parameter is available for resources that support traits (Accounts, Organizations, Users, Tasks, Notes, Projects, Meetings, Project Templates). Other resource types have the standard parameters (limit, from, fields, sortBy).
-
-**Raw pass-through tools:** `CustomTraitsTools`, `SurveysTools`, and the participant/transcript methods on `MeetingsTools` call `GetRawAsync` / `PostRawAsync` / `DeleteRawAsync` directly. They do not accept a `fields` parameter because Vitally returns these endpoints with a non-standard JSON envelope (`{data}` for surveys, bare arrays for `customFields`).
-
-**Custom object instances:** `List_custom_object_instances` accepts an optional single scope
-criterion — `organizationId`, `customerId`, `externalId`, or `customFieldId`+`customFieldValue`
-— which routes to Vitally's `customObjects/:id/instances/search` endpoint (exactly one criterion;
-paging params are ignored when scoped). `Get_custom_object_instance` reads one instance by id via
-the same search endpoint (Vitally has no direct single-instance GET). The legacy free-text
-`Search_custom_object_instances` tool has been removed in favour of these typed paths.
-
-**Organisation summary (SP5b):** `Get_organization_summary(organizationId)` is a read-only composite
-that collapses the common "everything about this customer" shape into one call. It makes 4 upstream
-calls — org get-by-id (with a curated set of rollup traits), one `customObjects` list to resolve the
-goals/product-feedback object names to ids, and two organisation-scoped instance searches — and
-returns `{ organization, goals, productFeedback }`. `goals`/`productFeedback` are each
-`{results:[...]}` or `{error:...}` (a single sub-failure never sinks the summary; a bad org id
-surfaces an error). The tenant-specific policy (the curated trait CSV and the default object names
-`customerGoals` / `productFeedback`) lives as constants in `Tools/SummaryTools.cs`;
-`ZendeskService.GetOrganizationSummaryAsync` is generic and takes them as parameters. Object ids are
-resolved by name at runtime (never hardcoded); the trait set and object names are overridable per call.
-
-**Server-side page-and-filter (SP3):** Vitally's list endpoints can't filter by name or date, so a
-bounded auto-pager (`ZendeskService.GetByNameContainsAsync` / `GetByCreatedRangeAsync`, capped by
-`Vitally:MaxAutoPageFetches`, default 10 pages × 100) pages and filters client-side. The tools that
-use it — `List_organizations` (`nameContains`) and the activity lists (`createdAfter`/`createdBefore`
-on conversations incl. by-account/by-organization, notes, tasks, meetings) — return a
-`{results, truncated, pagesFetched}` envelope; `truncated: true` means the page cap was hit before
-exhaustion (narrow the query). `List_custom_traits` takes a `nameContains` that filters the single
-trait-catalogue array client-side (no paging) — it does **not** introduce field/trait projection
-(the `customFields` endpoint remains the raw pass-through described above); `nameContains` only drops
-array elements whose `label`/`path` don't match. Unfiltered calls keep the plain `{results, next}` path.
-
-## Adding New Resource Types
-
-To add support for a new Vitally resource:
-
-1. Create `Tools/{ResourceName}Tools.cs` following the pattern in `AccountsTools.cs`
-2. Implement `List{ResourceName}` and `Get{ResourceName}` methods
-3. Use `ZendeskService` with appropriate resource type string
-4. **If the endpoint returns the standard `{results, next}` envelope:** add an entry to `ResourceDefaultFields` in `ZendeskService.cs` with the optimised default field set
-5. **If the endpoint returns a non-standard envelope** (e.g. `{data}`) or is a sub-resource path (e.g. `meetings/:id/participants`): use `GetRawAsync` / `PostRawAsync` / `DeleteRawAsync` — these bypass client-side filtering and return the body unchanged
-6. **For sub-paths under an existing resource** (e.g. `admins/search`): add an explicit entry to `ResourceDefaultFields` for the full path — the lookup is exact-match, not prefix-match
-7. Tools are automatically discovered via assembly scanning — no manual registration needed
-8. Add a matching `Tools/{ResourceName}ToolsTests.cs` under `ZendeskMcp.Tests/Tools/`
+| Connection | `ConnectionTools.cs` | `Get_zendesk_connection`, `Get_zendesk_connect_link`, `Disconnect_zendesk` |
+| Tickets | `TicketsTools.cs`, `TicketAttachmentsTools.cs` | `Search_tickets`, `Count_tickets`, `Get_ticket`, `Get_ticket_conversation`, `Create_ticket`, `Update_ticket`, `Get_ticket_attachment`, `Request_ticket_attachment_upload` |
+| Reporting | `AnalyticsTools.cs`, `SatisfactionTools.cs`, `TicketSla.cs` | `Get_ticket_metrics_summary`, `Get_sla_summary`, `Get_sla_queue`, `Get_satisfaction_ratings` |
+| Macros | `MacrosTools.cs` | `Search_macros`, `Preview_macro`, `Apply_macro`, `Create_macro`, `Update_macro`, `Set_macros_active` |
+| People | `UsersTools.cs`, `OrganizationsTools.cs` | `Search_users`, `Find_agent_by_name`, `Search_organizations`, `Add_user_to_organization` |
+| Configuration | `ConfigurationTools.cs` | `List_ticket_fields`, `List_ticket_forms`, `List_triggers`, `List_brands` |
+| Help Center | `HelpCenterArticlesTools.cs`, `HelpCenterStructureTools.cs`, `HelpCenterMediaTools.cs` | `Search_help_center_articles`, `Get_help_center_article`, `Create_help_center_article`, `Update_article_translation`, `Export_help_center_articles`, `List_help_center_categories`, `Create_help_center_category`, `Update_help_center_category`, `List_help_center_sections`, `Create_help_center_section`, `Update_help_center_section`, `List_user_segments`, `List_permission_groups`, `Request_help_center_image_upload`, `Create_help_center_image` |
+
+Dropped from Swifteq's set: `get_usage` and `submit_mcp_feedback` (Swifteq billing and support).
+
+### Adding a tool
+
+1. Put it in the area's class (or a new `XxxTools.cs`), following the conventions above.
+2. Route every Zendesk call through `ZendeskService` — never another `HttpClient` — and keep the verb faithful to the tier.
+3. Caller-supplied `brand_url` goes through the `brandUrl` parameter; caller strings in paths through `ZendeskService.Segment`.
+4. A write tool: add the untrusted-content sentence to its description, and a feature switch if its effect reaches beyond the agent.
+5. If it reads or writes something whose response shape `AuditRecordIds` would not find ids in, add a test there.
+6. Add tests in `ZendeskMcp.Tests/Tools/` using `TestHelpers.CreateFakeZendesk` (routed and recording) and `TestHelpers.BuildZendeskService`.
+7. Update the catalogue here and in `README.md`, and `ZendeskServerInstructions` if it changes how the model should choose tools.
 
 ## Important Notes
 
-- **UK English**: Use UK spelling (organisations, authorisation, etc.) in all code comments and documentation
-- **Permission management**: Tools use `ReadOnly = true` flag for GET/LIST operations and `Destructive = true` flag for CREATE/UPDATE/DELETE operations. This allows MCP clients to bulk enable/disable operations by permission level.
-- **Write operations**: All resources support full CRUD operations (where applicable). JSON body parameters accept complete request bodies for create/update operations.
-- **Configuration**: Never hardcode credentials. Production deployments use Key Vault via managed identity; local dev uses `Vitally:DevelopmentApiKey` (env var `Vitally__DevelopmentApiKey`).
-- **Error handling**: `ZendeskService.SendAsync` throws `HttpRequestException` with the Vitally response body included in the message on non-2xx responses. A CallTool request filter (`ToolErrorResult` + `AddCallToolFilter`, `Program.cs`) surfaces the messages of `HttpRequestException`, `UnauthorizedAccessException` (read-only / RBAC denial) and `ArgumentException` (validation) to the client as the tool-call error text, so the LLM sees the actual failure reason rather than the SDK's generic "An error occurred invoking 'X'."; other exceptions keep the generic message. The filter also logs both kinds server-side by type, never by message (vitally-mcp#94) — except RBAC denials, which `LogDenied` audits instead. The SDK additionally logs the non-surfaceable kind itself, with the exception attached.
-- **Client-side filtering**: Field and trait selection is done client-side (Vitally API doesn't support it natively).
-- **Trait filtering**: Traits are excluded by default — use the `traits` parameter to include specific trait keys (requires `"traits"` in the `fields` parameter).
-- **Resource-specific defaults**: Each resource type has optimised default fields (see table above).
-- **Field existence**: Only includes fields that actually exist on the resource — no null/undefined placeholders.
-- **Pagination**: Use the `from` parameter (not `cursor`) — this matches the Vitally API spec.
-- **JSON responses**: Tools return filtered JSON strings to reduce LLM context usage.
-- **MCP SDK**: Using `ModelContextProtocol` 2.2.0 plus `ModelContextProtocol.AspNetCore` 2.2.0 for HTTP hosting. Check `ZendeskMcp.csproj` rather than trusting this line — Dependabot bumps the SDK and prose drifts.
-- **`tools/list` cache hints**: bound from `ToolsListCache:` (`Enabled`, `TimeToLive` default 5 min, `Scope` default `Private`) and serialised as `ttlMs` / `cacheScope` per MCP 2026-07-28. Scope must stay `Private` while per-caller filtering is active — a public cache would leak one tier's tool catalogue to another.
-- **Tool annotations**: every tool sets `ReadOnly`, `Destructive`, `Idempotent` and `OpenWorld`. `ToolAnnotationCoverageTests` enforces this by reflection — all four must be explicitly set, and `ReadOnly == true` must imply `Destructive == false` (and vice versa) — so a new tool cannot ship unannotated.
+- **UK English** in code comments and documentation.
+- **Never call Zendesk around `ZendeskService`**, never send a credential to a host it has not validated, and never add a shared-credential fallback to `ZendeskCredentialProvider`.
+- **Error handling:** `HttpRequestException` (Zendesk's body), `UnauthorizedAccessException` (read-only, RBAC, feature switch), `ArgumentException` (validation) and `ZendeskConnectionRequiredException` (the link) are surfaced to the client; anything else gets the SDK's generic message and is logged.
+- **`tools/list` cache hints** (`ToolsListCache:`) stay `Private` while discovery is filtered per caller.
+- **Configuration:** never hard-code credentials. Deployed targets use Key Vault via the managed identity; local development uses the development token (NoAuth only) or the development OAuth client secret.
 
 ## Testing
 
-The `ZendeskMcp.Tests` project contains the automated test suite (xUnit + FluentAssertions + Moq).
+xUnit v3 on **Microsoft.Testing.Platform** (not VSTest): `global.json` selects the runner, the test project is an `Exe`, and VSTest-only flags (`--filter "FullyQualifiedName~…"`, `--logger`, `--collect`) are rejected — use `--filter-class` / `--filter-method`, `--report-trx`, `--coverage`.
 
-**The test runner is Microsoft.Testing.Platform (MTP), not VSTest.** `xunit.v3` 4.0.0 dropped VSTest
-support outright — under the .NET 10 SDK its targets fail the build with *"Testing with VSTest target
-is no longer supported by Microsoft.Testing.Platform"* rather than falling back. Three things follow,
-and each one bites silently if forgotten:
-
-1. **`global.json` selects the runner** (`test.runner = "Microsoft.Testing.Platform"`). Without it
-   `dotnet test` still picks VSTest and every run fails at that MSBuild error. It pins no SDK version
-   — deliberately, so `actions/setup-dotnet` stays in charge of that.
-2. **The test project is an `Exe`.** xunit.v3 self-hosts its runner, so `Microsoft.NET.Test.Sdk` and
-   `xunit.runner.visualstudio` are gone from `ZendeskMcp.Tests.csproj`; omitting `<OutputType>Exe</OutputType>`
-   fails the build with *"xUnit.net v3 test projects must be executable"*.
-3. **VSTest-only CLI options are rejected, not ignored** — `--nologo`, `--verbosity`, `--logger`,
-   `--collect` and `--filter "FullyQualifiedName~X"` all error out or silently run zero tests. On the
-   .NET 10 SDK the MTP replacements are first-class `dotnet test` flags needing **no `--` separator**:
-   `--report-trx` / `--report-trx-filename` (via `Microsoft.Testing.Extensions.TrxReport`), `--coverage`
-   / `--coverage-output-format cobertura` (via `Microsoft.Testing.Extensions.CodeCoverage`), and
-   `--filter-class` / `--filter-method`. MTP's coverage report is named `<guid>.cobertura.xml`, so
-   `.github/workflows/ci.yml` globs `TestResults/**/*.cobertura.xml` rather than a fixed filename.
-
-```powershell
-# Run the full suite
-dotnet test ZendeskMcp.sln -c Debug
-
-# Run a single test class
-dotnet test ZendeskMcp.sln -c Debug --filter-class "*MeetingsToolsTests"
-```
-
-**Coverage:**
-- `VitallyApiKeyProviderTests` — dev-fallback resolution (no SecretClient → returns `DevelopmentApiKey`; missing both → throws)
-- `VitallyServiceTests` — JSON field/trait filtering, pagination, resource-specific defaults, plus all six service methods (`GetResourcesAsync`, `GetResourceByIdAsync`, `CreateResourceAsync`, `UpdateResourceAsync`, `DeleteResourceAsync`, `GetRawAsync`, `PostRawAsync`, `DeleteRawAsync`) including HTTP-verb / URL / auth-header verification via Moq protected verification
-- `VitallyRateLimitHandlerTests` — 429 retry behaviour, header parsing, low-remaining warnings
-- `OAuthProxyResourceTerminationTests` — the proxy in the Entra posture (`OAuth:UpstreamResourceScope` set): `resource` dropped whatever its casing, still rejected when unpublished, the API scope merged into `scope` on both endpoints without duplicating or displacing the client's own, and advertised in both metadata documents. A separate fixture from the sibling proxy classes because the switch is composition-time and **both** postures must stay pinned — the relay is what a rollback returns to
-- `StaleEntitlementCompositionTests` — the serve-stale-on-Graph-failure path through a composed host, across an outage that starts, is survived and then outlasts its window; also pins that a token claim cannot authorise once the live check is on
-- `UpstreamOidcMetadataTests` / `UpstreamOidcStartupFailFastTests` — the OIDC-discovery resolver (all four endpoints, cache reuse, last-known-good on a failed refresh, rejection of an incomplete or malformed document) and the startup fail-fast wired into `Program.cs`
-- `FailureLoggingTests` — the vitally-mcp#94 failure records: level by status band and exception kind, and that none of them carries a body, a query string, a caller-typed path segment, an exception message or an attached exception (the Key Vault record is the one that must attach it). The composed half is in `ToolCallAuditCompositionTests`: that the filter and `SendAsync` records of an upstream failure carry the audit record's correlation id, that an absorbed summary section is logged although the tool succeeds, that an unknown tool is logged as `unrecognised` at `Warning`, and that the SDK logs an unhandled tool exception itself, exactly once, with it attached
-- `PerformanceMetricsTests` (plus counter tests beside `VitallyRateLimitHandlerTests`, `GraphGroupPermissionResolverTests` and `UpstreamOidcMetadataTests`) — the vitally-mcp#94 phase 6 counters and the upstream duration, observed through `MetricCapture`, which filters on the test's own `IMeterFactory` so parallel tests cannot count each other's measurements. The exporter-branch test in `LoggingFilterTests` pins the sampling, that our meter and the SDK's source are registered and the SDK's meter is not (by behaviour: a source or meter with that name reports a listener), that `SpanSanitisingProcessor` is in the chain, and that its providers do not outlive it; `TelemetryRedactionTests` unit-tests the sanitiser, and `ToolCallAuditCompositionTests` runs it over real SDK spans, with controls
-- `Tools/*ToolsTests` — one test class per `Tools/*Tools.cs`, covering every public `[McpServerTool]` method (list/get/create/update/delete plus sub-resources)
-
-**When adding a new tool method:** add a matching test in the appropriate `*ToolsTests.cs` file. Use `TestHelpers.BuildZendeskService(httpClient)` — it builds a `ZendeskService` with a stub `VitallyApiKeyProvider` that returns a fixed test API key (no Key Vault required).
-
-**Manual testing considerations** (require live Vitally credentials and a real Entra-issued token in production):
-- Test pagination by using low limit values (e.g., `limit=5`) and verify `from` parameter works with `next` cursor
-- Test client-side field filtering by specifying various field combinations
-- Test trait filtering by combining `fields="traits"` with `traits="trait1,trait2"`
-- For accounts, test the status filter with: `active`, `churned`, `activeOrChurned`
-- For meetings, test the `archived` filter
-- For local dev without an identity provider, set `OAuth__NoAuth=true` and `Vitally__DevelopmentApiKey=<your key>`
-- Verify error handling with invalid IDs / missing config
+| Area | Tests |
+|---|---|
+| Per-user OAuth | `ZendeskCredentialProviderTests` (own bearer, connect link with no request made, 401 → forget + link, refresh and rotation stored, one refresh under concurrency, refused refresh, development token), `ZendeskConnectEndpointsTests` (full flow through the host, wrong email / end user refused **and revoked**, missing cookie, one-shot link and state, encoded result page), `ZendeskTokenStoreTests` (secret shape, absence cached, tombstone not delete) |
+| Transport | `ZendeskServiceTests` (escaping, error bodies, cursor paging and cap, brand and download host boundaries, RBAC backstop), `AuditRecordIdsTests`, `ZendeskRateLimitHandlerTests` |
+| Uploads | `ZendeskUploadsTests` (through the host: exact size, one use, inline, identity and claims carried, tier re-checked) |
+| Shared components | everything ported from vitally-mcp — OAuth proxy, discovery, RBAC, Graph resolver, stale entitlement, audit composition, logging filters, telemetry redaction, metrics |
+| Tools | `Tools/*ToolsTests` — request built (verb, path, query, body), result shaped, validation, feature switches, credential boundaries |
 
 ## Deployment
 
-The deployment shape is **Azure Container Apps + Azure Key Vault + Microsoft Entra**, and the container image hosted in Azure Container Registry. `.github/workflows/deploy.yml` builds the image (or takes a caller-supplied digest — the train's production call does), imports it into the private ACR (via GitHub OIDC, no long-lived credentials) and rolls a Container App to the new revision.
+The same shape as vitally-mcp — Azure Container Apps (production warm, staging scale-to-zero) in a VNet, private Key Vault and ACR, Application Insights behind AMPLS, GitHub Actions deploying through OIDC federated credentials, a staging gate and a release train — defined **greenfield** in `infra/terraform/` (see its README for the apply procedure and pending decisions) and `.github/workflows/`. Nothing has been applied yet.
 
-**It deploys to one of two targets, and the target is a GitHub *environment* name:** `production`
-(the default) or `staging`. The nightly release train ships to **both — staging first, then
-production with the same image digest** (vitally-mcp#171); see the staging section below. Everything that differs between targets is an environment-scoped GitHub variable
-(`CONTAINER_APP`, `PUBLIC_ORIGIN`), so the workflow contains no per-target literals and the smoke
-test, metadata verification and rollback are shared rather than duplicated per target and left to
-drift. Shared values (`ACR_NAME` / `RESOURCE_GROUP` / `IMAGE_NAME`) stay repo-level, as do the secrets
-`AZURE_CLIENT_ID` / `AZURE_TENANT_ID` / `AZURE_SUBSCRIPTION_ID`. A first step fails the run *before*
-anything is built if any of those is missing, or if `PUBLIC_ORIGIN` is not a slash-free absolute https
-origin — unset, every smoke assertion below would be made against a relative path, fail, and roll back
-a deploy that was in fact fine.
+### Staging validation
 
-Each target needs its **own federated credential** on the managed identity, subject
-`repo:fiscaltec/vitally-mcp:environment:<target>`, plus `Contributor` on that target's Container App.
-The subject is an exact string match, so a target with no credential fails at `azure/login` rather
-than deploying somewhere unintended. The identity also holds **`ContainerApp Reader` at
-resource-group scope** (vitally-mcp#171), for one reason: without it, looking up an app that does not exist
-answers `AuthorizationFailed` — the same as a lost role — so the train could not tell a torn-down
-staging from a broken lookup. With it the answer is `(ResourceNotFound)`. Measured both ways from the
-deploy identity on 2026-09-29.
+Before production, on staging against the real Zendesk account, with `Authorization__ReadOnly=true` except while deliberately testing writes on a test ticket:
 
-| Component | Resource | Notes |
-|---|---|---|
-| Hosting (production) | Azure Container Apps `vitally-prod-ca-uksouth` (consumption plan) | `minReplicas: 1` (one warm replica); HTTPS-native ingress; managed cert on `vitally.fiscaltec.com` |
-| Hosting (staging) | Azure Container Apps `vitally-staging-ca-uksouth`, **same** RG and CAE | Scale-to-zero (`minReplicas: 0`); managed cert on `vitally-staging.fiscaltec.com`; the pre-production target for identity changes — see below |
-| Secrets | Azure Key Vault | `vitally-shared` is the default secret name; managed identity has `Key Vault Secrets User` |
-| Identity | User-assigned managed identity | `AcrPull` on the registry + `Key Vault Secrets User` on the vault |
-| Image registry | Azure Container Registry (Premium SKU) | A manual dispatch tags `vitally-mcp:sha-<short-sha>` by default; the release train tags `vitally-mcp:v<semver>`, and that one tag — one build, imported by digest — is shared by staging and production; untagged purged after 7 days; ACR Task weekly purge keeps last 5 tags / 30 days |
-| Logs | Log Analytics `vitally-prod-law-uksouth` | **Working since 2026-09-17 — and it had never worked before that.** For the workspace's entire prior lifetime no log from this server reached it: `ContainerAppConsoleLogs_CL` held **0 rows, ever**. **Root cause, and it was never going to work:** the CAE shipped logs with `logs_destination = log-analytics`, which writes to the workspace using its **shared key**, while the workspace has `local_authentication_enabled = false` and refuses exactly that. Microsoft also documents direct-to-workspace as **unsupported over Private Link**. The workspace is not empty — Key Vault and ACR arrive via *diagnostic settings*, which use the Azure Monitor control plane and are governed by neither local auth nor the network settings. **Fixed and VERIFIED 2026-09-17 (vitally-mcp#142): `logs_destination` changed to `azure-monitor` plus a diagnostic setting (`infra/terraform/diagnostics.tf`) — the two are useless apart, and each fails silently alone. First records landed seconds later, from both apps; this is the first telemetry this server has ever delivered.** **`ContainerAppSystemLogs` and `ContainerAppConsoleLogs` are both enabled**, the latter added 2026-09-26 (vitally-mcp#142) once the audit records had left stdout. Verified all-time over the whole table: production **1,510 rows / 152 breadcrumbs / 0 full audit records**, staging 1,911 / 2 / 0. (Those do not sum to the table — it also carries Container Apps **Jobs**, e.g. the Key Vault scanner, with an empty `ContainerAppName` and its identity in `JobName`.) ⚠️ Count breadcrumb **messages** (`Log contains 'Zendesk audit breadcrumb:'`), not rows matching `breadcrumb` — the console logger emits a header line and an indented message per entry, so a naive filter reports exactly double. The breadcrumb count is the load-bearing half, since zero full records is also what a *broken* export looks like. That inference is strong for production and **weak for staging**, whose 2 breadcrumbs are a single call at enabling time; staging's suppression rests on the direct console sample of 2026-09-26 and on both apps running the same image. Both land in the **resource-specific** tables (typed columns, no `_s` suffixes), so per-table retention is available to vitally-mcp#93. ⚠️ The setting is on the shared CAE and **cannot be scoped per app**, so a staging spin-up that omits `ApplicationInsights__ConnectionString` now exports that app's unsuppressed records for the whole environment — which is why the spin-up sets two variables and the guard checks both. `ContainerAppHTTPLogs` stays off: it carries request URLs and needs its own PII review. **Application Insights `vitally-prod-appi-uksouth` is live on production since 2026-09-25 (vitally-mcp#147), and this was VERIFIED by reading the records back, not inferred.** The SDK (`Azure.Monitor.OpenTelemetry.AspNetCore`) and the `UseAzureMonitor` registration landed with vitally-mcp#147's routing half; the registration is conditional on `ApplicationInsights__ConnectionString`, set on **both** targets on 2026-09-25 — production revision 39, staging revision 17 — each verified by reading rows back. `AppRoleName` separates them, so one component serves both. ⚠️ Staging is an **on-demand** app and the variable does **not** survive a recreate, so that describes the staging app that exists today, not any future one — a spin-up must set it alongside `Authorization__ReadOnly`. A `List_project_categories` call produced a `ZendeskToolCall` and a `ZendeskUpstreamCall` row in **`AppEvents`** carrying the caller's `oid`, the tool name, the arguments, the three record ids touched, the resolved tier and a shared correlation id — so `microsoft.custom_event.name` is set correctly, which is the one thing that could not be proven before Azure. Console suppression is in force with it: `AuditLogger` lines on the console are now **0**. ⚠️ **Query the WORKSPACE, not `az monitor app-insights query`.** The component is `IngestionMode: LogAnalytics`, so the tables are `AppEvents`/`AppTraces`, while the app-insights command resolves only the classic names (`customEvents`, `traces`) and answers `AppEvents` with `SEM0100 Failed to resolve table expression`. With stderr suppressed that reads exactly like "no data" on a switch-on that in fact worked: `az monitor log-analytics query -w 6712885d-0296-41fb-904c-e307f4f35b08 --analytics-query "AppEvents | where Name == 'ZendeskToolCall'"`. Historically "for traces" was aspirational, and its local auth was disabled 2026-09-17 so the planned SDK must use the managed identity. ⚠️ **Verify that with `az resource show`, not `az monitor app-insights component show`** — the extension reports `disableLocalAuth: null` for this component while raw ARM reports `DisableLocalAuth: true`, so the convenient command says the opposite of the truth about the one property the authentication design rests on. Note also its `publicNetworkAccessForIngestion` is **Disabled**, so ingestion has to take the AMPLS private path. The managed identity `vitally-prod-id-uksouth` (`c57b35e7-19b8-4d25-b762-321de5f4f0cb`) was granted **`Monitoring Metrics Publisher`** on the component on 2026-09-24; it had no assignment at or above that scope before. Query access was opened 2026-09-17 so the workspace can be read at all. See `docs/superpowers/specs/2026-09-17-logging-observability-design.md` |
-| Auth (Entra — live on both targets) | Entra app registration `Vitally MCP` `c3812e7d-a413-4169-b57e-803326611ba3` | Both the OAuth client and the API resource in one registration, which is why `SharedClientId` is also a valid `aud`. App ID URI `https://vitally.fiscaltec.com` (no slash), exposes `mcp.access`, and carries **both** origins' `/oauth/callback` so it *can* serve both targets. **Both targets point at it** since the 2026-09-16 flip, so `SharedClientId` and `SharedClientSecret` hold the same values on each — the five **identity** variables in `infra/terraform/variables.tf` (`authority`, `audience`, `upstream_resource_scope`, `shared_client_id`, `shared_client_secret`) were collapsed onto one shared `oauth_*` set by vitally-mcp#156, closing vitally-mcp#102 — but **`oauth_resource` and `public_base_url` are not among them**, because each target publishes its own origin and sharing them would make staging advertise production's, which strict RFC 9728 clients reject. Both targets hold the secret under the same Container App secret name, `entra-oauth-client-secret`. `appRoleAssignmentRequired` with nine department groups assigned **directly** (nesting does not grant sign-in). ⚠️ **That assignment list is now the ONLY record of who can sign in, and nothing detects an omission.** It had to be kept at parity with a second app for as long as the rollback was retained, and drifted **twice** (2026-09-03, 2026-09-15), each time an onboarded department that would have lost access at the cutover — the cause being `ACCESS.md` naming the other app in its onboarding steps, so both were onboarded exactly as documented. That failure class is gone now the rollback is abandoned (vitally-mcp#156): there is one place to assign, `ACCESS.md` names it, and an omission now fails immediately and visibly at that department's next sign-in. vitally-mcp#134, which proposed automating the parity diff, was closed `not planned` on 2026-09-21. What remains worth running is the membership assertion against `infra/terraform/entra.tf`; see the runbook. Secret `entra-mcp-client-secret` in the vault, expires **2027-03-01** — 180 days, which is a convention rather than an enforced rule: `scan/run.py` warns when an **enabled** Key Vault secret **that has an expiry** comes within **30 days** of it, and its alert text repeats the 180-day wording — but nothing validates the interval, a secret with no expiry set is not covered at all, and the scanner cannot see Entra credentials. A hard outage date — though the mechanism is Entra rejecting the expired credential at `/oauth/token`, not Key Vault refusing a read: the app never reads the vault for this secret, only for `vitally-shared` (for which the Key Vault mechanism does apply). The expiry is set on the *Key Vault secret* as well as the Entra credential, because the scanner alerts on the former and knows nothing about Entra. Rotating the vault copy alone does not rotate what the app sends — see vitally-mcp#138. `vitally-shared` is on the same standard (2027-02-14). See `docs/runbooks/entra-app-registration.md` |
-| CI/CD | GitHub Actions → OIDC federation → Azure | Reusable `deploy.yml` (build → GHCR → `az acr import` → roll, with smoke + rollback — the smoke covers `/health`, the exact-401 challenge **and** the OAuth metadata documents); nightly `release.yml` cuts a semver tag + GitHub Release, then deploys it to staging and then production, one build imported by digest into both — freeze by disabling the workflow, see the deploy-freeze note below; OIDC, no long-lived secrets in GitHub |
-| IaC | Terraform (`infra/terraform/`) | A **back-filled as-built capture**, not the active source of truth: adoption via the `imports.tf` blocks has never been performed, `terraform apply` is never run here, and the live resources are managed with `az cli`. `deploy.yml` rolls those resources directly and never invokes Terraform. Keep the capture in step with reality by hand; see `infra/terraform/README.md`, which describes adoption as a deliberate future step rather than a routine. |
-| IaC — Entra | `infra/terraform/entra.tf` + the `azuread` provider | Added by vitally-mcp#107. Same adopt-by-import convention, but it is the **first non-`azurerm` provider here**, so `terraform init` must be re-run before any plan. The client secret and the admin-consent grant are deliberately *not* modelled — state would hold the secret value, and the vault is private-endpoint only so Terraform cannot write it from outside the VNet regardless |
-
-### Staging (`vitally-staging-ca-uksouth`) — an on-demand pre-production target
-
-**Staging is created when it is needed and torn down when the work is done.** It is not a standing
-environment, and `az containerapp list` showing only `vitally-prod-ca-uksouth` is a normal state, not
-a fault — that is exactly what vitally-mcp#112 was raised for. Decided 2026-08-28, after evaluating and rejecting
-a separate dev environment (see the topology note at the end of this section).
-
-**Deploy to it:**
-
-```powershell
-gh workflow run deploy.yml -f target=staging -f ref=<branch-tag-or-sha>
-```
-
-**Staging tracks the release train** (vitally-mcp#171): each nightly tag is deployed to staging first, then to
-production with the **same image digest**, and a staging smoke failure stops production. So a
-standing staging app is normally on the same tag as production.
-
-⚠️ **Two cases where it is not, and both are normal — check its image before concluding anything from
-its behaviour:**
-
-| Case | What the train does | How you know |
-|---|---|---|
-| **Pinned** — `STAGING_PINNED` on the `staging` GitHub environment is non-empty | Skips staging, ships production. The value is the reason, printed as a notice on **every run that cuts a tag** while set | `gh variable list --env staging` |
-| **Torn down** (vitally-mcp#112) | Skips staging, ships production | the gate job's `Staging torn down` notice |
-
-Pin it whenever staging is running something ahead of production — a branch mid-validation, which is
-what staging is for (it ran Entra from 2026-09-03 while production waited until 2026-09-16) and which
-the next nightly tag would otherwise overwrite:
-
-```bash
-gh variable set STAGING_PINNED --env staging --body "validating <branch> for #<n>"   # pin
-gh variable delete STAGING_PINNED --env staging                                     # unpin
-```
-
-⚠️ **Unpinning does not restore staging** — it resumes tracking from the **next** tag, which on a quiet
-week can be days away. To catch it up now, dispatch the current tag to staging **with its digest**
-(from the production job's summary in the last train run), so nothing is rebuilt over the tag
-production runs:
-
-```bash
-gh workflow run deploy.yml -f target=staging -f ref=<tag> -f image_tag=<tag> -f image_digest=sha256:<…>
-```
-
-⚠️ **A pin is not the `AUTO_DEPLOY` pattern** warned against under *Freezing deploys*: that released
-without deploying anywhere, whereas a pin skips staging only and production still ships what was
-tagged. A manual `deploy.yml` dispatch to staging is unaffected by the pin — pinning is how you stop
-the *train* overwriting what you dispatched. ⚠️ `deploy.yml` declares one concurrency group per
-target (`deploy-staging`), and GitHub keeps only one *pending* run per group. **Unverified:** whether
-that top-level group also applies when the train *calls* `deploy.yml` — GitHub's reusable-workflow
-documentation does not say. If it does, queueing a manual staging dispatch while the train's staging
-call is waiting cancels one of them; a cancelled train staging call stops production (safe) and the
-tag then has to be deployed by hand — see *Deploying a tag by hand, staging first* under *Freezing
-deploys*. Avoid manual staging dispatches around 02:00 UTC.
-
-The gate **fails the train** rather than skipping when it cannot tell whether staging exists — a
-lapsed login, a missing role, an Azure outage. Reading "could not check" as "absent" is the fail-open
-shape vitally-mcp#167 removed, and it would ship production on an assumption. See `release.yml`.
-
-**History, and why this exists:** until vitally-mcp#171 the train shipped to production only and staging was
-reached solely by manual dispatch. Measured 2026-09-25: staging was on `sha-06dcf7b` (vitally-mcp#127), last deployed there on **2026-09-03**,
-while production ran `sha-410e851` — **22 days and 21 merged commits apart**
-(`git log --oneline 06dcf7b..410e851 | wc -l`).
-
-⚠️ Read it off the **serving revisions** (active or traffic-bearing), not `az containerapp show` —
-that returns the *desired* template, which flips the moment an update is accepted while the previous revision may still
-be serving every request. Same trap this file already records for `Authorization__ReadOnly`:
-
-```bash
-bash .github/scripts/check-serving-revisions.sh vitally-staging-ca-uksouth vitally-prod-rg-uksouth --image
-```
-
-⚠️ **Exit 0 here means "the read succeeded", not "the image is current"** — there is no expected
-value to assert against. Compare what it prints against production yourself (same command, production's
-app name). The script calls out serving revisions on different images; treat that as a finding.
-
-**Use the script; do not re-inline the loop.** It was inline here and in three other files — six copies
-in all — and the copies drifted fail-open within a single PR (vitally-mcp#166): one read `az containerapp show`, one lost the guard
-on a failed or empty listing, one lost the emptiness check. A bare `for REV in $(az …)` runs its body
-**zero times** on a failed or empty listing and exits 0, and `az` exits **0 with empty output** when a
-`--query` path stops resolving — the script reads the template as JSON instead, so schema drift is
-`NOT ASSESSED` rather than a blank that reads as a clean result. It checks every revision that is
-**active or** carries traffic, because an active revision at 0% still answers on its own revision FQDN.
-Its header lists every such detail.
-Exit codes: **0** pass, **1** a definite failure, **2** `NOT ASSESSED`, **3** `ABSENT`, **64** usage.
-
-A **torn-down** staging app is a normal state rather than a fault (vitally-mcp#112), and it is exit **3**
-(`ABSENT`) — az's own `(ResourceNotFound)` for that app in that group, matched exactly. ⚠️ That needs
-**read at resource-group scope**: without it Azure answers `AuthorizationFailed` for a missing app,
-which the script correctly reports as `NOT ASSESSED` (2), since it is also what a lost role looks
-like. `dsearle.adm` and the deploy identity both have it; another caller may not.
-
-**The failure mode is a configuration change that is accepted and does nothing.** Setting
-`ApplicationInsights__ConnectionString` on that stale app rolled a revision and came up `Healthy`,
-and had no effect whatever, because the code that reads it arrived with vitally-mcp#164. Nothing reports this:
-a Container App does not validate variable names, so an app that has never heard of a setting accepts
-it exactly like one that honours it. Deploy first, then configure — or the verification step tells you
-about the image rather than about the setting, which is how the same mistake gets made twice.
-
-Two other differences that fall out of staleness and read as bugs: `Audit:IncludeReads` defaulted to
-`false` before 2026-09-17, so an old image audits no reads at all; and vitally-mcp#143's `HttpClient` log filter landed later still,
-on **2026-09-21** (`17b1d78`, PR vitally-mcp#148), so an image built between those two dates has the audit default
-but not the filter — its console is full of `Start processing HTTP request` lines that a current one
-suppresses.
-
-`https://vitally-staging.fiscaltec.com` — a second Container App in the *same* resource group and the
-*same* Container Apps Environment as production, not a second environment. That is what makes it
-cheap: the CAE is VNet-injected, so a new app inside it reaches Key Vault and ACR over the existing
-private endpoints with no additional networking, and it reuses the same user-assigned managed
-identity, so `AcrPull`, `Key Vault Secrets User` and the Graph `GroupMember.Read.All` grant already
-cover it.
-
-**Why it exists.** Authentication has the largest blast radius in this system, so the Entra migration
-(vitally-mcp#102 / vitally-mcp#108) was validated here first — staging ran Entra from 2026-09-03, production followed on
-2026-09-16 — and staging remains the pre-production target for the next identity change. The alternatives were rejected: a local server
-behind an ephemeral HTTPS tunnel orphans one identity-provider app registration per run — identifier
-URIs are immutable and must equal the server origin — which cost two sessions during vitally-mcp#90; and
-validating straight against production is the failure mode a staging-first design exists to prevent.
-**The hostname being stable is the load-bearing property, not a convenience:** it is what lets one app
-registration be reused across a multi-run validation.
-
-**What it shares with production, deliberately:** the CAE, the managed identity, the ACR, the Key
-Vault *and its `vitally-shared` secret*, and the `sg-vitally-*` tier group ids. Sharing is the point —
-a staging environment that differs in more than the thing under test cannot tell you whether a
-failure is the change or the environment.
-
-**The identity provider is shared again.** Both targets point at the same Entra app registration with
-the same client secret; they diverged only while vitally-mcp#108 was half-applied and reunified at the 2026-09-16 flip.
-Both targets hold that secret under the same Container App secret name, `entra-oauth-client-secret`.
-They differed until vitally-mcp#156, because production's was added alongside a retained rollback credential
-rather than overwriting it; normalising them was part of retiring that rollback.
-
-**What diverges:** `OAuth__Resource` and `OAuth__PublicBaseUrl` (both naming the staging origin) and
-`minReplicas: 0`. During an identity-provider migration `OAuth__Authority` diverges too, while
-staging runs the new provider ahead of production — that is what it is for.
-
-**`OAuth__Audience` on staging names *production*, and that is correct.** One app registration serves
-both origins, so a staging token's `aud` is production's App ID URI while its `OAuth__Resource` must
-still be the staging origin (clients reject a metadata document whose `resource` is not the server
-they fetched it from). So the two diverge by **host as well as by slash** here. It looks like a
-copy-paste error and is not; see the divergence warning under *Configuration*.
-
-**One divergence that will cost you time if you meet it cold: staging reads the *production*
-`vitally-shared` secret**, so its write and delete tools mutate real customer data. There is one
-Vitally tenant and no sandbox. Vitally *does* allow additional API keys, but its REST API
-documentation describes no **read-scoped** key (checked 2026-09-15), so a second key would be
-revocable and separately attributable while carrying the same write access — it would not fix this.
-Revisit if scoped keys ever ship; a read-only key at the boundary beats any switch of ours.
-
-**So `Authorization__ReadOnly=true` is staging's guard, and it is the one live use for that switch.**
-Set it whenever staging is up, and unset it only for the tier-enforcement test, which has to see the
-write tools to prove a reader is denied one. Live state: **`true` on staging**, **unset on production**.
-
-⚠️ **A spin-up now has to set TWO variables, and the second is newer than most of this section.**
-`ApplicationInsights__ConnectionString` joined it on 2026-09-25 (vitally-mcp#147): without it the exporter is not
-registered, so staging's audit records — object ids, tool arguments, touched record ids — stay on
-stdout. Neither variable survives a recreate, and neither failure announces itself. The second one
-also reaches beyond staging, because `ContainerAppConsoleLogs` **was enabled on 2026-09-26** (vitally-mcp#142).
-That export is a single diagnostic setting on the CAE that production shares and cannot be scoped per
-app, so an unconfigured staging now carries those records into the console table for the whole
-environment — a live consequence rather than a future one.
-
-⚠️ **A recreate does NOT inherit it.** `containerapps-staging.tf` records it — grep the file for
-`Authorization__ReadOnly` rather than a line number, which moves — but `infra/terraform/` is an as-built
-capture and **`terraform apply` is never run here** — staging is stood up through `deploy.yml`
-and `az containerapp`. So a fresh app comes up on the application default, `false`, writing to
-the shared production Vitally tenant until someone sets the variable. Set it as part of the
-spin-up and verify it, rather than reading the capture as a guarantee:
-
-```bash
-bash .github/scripts/check-serving-revisions.sh vitally-staging-ca-uksouth vitally-prod-rg-uksouth \
-  --env Authorization__ReadOnly --equals true --env ApplicationInsights__ConnectionString
-```
-
-It must exit **0** and print `PASS`. `<unset>` means unguarded, not "defaulted to safe", and
-`NOT ASSESSED` (exit 2) means you do not know — neither is a pass. It reads every **serving** (active
-or traffic-bearing) revision on purpose: `az containerapp show` returns the desired template, which flips the moment an update is
-accepted, while the previous — unguarded — revision may still be taking traffic.
-
-⚠️ **It asserts BOTH spin-up variables, because a check that verifies one of two is worse than no
-check at all** — an operator runs it, sees a pass, and concludes the spin-up is complete. If a third
-spin-up variable is ever added, add a third `--env` here and at the other two **spin-up** sites —
-`docs/runbooks/read-only-and-rbac-rollout.md` and the comment in `containerapps-staging.tf`. Not every
-`check-serving-revisions` call: the image check, the guard-restore check and the App Insights location
-check assert deliberately narrower sets. The *set* of things checked is what drifted last time (vitally-mcp#166).
-Two details:
-
-- A `secretRef`-backed variable counts as **set**. A `secretRef` entry carries **no `value` key**, so
-  a `.value` query renders a variable that IS set exactly like one that is absent (measured against
-  production's `OAuth__SharedClientSecret`, which is defined that way). The script handles it; an
-  inline query would not.
-- `ApplicationInsights__ConnectionString=set` means **configured, not exporting**. A stale or wrong connection string is
-  non-empty and passes here, while its sends fail and the console filter on `ZendeskMcp.AuditLogger` in `Program.cs` suppresses the console records
-  — so the records would exist nowhere and this check would still say pass. Only an `AppEvents` query
-  proves ingestion; `docs/runbooks/entra-cutover-staging-validation.md` has it.
-
-**The custom domain is bound out of band**, as production's is. `fiscaltec.com` is on Cloudflare, so
-DNS is not in `infra/terraform/`: the zone needs an **un-proxied** (DNS-only) `CNAME` from
-`vitally-staging` to the app's default FQDN, plus an `asuid.vitally-staging` `TXT` carrying the CAE's
-`customDomainVerificationId`. Proxying the CNAME breaks managed-certificate issuance. Then
-`az containerapp hostname add`, followed by
-`az containerapp hostname bind --validation-method CNAME`.
-
-#### What must survive a teardown
-
-Tearing down the **Container App** is the whole teardown. Everything below is persistent scaffolding
-that makes the next spin-up cheap, and deleting any of it is what turns a recreate back into the
-multi-session exercise vitally-mcp#112 was raised to end:
-
-| Keep | Why |
-|---|---|
-| The Cloudflare `CNAME` + `asuid.vitally-staging` `TXT` | Costs nothing while the app is gone. The `CNAME` target is deterministic (`<app-name>.<CAE default domain>`), so it keeps pointing at the right place after a recreate under the same name |
-| The staging `/oauth/callback` on the shared Entra app registration | **Identifiers and redirect URIs are the thing a recreate must not have to re-agree.** It is inert while no app answers there, and deleting it per teardown is precisely the orphaning cost the stable hostname exists to avoid |
-| The Entra staging redirect URI (vitally-mcp#107) | Same reason |
-| The `staging` GitHub environment + its `CONTAINER_APP` / `PUBLIC_ORIGIN` variables | The workflow reads them; recreating them by hand invites a typo into the origin, which the preflight check would catch but only after a wasted run. ⚠️ A typo in `CONTAINER_APP` would make the train's gate read staging as **torn down** on every tagged run |
-| — but **delete** `STAGING_PINNED` at teardown | A pin left across a teardown makes the gate report *pinned* rather than *torn down*, and after a recreate keeps the new app off the train |
-| The federated credential and role assignments | See the identity note below |
-| `containerapps-staging.tf` | The recreate recipe. Keep it in step with the live app rather than deleting it when the app goes |
-| `.github/scripts/check-serving-revisions.sh` | The spin-up verification above. It is repo content, so nothing to keep — but it is the step that proves a recreate came up guarded, so run it rather than skip it |
-
-The managed TLS certificate and the hostname binding go with the app and are re-created by the two
-`az containerapp hostname` commands above — that plus the app itself is the entire spin-up, because
-the CAE, identity, ACR and Key Vault are all shared and never leave.
-
-#### One managed identity serves both targets — an accepted risk, not an open defect
-
-`vitally-prod-id-uksouth` serves both targets and holds `Contributor` on the production Container App,
-so a federated credential for `environment:staging` mints a token that **can roll production**. The
-per-app role assignments give no protection, because one identity holds both — do not read them as a
-boundary.
-
-**Accepted deliberately on 2026-08-28**, on this basis: neither the `production` nor the `staging`
-GitHub environment has protection rules or a deployment branch policy (verified, not assumed), and
-`deploy.yml` is `workflow_dispatch`-able against production directly. So anyone who can trigger a
-staging deploy can already trigger a production one, and the shared identity grants no privilege they
-did not already hold. Don't "fix" this on sight — it was priced and taken.
-
-**What would change the answer:** the moment `production` gains a protection rule that `staging` does
-not — required reviewers, or a deployment branch policy — the shared identity becomes a way around
-that gate, and it stops being an accepted risk. Revisit it then, and also if staging starts routinely
-deploying unreviewed refs. **vitally-mcp#171 considered this and does not trigger it:** the train now deploys to
-staging on every run that cuts a tag, but what it deploys is the tag cut from `main` — which takes
-changes only through the Secure-branches ruleset — and it is the same ref production gets minutes
-later. That sameness is the argument: staging deploys nothing production does not. vitally-mcp#171 also added
-`ContainerApp Reader` at resource-group scope to this identity: read plus classic alert-rule write
-(`Microsoft.Insights/alertRules/*`), and no route to production it did not already have.
-
-The remedy is a `vitally-staging-id-uksouth` with its own `AcrPull`,
-`Key Vault Secrets User`, Graph `GroupMember.Read.All` and an app-scoped `Contributor`; the Graph
-grant needs admin consent, which is the only real friction.
-
-#### Why there is no separate dev environment
-
-Evaluated on 2026-08-28 and deliberately not done. A `global` / `prod` / `dev` split is the right end
-state and the `global` tier already exists implicitly — the Premium ACR with CMK, the CMK vault, the
-Entra tenant and DNS are all genuinely shared but carry `prod` names. The cheap version, if it is ever
-picked up, is **not** full duplication: the VNet is `10.80.0.0/23` with only `10.80.0.0-.127`
-allocated, so a second `/27` app subnet and its own CAE drop in with no re-addressing, one NAT gateway
-serves multiple subnets in the same VNet, and both CAEs resolve the same private endpoints through the
-shared DNS zone links. That closes the one gap the shared model cannot: **CAE-level and platform
-changes cannot be rehearsed before production sees them.**
-
-What no topology fixes: there is one Vitally tenant and no sandbox, and Vitally offers no read-scoped
-API key, so any staging or dev environment reads — and can write — real customer data.
-
-### The deploy smoke covers the OAuth metadata, not just liveness
-
-`.github/scripts/verify-oauth-metadata.sh <origin>` is run by `deploy.yml` after the revision is live
-and before the rollback step, so a failure reverts the revision.
-
-It exists because `/health` == 200 and unauthenticated `/mcp` == 401 — the original smoke — both stay
-green while the metadata documents are wrong. A wrong `issuer`, a broken
-`issuer` ↔ `authorization_servers` pairing, a bad `jwks_uri`, an `/oauth/authorize` pointed at the
-wrong upstream, a dropped `iss` flag, or a null-serialised optional each break every MCP client at its
-next re-authentication *and deploy green*. The rollback therefore used to read as assurance it did not
-provide (vitally-mcp#110).
-
-**Run it by hand against any origin** — that is the point of it being a script rather than inline
-YAML, and it is also how the same assertions cover staging with no second copy to keep in step:
-
-```bash
-bash .github/scripts/verify-oauth-metadata.sh https://vitally.fiscaltec.com
-bash .github/scripts/verify-oauth-metadata.sh https://vitally-staging.fiscaltec.com
-bash .github/scripts/verify-oauth-metadata.sh http://localhost:5099   # a local run, for testing it
-```
-
-**The whole assertion set retries, not just the fetches.** Container Apps reports a new revision
-`Provisioned`/`Healthy` *before* ingress finishes shifting traffic, so a check that runs immediately
-can be answered by the **old** revision — a valid 200, a valid document, the previous configuration.
-Asserting once turned that race into a rollback of a healthy deploy on 2026-08-28 (revision 21 came up
-Healthy and was reverted 23 seconds later). `/health` and the 401 cannot catch the race in either
-direction, because both pass on whichever revision answers; this is the first check able to tell them
-apart, so it is the one that has to wait for the swap. Failures are collected and emitted as
-annotations only after the final attempt.
-
-Three things about it that are deliberate and shouldn't be "tidied":
-
-- **No normalisation anywhere.** Trailing slashes and case are compared literally, because that is
-  what clients do — a check that tolerated a difference would pass configurations clients reject.
-- **A first manual run against staging can fail spuriously, and it is not a regression.** Staging is
-  `minReplicas: 0`, the script retries each *fetch* only twice, and a cold start can burn both — the
-  symptom is `200 but the body is not valid JSON` on the protected-resource documents, which look
-  perfectly valid the moment you curl them by hand. CI never sees it because the `/health` smoke runs
-  first and warms the replica. Warm it yourself (`curl <origin>/health`) before reading anything into
-  a manual failure.
-- **It is invoked through `bash`**, not by its executable bit. The repo is authored on Windows with
-  `core.filemode=false`, so an edit can silently drop the mode; relying on it would surface as
-  "Permission denied" during a deploy rather than in review.
-
-Verified when written by running it both ways round: it **passes** against a local server built from
-`main`, and **fails with 6 problems** against the then-current production revision (which predated
-vitally-mcp#100) — including `jwks_uri: null` in the RFC 9728 document, the exact defect that makes the published
-`@modelcontextprotocol/client` reject the whole document.
-
-### Identity: Entra, on both targets
-
-**Entra is the only identity provider, and there is no rollback path.** Staging flipped 2026-09-03,
-production 2026-09-16 (vitally-mcp#108). The previous provider's client, both API registrations and its
-post-login hook were retained through the soak; vitally-mcp#156 abandoned that rollback, removed the retained
-credential from production's Container App and stripped every reference from this repository.
-This server's objects at the previous provider — the client, both Resource Servers and the post-login
-Action — were **deleted on 2026-09-22** as vitally-mcp#156's final step.
-
-⚠️ **Two things that look related and must not be removed.** The provider *tenant* itself stays: it
-hosts Simple Asset System, its API and a Terraform client, none of them ours. So does the **Entra**
-enterprise application that federates sign-in into that tenant — it is an Entra object rather than
-one of this server's, and those other applications sign in through it.
-
-Two consequences worth stating, because both were load-bearing constraints until vitally-mcp#156 and are not any
-more:
-
-- **`CallerIdentity` reads the `oid` claim and nothing else.** The federated-`sub` fallback existed
-  because a rolled-back token would have carried no `oid`; it was removed with the rollback. A token
-  without `oid` now resolves to null and the caller fails closed.
-- **The `permissions` claim cannot authorise anyone.** vitally-mcp#108 removed the code that reads any claim
-  while `LiveGroupCheck` is on, and nothing mints such a claim now. Entitlement comes from Graph,
-  full stop.
-
-The five `OAuth__*` values each target runs are in the configuration table above and in
-`infra/terraform/variables.tf`. `OAuth__UpstreamResourceScope` remains a *value* rather than a
-branch — the empty setting is the RFC 8707 relay default, kept so this server can front a conforming
-provider without a code change, with Entra as the configured outlier.
-
-#### What a cutover can be verified against without a browser
-
-Everything below was run against staging before production; re-run it after any identity change.
-Together it covers every failure mode except "a real user cannot sign in", which needs a person.
-
-1. `bash .github/scripts/verify-oauth-metadata.sh <origin>` — 11 assertions. `jwks_uri` and
-   `userinfo_endpoint` coming back on `login.microsoftonline.com` / `graph.microsoft.com` is vitally-mcp#104's
-   payoff visible: they are read from the provider's discovery document, and no choice of
-   `OAuth:Authority` could concatenate them.
-2. The app **starting at all** proves `StartupGuards.EnsureUpstreamOidcEndpointsAsync` fetched that
-   document and matched its `issuer` to `OAuth:Authority`. A wrong authority is a boot failure, not a
-   sign-in failure.
-3. `GET /oauth/authorize?…` — read the `Location` and assert on its query: upstream endpoint is the
-   provider's, `resource` is **absent**, `scope` carries the API scope appended to the client's own,
-   `redirect_uri` is our fixed callback.
-4. **Follow that `Location` to the provider.** Its sign-in page (HTTP 200, `urlLogin` in the body)
-   means every parameter was accepted; an `AADSTS` code means one was not. This is the check that
-   catches a wrong `client_id`, an unregistered `redirect_uri` or a malformed scope, and it needs no
-   credentials.
-5. `POST /mcp` unauthenticated → exactly **401** with `WWW-Authenticate: Bearer resource_metadata=…`;
-   with a junk token → 401 plus `error="invalid_token"`. `deploy.yml` smoke-tests the status and
-   rolls back if it changes.
-6. `/oauth/authorize` with a `resource` we do not publish → **400 `invalid_target`**; with the
-   published one → **302**. Terminating the parameter must not have become ignoring it.
-7. `POST /oauth/register` → the DCR shim returns the new `client_id`.
-
-**What is left for a person**, because it needs a real token: sign-in per tier, `tools/list` as a
-**department-nested** user (not a directly-assigned admin — every tier but `sg-vitally-admins` is
-granted by nesting, and the vitally-mcp#102 spike produced three wrong conclusions by reasoning about nesting
-instead of testing it), a reader being denied a write tool, and decoding the token for `aud`, `iss`
-and `oid`. Written out as a checklist in `docs/runbooks/entra-cutover-staging-validation.md`, which
-also records what has already been machine-verified so it is not repeated.
-#### If an identity change fails
-
-Fix it forwards. There is no provider to revert to, so a failure is corrected in the Entra app
-registration, the Gate 1 group assignments or the Container App configuration —
-`docs/runbooks/entra-app-registration.md` is the reference for all three, and
-`docs/runbooks/entra-cutover-staging-validation.md` is the acceptance suite.
-
-⚠️ **The failure that hides from every automated check is a client-secret mismatch.** The app boots,
-`/health` returns 200 and unauthenticated `/mcp` still returns 401, because none of those exercises
-the credential. It surfaces only at `/oauth/token`, as `invalid_client`, for every user at once. Both
-targets hold that secret as the Container App secret `entra-oauth-client-secret` — a **copy** of the
-Key Vault secret `entra-mcp-client-secret`, so rotating the vault alone changes nothing the app sends
-(vitally-mcp#138). Verify a secret change by signing in, never by a health probe.
-
-
-### Freezing deploys
-
-**`gh workflow disable release.yml`** (re-enable with `gh workflow enable release.yml`). That is the
-whole mechanism. It stops tagging, releasing and deploying together, which is the coherent unit: a
-freeze must not be able to leave a GitHub Release behind for something that never shipped.
-
-An **attended** deploy stays available throughout via `deploy.yml`'s own `workflow_dispatch`, which is
-a separate workflow and unaffected by the freeze:
-
-```powershell
-gh workflow run deploy.yml --ref <tag-or-sha> -f ref=<tag-or-sha> -f image_tag=<tag>
-```
-
-⚠️ **That route is production-only and builds its own image** — no staging step, no digest sharing.
-And if `<tag>` is one the train already shipped, it **rebuilds and `--force`-imports over the tag
-staging's revision references**, so staging cold-starts into an image nobody smoke-tested. For a tag
-that already shipped, add `-f image_digest=sha256:<…>` from that run's job summary, or re-run the
-train's failed jobs (`gh run rerun <id> --failed`), which keeps staging's digest. A freeze also stops
-staging tracking the train, since the gate is part of it.
-
-That is the intended route during a freeze, and vitally-mcp#108 needs it — the Entra cutover is gated on its
-predecessors being *deployed*, not merely merged, so a freeze that blocked every deploy would deadlock
-it.
-
-**Nothing is lost by pausing.** The commits stay on `main`; whenever the train next runs it cuts one
-tag and `--generate-notes` builds the changelog from everything since the previous tag. The only thing
-forgone is intermediate version numbers for versions that never existed anywhere.
-
-**Do not reintroduce an `AUTO_DEPLOY`-style variable.** vitally-mcp#111 added one so tagging could continue during
-a freeze, on the premise that freezing discarded changelog history. That premise was wrong, and the one
-night it ran produced `v4.2.2` — a Release marked "Latest", deployed nowhere. Reverted in vitally-mcp#115. If a
-future change makes "release without deploying" look useful again, re-read this paragraph first: the
-requirement it was serving did not exist.
-
-**A release run with jobs showing as `skipped` is normally fine** and is not a freeze. There are now
-three that can skip, for different reasons:
-
-| Job | Skipped when | Is that a problem? |
-|---|---|---|
-| `staging-gate`, `deploy-staging` **and** `deploy` | no new tag — a night with no new conventional commits | No: nothing to ship. Most historical runs look like this |
-| `deploy-staging` only | the gate found staging **pinned** or **torn down** — its notice says which | No, by design; production still ships. But a pinned staging is not current |
-| `deploy` (production) while `staging-gate` **failed** | the gate could not establish whether staging exists | **Yes.** Production did not ship. Fix the lookup (login, role, Azure), then `gh run rerun <id> --failed` — **not** a fresh `gh workflow run release.yml`, which finds no new tag and is a green no-op |
-| `deploy` (production) while `deploy-staging` **failed** or was **cancelled** | staging's smoke failed (and it rolled back), or the run was cancelled (possibly by a queued manual staging dispatch — see the pin note above) | **Yes.** The tag and its Release exist while production has not shipped them. A **failed** job: `gh run rerun <id> --failed`. A **cancelled** one — GitHub's docs do not say whether `--failed` covers it, so do not rely on it — deploy by hand with the two commands below |
-
-**Deploying a tag by hand, staging first** — the recovery that depends on nothing but `deploy.yml`:
-
-```bash
-gh workflow run deploy.yml -f target=staging -f ref=<tag> -f image_tag=<tag>
-# read the digest from that run's summary, then:
-gh workflow run deploy.yml -f target=production -f ref=<tag> -f image_tag=<tag> -f image_digest=sha256:<…>
-```
-
-⚠️ Not `gh run rerun <id>` (all jobs): the tag step finds its tag already cut, outputs no new tag,
-and every deploy skips — a green no-op, like a fresh `gh workflow run release.yml`.
-
-A staging deploy that **fails** its smoke rolls staging back and stops production — that run shows
-`deploy` as skipped too, and is the train doing its job. The deploys that fired before vitally-mcp#171 (18, 19
-and 22 August 2026) appear as `deploy / Build, import to ACR, roll Container App`; since vitally-mcp#171 there
-are two, `deploy-staging / …` and `deploy / …`, and the production one builds nothing when staging
-deployed — it imports staging's digest, printed in both jobs' summaries.
-
-**Automatic deploys do not appear in `deploy.yml`'s run list** — to either target. When `release.yml`
-calls it via `uses:`, the job runs *inside the caller's run* — `gh run list --workflow=deploy.yml`
-shows only manual `workflow_dispatch` runs, which makes the automation look untested when it is not. A second
-tell: the release train passes `image_tag: <semver>`, whereas a manual dispatch defaults to
-`sha-<short-sha>`, so the deployed image name says which path shipped it
-(`az containerapp show ... --query properties.template.containers[0].image`).
-
-Infrastructure-as-code is in this repo at `infra/terraform/` — the table above documents the runtime contract for what `deploy.yml` expects. Anyone replicating can swap Container Apps for App Service, ACR for GHCR, Entra for Keycloak, etc., without touching the application code — `OAuth:UpstreamResourceScope` is the one setting whose value is provider-shaped, and it is a value rather than a branch.
+1. Sign in (Entra), then connect a Zendesk agent; confirm a mismatched Zendesk login is refused and its token revoked.
+2. Run every read tool once, and every write tool against a test ticket, test macro (inactive) and draft article, with the feature switches as production will have them.
+3. Check each place the code says `// Unverified against the live API` — the response shapes in particular — and remove the marker once confirmed.
+4. Confirm refresh: leave a connection past its access-token expiry and call again.
+5. Confirm the audit records in `AppEvents` (`AppRoleName` separates staging) carry the expected ids.
+6. Disconnect, and confirm the token is revoked in Zendesk and the secret reads as a tombstone.

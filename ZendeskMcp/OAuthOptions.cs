@@ -129,7 +129,7 @@ public class OAuthOptions
     /// redirect URIs are the fixed <c>/oauth/callback</c> of each origin, not the clients' own
     /// loopback URIs: the proxy substitutes its own and reverses the substitution at the callback,
     /// which is what lets ephemeral loopback ports coexist with one registration. See
-    /// <c>docs/runbooks/entra-app-registration.md</c>.
+    /// <c>docs/runbooks/entra-and-zendesk-oauth.md</c>.
     /// </remarks>
     public string SharedClientId { get; set; } = string.Empty;
 
@@ -138,7 +138,7 @@ public class OAuthOptions
     /// OAuth proxy's /oauth/token endpoint when forwarding token requests upstream — so the shared
     /// app can be a confidential client without exposing the secret to MCP clients. Optional: leave
     /// empty for public-client mode. Sourced from the Key Vault secret <c>entra-mcp-client-secret</c>,
-    /// which <b>expires</b>; see <c>docs/runbooks/entra-app-registration.md</c> for the rotation.
+    /// which <b>expires</b>; see <c>docs/runbooks/entra-and-zendesk-oauth.md</c> for the rotation.
     /// </summary>
     public string SharedClientSecret { get; set; } = string.Empty;
 

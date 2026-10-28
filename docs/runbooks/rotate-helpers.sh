@@ -1,6 +1,7 @@
 # shellcheck shell=bash
 #
-# Helpers for the Entra client-secret rotation in entra-app-registration.md.
+# Helpers for the Entra client-secret rotation in entra-and-zendesk-oauth.md (procedure ported from
+# vitally-mcp's docs/runbooks/entra-app-registration.md).
 #
 # SOURCE this, do not execute it:   . docs/runbooks/rotate-helpers.sh
 #
@@ -14,8 +15,11 @@
 # core.filemode=false, so an edit can silently drop the mode (same convention as
 # .github/scripts/verify-oauth-metadata.sh).
 
-APP=568d8fc4-ebfd-4c5d-8302-ffb0377ac7a4   # Vitally MCP application objectId (appId is c3812e7d-…)
-RG=vitally-prod-rg-uksouth
+# The Zendesk MCP application's objectId (NOT its appId). Not known until entra.tf is applied:
+#   terraform -chdir=infra/terraform output -raw entra_app_object_id   (or `az ad app show --id <appId> --query id -o tsv`)
+# Export APP before sourcing; the placeholder makes every Graph call fail loudly rather than hit another app.
+APP="${APP:-SET-APP-OBJECT-ID-BEFORE-SOURCING}"
+RG=zendesk-prod-rg-uksouth
 
 # Restart EVERY traffic-bearing revision, failing closed on a failed or empty listing.
 #
