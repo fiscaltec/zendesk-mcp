@@ -6,7 +6,7 @@ It is built to the same standard as FISCAL's [Vitally MCP server](https://github
 
 [![CI](https://github.com/fiscaltec/zendesk-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/fiscaltec/zendesk-mcp/actions/workflows/ci.yml)
 
-> **Status: built, not yet deployed.** The Azure estate in `infra/terraform/` is greenfield and has not been applied (it passes `terraform validate`). The Zendesk endpoints were implemented from the API documentation; every read tool and every write tool has since been run against FISCAL's Zendesk (writes on throwaway records, deleted afterwards) and corrected where it differed. Per-user sign-in has not been tried against a tenant. Staging validation is the next step — see [Before production](#before-production). The open work is tracked as issues: staging (#3), per-user sign-in (#4), the audit trail (#5), reads as an ordinary agent (#6) and the remaining unverified response shapes (#7).
+> **Status: built, not yet deployed.** The Azure estate is built with `az` CLI by [`docs/runbooks/build-the-estate.md`](docs/runbooks/build-the-estate.md), as the Vitally estate is, and has not been built yet; `infra/terraform/` records it and is never applied. The Zendesk endpoints were implemented from the API documentation; every read tool and every write tool has since been run against FISCAL's Zendesk (writes on throwaway records, deleted afterwards) and corrected where it differed. Per-user sign-in has not been tried against a tenant. Staging validation is the next step — see [Before production](#before-production). The open work is tracked as issues: staging (#3), per-user sign-in (#4), the audit trail (#5), reads as an ordinary agent (#6) and the remaining unverified response shapes (#7).
 
 ## Features
 
