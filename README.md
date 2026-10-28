@@ -54,7 +54,7 @@ Configuration comes from environment variables in deployed targets (double-under
 | `Zendesk:RequireEmailMatch` | No | `true` | Refuse a Zendesk login whose email differs from the Entra sign-in name. This is what binds a Zendesk login to the right person — do not turn it off in a deployed target. |
 | `Zendesk:Features:*` | No | all `false` | `AllowPublicReplies`, `AllowArticlePublishing`, `AllowMacroChanges`, `AllowUserAndOrganizationChanges` — account-wide switches for the actions with the widest reach. |
 | `Zendesk:MaxAutoPageFetches` / `MaxAnalyticsTickets` / `MaxAttachmentBytes` | No | `10` / `2000` / 20 MB | Bounds on server-side paging, analytics fan-out and file size. |
-| `Zendesk:DevelopmentEmail` + `DevelopmentApiToken` | Local only | — | A Zendesk API token used for every call. Refused at startup unless `OAuth:NoAuth=true` and no Key Vault is set. |
+| `Zendesk:DevelopmentAccessToken` | Local only | — | A Zendesk OAuth access token used for every call. Refused at startup unless `OAuth:NoAuth=true`, no Key Vault is set and the environment is Development. (`DevelopmentEmail` + `DevelopmentApiToken` still work, but Zendesk is retiring API tokens.) |
 | `OAuth:*` | Yes | — | Entra sign-in to this server, exactly as in vitally-mcp: `Authority`, `Audience`, `Resource`, `UpstreamResourceScope`, `SharedClientId`, `SharedClientSecret`, `AllowedClientRedirectUris`, `PublicBaseUrl`, `NoAuth`. |
 | `Authorization:*` | Yes | — | Tier enforcement: `LiveGroupCheck`, `ReaderGroupId`/`EditorGroupId`/`AdminGroupId`, `ReadOnly`, permission names. |
 | `Audit:*` | No | on, reads included | Audit trail switches. |
@@ -66,11 +66,10 @@ Configuration comes from environment variables in deployed targets (double-under
 # Restore + build + run the test suite
 dotnet test ZendeskMcp.sln -c Debug
 
-# Start the server in dev mode: no Entra, no Key Vault, every call made with your own Zendesk API token
+# Start the server in dev mode: no Entra, no Key Vault, every call made with one Zendesk OAuth access token
 $env:OAuth__NoAuth = "true"
 $env:Zendesk__Subdomain = "your-subdomain"
-$env:Zendesk__DevelopmentEmail = "you@fiscaltec.com"
-$env:Zendesk__DevelopmentApiToken = "<a Zendesk API token>"
+$env:Zendesk__DevelopmentAccessToken = "<a Zendesk OAuth access token>"   # API tokens are being retired
 $env:ASPNETCORE_URLS = "http://localhost:5099"
 dotnet run --project ZendeskMcp/ZendeskMcp.csproj
 ```

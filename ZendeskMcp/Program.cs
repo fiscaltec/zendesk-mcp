@@ -317,7 +317,9 @@ builder.Services.AddSingleton<UpstreamOidcMetadata>();
 
 // Fail fast on an unauthenticated production-looking config (NoAuth + Key Vault).
 StartupGuards.EnsureSafeAuthConfig(noAuth, zendeskSection["KeyVaultUri"]);
-StartupGuards.EnsureDevelopmentTokenIsLocal(zendeskSection["DevelopmentApiToken"], zendeskSection["KeyVaultUri"], noAuth, builder.Environment.IsDevelopment());
+StartupGuards.EnsureDevelopmentTokenIsLocal(
+    zendeskSection["DevelopmentAccessToken"] is { Length: > 0 } developmentAccessToken ? developmentAccessToken : zendeskSection["DevelopmentApiToken"],
+    zendeskSection["KeyVaultUri"], noAuth, builder.Environment.IsDevelopment());
 StartupGuards.EnsureIdentityBindingIsOn(zendeskSection["RequireEmailMatch"], noAuth);
 
 if (!noAuth)

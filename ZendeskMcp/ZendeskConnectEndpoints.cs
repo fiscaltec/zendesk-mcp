@@ -32,7 +32,7 @@ public static class ZendeskConnectEndpoints
         app.MapGet(ConnectPath, async (HttpContext ctx, ZendeskConnectLinks links, ZendeskOAuthClient oauthClient,
             IOptions<OAuthOptions> oauth, IOptions<ZendeskServerOptions> zendesk) =>
         {
-            if (!string.IsNullOrWhiteSpace(zendesk.Value.DevelopmentApiToken))
+            if (zendesk.Value.HasDevelopmentCredential)
             {
                 return Page(StatusCodes.Status404NotFound, "Not available",
                     "This server is running with a development API token, so there is nothing to connect.");

@@ -13,9 +13,10 @@ namespace ZendeskMcp;
 /// permissions apply on top of this server's tiers. See <see cref="ZendeskCredentialProvider"/>.
 /// </para>
 /// <para>
-/// <see cref="DevelopmentApiToken"/> is the exception, for local development only: with no Key Vault
-/// configured it authenticates every call as <see cref="DevelopmentEmail"/> using a Zendesk API
-/// token. <see cref="StartupGuards"/> refuses it alongside a Key Vault.
+/// <see cref="DevelopmentAccessToken"/> (a Zendesk OAuth access token) and the legacy
+/// <see cref="DevelopmentApiToken"/> are the exception, for local development only: every call is
+/// made with that one credential. <see cref="StartupGuards"/> refuses either outside unauthenticated
+/// local development.
 /// </para>
 /// </remarks>
 public class ZendeskServerOptions
@@ -80,8 +81,21 @@ public class ZendeskServerOptions
     /// <summary>Local development only: the Zendesk user an API token belongs to.</summary>
     public string? DevelopmentEmail { get; set; }
 
-    /// <summary>Local development only: a Zendesk API token, used for every call when no Key Vault is configured.</summary>
+    /// <summary>
+    /// Local development only, legacy: a Zendesk API token, used with <see cref="DevelopmentEmail"/> for
+    /// every call. Zendesk is retiring API tokens; prefer <see cref="DevelopmentAccessToken"/>.
+    /// </summary>
     public string? DevelopmentApiToken { get; set; }
+
+    /// <summary>
+    /// Local development only: a Zendesk OAuth access token (from this account's OAuth client), sent as a
+    /// bearer token on every call. The replacement for <see cref="DevelopmentApiToken"/>.
+    /// </summary>
+    public string? DevelopmentAccessToken { get; set; }
+
+    /// <summary>True when either development credential is set, i.e. every call uses one shared credential.</summary>
+    public bool HasDevelopmentCredential =>
+        !string.IsNullOrWhiteSpace(DevelopmentApiToken) || !string.IsNullOrWhiteSpace(DevelopmentAccessToken);
 
     /// <summary>Upper bound on pages the server will fetch for one tool call when it pages on the caller's behalf.</summary>
     public int MaxAutoPageFetches { get; set; } = 10;
@@ -117,6 +131,7 @@ public class ZendeskServerOptions
         DevelopmentOAuthClientSecret = DevelopmentOAuthClientSecret?.Trim();
         DevelopmentEmail = DevelopmentEmail?.Trim();
         DevelopmentApiToken = DevelopmentApiToken?.Trim();
+        DevelopmentAccessToken = DevelopmentAccessToken?.Trim();
         OAuthScopes = string.IsNullOrWhiteSpace(OAuthScopes) ? "read write" : OAuthScopes.Trim();
         TokenSecretPrefix = TokenSecretPrefix?.Trim() ?? string.Empty;
 
@@ -136,8 +151,14 @@ public class ZendeskServerOptions
                 $"Zendesk:KeyVaultUri must be an absolute https URI (got '{KeyVaultUri}').");
         }
 
-        var hasDevToken = !string.IsNullOrWhiteSpace(DevelopmentApiToken);
-        if (hasDevToken && string.IsNullOrWhiteSpace(DevelopmentEmail))
+        if (!string.IsNullOrWhiteSpace(DevelopmentApiToken) && !string.IsNullOrWhiteSpace(DevelopmentAccessToken))
+        {
+            throw new InvalidOperationException(
+                "Set Zendesk:DevelopmentAccessToken or Zendesk:DevelopmentApiToken, not both.");
+        }
+
+        var hasDevToken = HasDevelopmentCredential;
+        if (!string.IsNullOrWhiteSpace(DevelopmentApiToken) && string.IsNullOrWhiteSpace(DevelopmentEmail))
         {
             throw new InvalidOperationException(
                 "Zendesk:DevelopmentEmail is required with Zendesk:DevelopmentApiToken (Zendesk API tokens authenticate as '{email}/token').");
@@ -149,7 +170,7 @@ public class ZendeskServerOptions
             if (string.IsNullOrWhiteSpace(OAuthClientId))
             {
                 throw new InvalidOperationException(
-                    "Zendesk:OAuthClientId is required unless Zendesk:DevelopmentApiToken is set (local development).");
+                    "Zendesk:OAuthClientId is required unless a development credential (Zendesk:DevelopmentAccessToken) is set (local development).");
             }
 
             if (string.IsNullOrWhiteSpace(KeyVaultUri) && string.IsNullOrWhiteSpace(DevelopmentOAuthClientSecret))

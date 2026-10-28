@@ -30,11 +30,10 @@ dotnet test ZendeskMcp.sln -c Debug
 # Run a single test class
 dotnet test ZendeskMcp.sln -c Debug --filter-class "*TicketsToolsTests"
 
-# Start the server in dev mode: no Entra, no Key Vault, every call made with ONE Zendesk API token
+# Start the server in dev mode: no Entra, no Key Vault, every call made with ONE Zendesk OAuth access token
 $env:OAuth__NoAuth = "true"
 $env:Zendesk__Subdomain = "your-subdomain"
-$env:Zendesk__DevelopmentEmail = "you@fiscaltec.com"
-$env:Zendesk__DevelopmentApiToken = "<a Zendesk API token>"
+$env:Zendesk__DevelopmentAccessToken = "<a Zendesk OAuth access token>"   # API tokens are being retired
 $env:ASPNETCORE_URLS = "http://localhost:5099"
 dotnet run --project ZendeskMcp/ZendeskMcp.csproj
 ```

@@ -272,4 +272,31 @@ public class ZendeskServerOptionsTests
         Action act = () => opts.Validate();
         act.Should().NotThrow();
     }
+
+    [Fact]
+    public void Validate_AcceptsADevelopmentAccessToken_WithoutAnEmail()
+    {
+        var options = new ZendeskServerOptions { Subdomain = "acme", DevelopmentAccessToken = "zd_oauth_dev" };
+
+        var act = options.Validate;
+
+        act.Should().NotThrow();
+        options.HasDevelopmentCredential.Should().BeTrue();
+    }
+
+    [Fact]
+    public void Validate_RefusesBothDevelopmentCredentials()
+    {
+        var options = new ZendeskServerOptions
+        {
+            Subdomain = "acme",
+            DevelopmentEmail = "dev@example.com",
+            DevelopmentApiToken = "t",
+            DevelopmentAccessToken = "a",
+        };
+
+        var act = options.Validate;
+
+        act.Should().Throw<InvalidOperationException>().WithMessage("*not both*");
+    }
 }

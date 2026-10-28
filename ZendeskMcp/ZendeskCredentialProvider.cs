@@ -53,11 +53,16 @@ public sealed class ZendeskCredentialProvider(
     private readonly TimeProvider _time = timeProvider ?? TimeProvider.System;
 
     /// <summary>True when every call is made with the development API token rather than per-user OAuth.</summary>
-    public bool UsesDevelopmentToken => !string.IsNullOrWhiteSpace(_options.DevelopmentApiToken);
+    public bool UsesDevelopmentToken => _options.HasDevelopmentCredential;
 
     /// <summary>The Authorization header for a Zendesk API call made by the current caller.</summary>
     public async Task<AuthenticationHeaderValue> GetAuthorizationAsync(CancellationToken cancellationToken = default)
     {
+        if (!string.IsNullOrWhiteSpace(_options.DevelopmentAccessToken))
+        {
+            return new AuthenticationHeaderValue("Bearer", _options.DevelopmentAccessToken);
+        }
+
         if (UsesDevelopmentToken)
         {
             var basic = Convert.ToBase64String(Encoding.UTF8.GetBytes($"{_options.DevelopmentEmail}/token:{_options.DevelopmentApiToken}"));
@@ -136,9 +141,9 @@ public sealed class ZendeskCredentialProvider(
         {
             // Logged here because nothing else will: ToolCallFailureLog treats the exception below as a
             // permission denial and stays silent, which would leave a bad development token with no line.
-            logger.LogWarning("Zendesk rejected Zendesk:DevelopmentApiToken (401)");
+            logger.LogWarning("Zendesk rejected the development credential (401)");
             throw new UnauthorizedAccessException(
-                "Zendesk rejected Zendesk:DevelopmentApiToken. Check the token and Zendesk:DevelopmentEmail.");
+                "Zendesk rejected the development credential (Zendesk:DevelopmentAccessToken or DevelopmentApiToken). It may have expired or been revoked.");
         }
 
         var objectId = RequireObjectId();

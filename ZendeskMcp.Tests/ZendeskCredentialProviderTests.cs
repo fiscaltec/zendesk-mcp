@@ -188,6 +188,21 @@ public class ZendeskCredentialProviderTests
     }
 
     [Fact]
+    public async Task TheDevelopmentAccessToken_IsSentAsABearerToken()
+    {
+        using var zendesk = TestHelpers.CreateFakeZendesk(_ => FakeResponse.Json(TestHelpers.GetSampleTicketJson()));
+        var service = TestHelpers.BuildZendeskService(zendesk.Client, configure: o =>
+        {
+            o.DevelopmentApiToken = null;
+            o.DevelopmentAccessToken = "zd_oauth_dev";
+        });
+
+        await service.GetAsync("/api/v2/tickets/101");
+
+        zendesk.Requests.Single().Headers["Authorization"].Should().Be("Bearer zd_oauth_dev");
+    }
+
+    [Fact]
     public async Task Disconnect_RevokesAtZendesk_AndForgetsTheToken()
     {
         using var zendesk = TestHelpers.CreateFakeZendesk(_ => FakeResponse.WithStatus(HttpStatusCode.NoContent, string.Empty));

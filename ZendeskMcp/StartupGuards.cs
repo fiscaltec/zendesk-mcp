@@ -22,7 +22,8 @@ public static class StartupGuards
     }
 
     /// <summary>
-    /// Refuses <c>Zendesk:DevelopmentApiToken</c> anywhere but unauthenticated local development. The
+    /// Refuses a development credential (<c>Zendesk:DevelopmentAccessToken</c> or the legacy
+    /// <c>Zendesk:DevelopmentApiToken</c>) anywhere but unauthenticated local development. The
     /// token makes every Zendesk call as one person; behind real sign-in that would quietly turn a
     /// per-user server back into a shared service account, attributing every agent's changes to
     /// whoever owns the token — the exact outcome per-user OAuth exists to prevent.
@@ -42,7 +43,7 @@ public static class StartupGuards
         if (!noAuth || !string.IsNullOrWhiteSpace(keyVaultUri) || !isDevelopment)
         {
             throw new InvalidOperationException(
-                "Zendesk:DevelopmentApiToken is for unauthenticated local development only (OAuth:NoAuth=true, no " +
+                "A Zendesk development credential (DevelopmentAccessToken / DevelopmentApiToken) is for unauthenticated local development only (OAuth:NoAuth=true, no " +
                 "Zendesk:KeyVaultUri, the Development environment). With sign-in enabled it would make every person's Zendesk calls as the " +
                 "token's owner. Remove it, and let each person connect their own Zendesk account.");
         }

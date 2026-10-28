@@ -23,9 +23,9 @@ public static class ConnectionTools
             return new JsonObject
             {
                 ["connected"] = true,
-                ["mode"] = "development_api_token",
+                ["mode"] = string.IsNullOrWhiteSpace(zendesk.Options.DevelopmentAccessToken) ? "development_api_token" : "development_access_token",
                 ["zendesk_email"] = zendesk.Options.DevelopmentEmail,
-                ["note"] = "Local development: every call uses one API token. Deployed servers use each person's own connection.",
+                ["note"] = "Local development: every call uses one shared development credential. Deployed servers use each person's own connection.",
             }.ToJsonString();
         }
 
