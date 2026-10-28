@@ -966,8 +966,8 @@ public static class MacrosTools
         var toChange = ids.Where(id => byId.TryGetValue(id, out var m) && MacroSupport.ParseBool(m["active"]) != active).ToList();
         if (toChange.Count > 0)
         {
-            // Unverified against the live API (docs-checked, not live-tested): Zendesk documents update_many
-            // as answering 200 with the updated macros, synchronously rather than with a job.
+            // update_many answers 200 with the updated macros, synchronously rather than with a job
+            // (confirmed against the live API).
             var body = new JsonObject
             {
                 ["macros"] = new JsonArray(toChange.Select(id => (JsonNode)new JsonObject { ["id"] = id, ["active"] = active }).ToArray()),
