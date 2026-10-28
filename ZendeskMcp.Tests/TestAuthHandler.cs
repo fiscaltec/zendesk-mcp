@@ -1,0 +1,55 @@
+using System.Security.Claims;
+using System.Text.Encodings.Web;
+using Microsoft.AspNetCore.Authentication;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Options;
+
+namespace ZendeskMcp.Tests;
+
+/// <summary>
+/// Options carrying the permissions the synthetic test principal should hold.
+/// </summary>
+public class TestAuthHandlerOptions : AuthenticationSchemeOptions
+{
+    public string[] Permissions { get; set; } = [];
+
+    /// <summary>
+    /// Entra object id to emit as an <c>oid</c> claim. Leave null for the claim-only principal most
+    /// tests want; set it when the test needs <see cref="ToolAuthorizer"/> to take the live group
+    /// path, which is skipped entirely when no object id can be determined.
+    /// </summary>
+    public string? ObjectId { get; set; }
+}
+
+/// <summary>
+/// Authenticates every request as a fixed principal holding <see cref="TestAuthHandlerOptions.Permissions"/>.
+/// Lets the integration tests exercise real policy evaluation and tools/list filtering without an
+/// identity provider or a real token.
+/// </summary>
+public class TestAuthHandler(
+    IOptionsMonitor<TestAuthHandlerOptions> options,
+    ILoggerFactory logger,
+    UrlEncoder encoder)
+    : AuthenticationHandler<TestAuthHandlerOptions>(options, logger, encoder)
+{
+    public const string SchemeName = "TestScheme";
+
+    protected override Task<AuthenticateResult> HandleAuthenticateAsync()
+    {
+        var claims = new List<Claim>
+        {
+            new(ClaimTypes.NameIdentifier, "test-subject"),
+            new("sub", "test-subject")
+        };
+        claims.AddRange(Options.Permissions.Select(p => new Claim("permissions", p)));
+        if (!string.IsNullOrWhiteSpace(Options.ObjectId))
+        {
+            claims.Add(new Claim("oid", Options.ObjectId));
+        }
+
+        var identity = new ClaimsIdentity(claims, SchemeName);
+        var principal = new ClaimsPrincipal(identity);
+        var ticket = new AuthenticationTicket(principal, SchemeName);
+        return Task.FromResult(AuthenticateResult.Success(ticket));
+    }
+}

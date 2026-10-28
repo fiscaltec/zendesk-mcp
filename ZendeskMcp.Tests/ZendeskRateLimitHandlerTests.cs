@@ -1,0 +1,314 @@
+using FluentAssertions;
+using Microsoft.Extensions.Logging;
+using Moq;
+using System.Net;
+using System.Net.Http.Headers;
+
+namespace ZendeskMcp.Tests;
+
+/// <summary>
+/// Tests for the ZendeskRateLimitHandler delegating handler. Drives an inner queueable
+/// HttpMessageHandler so each test can stage a sequence of responses (e.g. 429 then 200).
+/// Implements IDisposable so xUnit cleans up the HttpClient + handler chain (and any
+/// undequeued HttpResponseMessages still sitting in the QueueingHandler) at the end of
+/// every test, rather than relying on the GC.
+/// </summary>
+public class VitallyRateLimitHandlerTests : IDisposable
+{
+    private readonly List<HttpClient> _clients = new();
+
+    /// <summary>
+    /// Test handler that returns responses from a queue and records all received requests.
+    /// Disposes any unconsumed responses + received requests on its own disposal.
+    /// </summary>
+    private sealed class QueueingHandler : HttpMessageHandler
+    {
+        public Queue<HttpResponseMessage> Responses { get; } = new();
+        public List<HttpRequestMessage> Requests { get; } = new();
+
+        protected override Task<HttpResponseMessage> SendAsync(
+            HttpRequestMessage request, CancellationToken cancellationToken)
+        {
+            Requests.Add(request);
+            return Task.FromResult(Responses.Dequeue());
+        }
+
+        protected override void Dispose(bool disposing)
+        {
+            if (disposing)
+            {
+                while (Responses.Count > 0)
+                {
+                    Responses.Dequeue().Dispose();
+                }
+                foreach (var req in Requests)
+                {
+                    req.Dispose();
+                }
+            }
+            base.Dispose(disposing);
+        }
+    }
+
+    private static HttpResponseMessage TooManyRequests(TimeSpan? retryAfter = null)
+    {
+        var response = new HttpResponseMessage(HttpStatusCode.TooManyRequests);
+        if (retryAfter.HasValue)
+        {
+            response.Headers.RetryAfter = new RetryConditionHeaderValue(retryAfter.Value);
+        }
+        return response;
+    }
+
+    private static HttpResponseMessage Ok(int? rateLimitRemaining = null)
+    {
+        var response = new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StringContent("{}")
+        };
+        if (rateLimitRemaining.HasValue)
+        {
+            response.Headers.Add("X-RateLimit-Remaining", rateLimitRemaining.Value.ToString());
+        }
+        return response;
+    }
+
+    private (HttpClient client, QueueingHandler inner, Mock<ILogger<ZendeskRateLimitHandler>> logger) BuildClient(
+        Action<ZendeskRateLimitHandler>? configure = null,
+        ZendeskMetrics? metrics = null)
+    {
+        var inner = new QueueingHandler();
+        var logger = new Mock<ILogger<ZendeskRateLimitHandler>>();
+        var handler = new ZendeskRateLimitHandler(logger.Object, metrics: metrics)
+        {
+            InnerHandler = inner,
+            // Use tiny fallback so tests are fast even when 429 has no Retry-After.
+            FallbackRetryDelay = TimeSpan.FromMilliseconds(1),
+            MaxRetryDelay = TimeSpan.FromMilliseconds(50)
+        };
+        configure?.Invoke(handler);
+        var client = new HttpClient(handler);
+        _clients.Add(client);
+        return (client, inner, logger);
+    }
+
+    public void Dispose()
+    {
+        // Disposing the HttpClient disposes its handler chain (the ZendeskRateLimitHandler
+        // and the inner QueueingHandler), which in turn disposes any undequeued responses
+        // and recorded requests.
+        foreach (var client in _clients)
+        {
+            client.Dispose();
+        }
+        _clients.Clear();
+        GC.SuppressFinalize(this);
+    }
+
+    [Fact]
+    public async Task Counts_EachRetry_AndNoExhaustion_WhenARetrySucceeds()
+    {
+        // vitally-mcp#94: "retries exhausted" was only a log line, text to parse; a counter is a pre-aggregated
+        // series of how often the server exceeds Vitally's 1000 req/min budget.
+        using var capture = new MetricCapture();
+        var (client, inner, _) = BuildClient(metrics: capture.Metrics);
+        inner.Responses.Enqueue(TooManyRequests());
+        inner.Responses.Enqueue(TooManyRequests());
+        inner.Responses.Enqueue(Ok());
+
+        using var response = await client.GetAsync("http://example.test/x");
+
+        capture.Total("vitally.ratelimit.retries").Should().Be(2);
+        capture.Total("vitally.ratelimit.exhausted").Should().Be(0);
+    }
+
+    [Fact]
+    public async Task DoesNotCountARetry_ThatIsCancelledDuringTheBackoff()
+    {
+        // A timeout or a cancelled caller during the wait means no retry request is ever sent, so
+        // counting it would overstate how often the budget was exceeded (Copilot on vitally-mcp#182).
+        using var capture = new MetricCapture();
+        var (client, inner, _) = BuildClient(h => h.FallbackRetryDelay = TimeSpan.FromSeconds(30), capture.Metrics);
+        inner.Responses.Enqueue(TooManyRequests());
+        using var cts = new CancellationTokenSource(TimeSpan.FromMilliseconds(100));
+
+        var act = () => client.GetAsync("http://example.test/x", cts.Token);
+
+        await act.Should().ThrowAsync<OperationCanceledException>();
+        capture.Total("vitally.ratelimit.retries").Should().Be(0);
+    }
+
+    [Fact]
+    public async Task Counts_Exhaustion_WhenEveryRetryIsRateLimited()
+    {
+        using var capture = new MetricCapture();
+        var (client, inner, _) = BuildClient(h => h.MaxRetries = 2, capture.Metrics);
+        for (var i = 0; i < 3; i++)
+        {
+            inner.Responses.Enqueue(TooManyRequests());
+        }
+
+        using var response = await client.GetAsync("http://example.test/x");
+
+        response.StatusCode.Should().Be(HttpStatusCode.TooManyRequests);
+        capture.Total("vitally.ratelimit.retries").Should().Be(2);
+        capture.Total("vitally.ratelimit.exhausted").Should().Be(1);
+    }
+
+    [Fact]
+    public async Task SendAsync_OnSuccess_ShouldNotRetry()
+    {
+        var (client, inner, _) = BuildClient();
+        inner.Responses.Enqueue(Ok());
+
+        using var response = await client.GetAsync("http://example.test/x");
+
+        response.StatusCode.Should().Be(HttpStatusCode.OK);
+        inner.Requests.Should().HaveCount(1);
+    }
+
+    [Fact]
+    public async Task SendAsync_On429ThenSuccess_ShouldRetryAndReturnSuccess()
+    {
+        var (client, inner, _) = BuildClient();
+        inner.Responses.Enqueue(TooManyRequests());
+        inner.Responses.Enqueue(Ok());
+
+        using var response = await client.GetAsync("http://example.test/x");
+
+        response.StatusCode.Should().Be(HttpStatusCode.OK);
+        inner.Requests.Should().HaveCount(2);
+    }
+
+    [Fact]
+    public async Task SendAsync_On429_ShouldHonourRetryAfterHeader()
+    {
+        var (client, inner, _) = BuildClient();
+        // Retry-After requests 50ms (capped at MaxRetryDelay)
+        inner.Responses.Enqueue(TooManyRequests(retryAfter: TimeSpan.FromMilliseconds(40)));
+        inner.Responses.Enqueue(Ok());
+
+        var start = DateTimeOffset.UtcNow;
+        using var response = await client.GetAsync("http://example.test/x");
+        var elapsed = DateTimeOffset.UtcNow - start;
+
+        response.StatusCode.Should().Be(HttpStatusCode.OK);
+        elapsed.Should().BeGreaterThanOrEqualTo(TimeSpan.FromMilliseconds(30));
+    }
+
+    [Fact]
+    public async Task SendAsync_When429PersistsBeyondMaxRetries_ShouldReturn429ToCaller()
+    {
+        var (client, inner, _) = BuildClient(h => h.MaxRetries = 2);
+        // 1 initial + 2 retries = 3 attempts, all 429
+        inner.Responses.Enqueue(TooManyRequests());
+        inner.Responses.Enqueue(TooManyRequests());
+        inner.Responses.Enqueue(TooManyRequests());
+
+        using var response = await client.GetAsync("http://example.test/x");
+
+        response.StatusCode.Should().Be(HttpStatusCode.TooManyRequests);
+        inner.Requests.Should().HaveCount(3);
+    }
+
+    [Fact]
+    public async Task SendAsync_WhenRateLimitRemainingBelowThreshold_ShouldLogWarning()
+    {
+        var (client, inner, logger) = BuildClient(h => h.LowRemainingThreshold = 50);
+        inner.Responses.Enqueue(Ok(rateLimitRemaining: 10));
+
+        using var response = await client.GetAsync("http://example.test/x");
+
+        VerifyWarningLoggedContaining(logger, "10 requests remaining");
+    }
+
+    [Fact]
+    public async Task SendAsync_WhenRateLimitRemainingAboveThreshold_ShouldNotLogWarning()
+    {
+        var (client, inner, logger) = BuildClient(h => h.LowRemainingThreshold = 50);
+        inner.Responses.Enqueue(Ok(rateLimitRemaining: 500));
+
+        using var response = await client.GetAsync("http://example.test/x");
+
+        logger.Verify(
+            l => l.Log(
+                LogLevel.Warning,
+                It.IsAny<EventId>(),
+                It.IsAny<It.IsAnyType>(),
+                It.IsAny<Exception>(),
+                It.IsAny<Func<It.IsAnyType, Exception?, string>>()),
+            Times.Never);
+    }
+
+    [Fact]
+    public async Task SendAsync_WhenRateLimitRemainingHeaderMissing_ShouldNotLogWarning()
+    {
+        var (client, inner, logger) = BuildClient();
+        inner.Responses.Enqueue(Ok(rateLimitRemaining: null));
+
+        using var response = await client.GetAsync("http://example.test/x");
+
+        logger.Verify(
+            l => l.Log(
+                LogLevel.Warning,
+                It.IsAny<EventId>(),
+                It.IsAny<It.IsAnyType>(),
+                It.IsAny<Exception>(),
+                It.IsAny<Func<It.IsAnyType, Exception?, string>>()),
+            Times.Never);
+    }
+
+    [Fact]
+    public async Task SendAsync_On429_ShouldLogRetryWarning()
+    {
+        var (client, inner, logger) = BuildClient();
+        inner.Responses.Enqueue(TooManyRequests());
+        inner.Responses.Enqueue(Ok());
+
+        using var response = await client.GetAsync("http://example.test/x");
+
+        VerifyWarningLoggedContaining(logger, "rate limited");
+    }
+
+    [Fact]
+    public async Task SendAsync_WhenRetriesExhausted_ShouldLogExhaustionWarning()
+    {
+        var (client, inner, logger) = BuildClient(h => h.MaxRetries = 1);
+        inner.Responses.Enqueue(TooManyRequests());
+        inner.Responses.Enqueue(TooManyRequests());
+
+        using var response = await client.GetAsync("http://example.test/x");
+
+        VerifyWarningLoggedContaining(logger, "retries exhausted");
+    }
+
+    [Fact]
+    public async Task SendAsync_WithXRateLimitResetHeader_ShouldHonourUnixResetTime()
+    {
+        var (client, inner, _) = BuildClient();
+        var response429 = new HttpResponseMessage(HttpStatusCode.TooManyRequests);
+        // Set X-RateLimit-Reset to 50ms from now (Unix-seconds rounds to "now" or "now+1s")
+        var resetUnix = DateTimeOffset.UtcNow.AddSeconds(1).ToUnixTimeSeconds();
+        response429.Headers.Add("X-RateLimit-Reset", resetUnix.ToString());
+        inner.Responses.Enqueue(response429);
+        inner.Responses.Enqueue(Ok());
+
+        using var response = await client.GetAsync("http://example.test/x");
+
+        response.StatusCode.Should().Be(HttpStatusCode.OK);
+        inner.Requests.Should().HaveCount(2);
+    }
+
+    private static void VerifyWarningLoggedContaining(
+        Mock<ILogger<ZendeskRateLimitHandler>> logger, string substring)
+    {
+        logger.Verify(
+            l => l.Log(
+                LogLevel.Warning,
+                It.IsAny<EventId>(),
+                It.Is<It.IsAnyType>((state, _) => state!.ToString()!.Contains(substring)),
+                It.IsAny<Exception>(),
+                It.IsAny<Func<It.IsAnyType, Exception?, string>>()),
+            Times.AtLeastOnce);
+    }
+}

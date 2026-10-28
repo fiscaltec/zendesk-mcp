@@ -1,0 +1,765 @@
+using System.Reflection;
+using FluentAssertions;
+using Microsoft.AspNetCore.Hosting;
+using Microsoft.AspNetCore.Mvc.Testing;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging;
+using ZendeskMcp;
+using OpenTelemetry;
+using OpenTelemetry.Logs;
+using OpenTelemetry.Trace;
+using Microsoft.Extensions.Options;
+using Microsoft.Extensions.Logging.Console;
+
+namespace ZendeskMcp.Tests;
+
+/// <summary>
+/// Pins the log-level filters configured in <c>Program.cs</c>.
+///
+/// <para>⚠️ <b>vitally-mcp#143 framed the <c>HttpClient</c> filter as a PII control and that premise was
+/// wrong.</b> .NET redacts query <i>values</i> by default — the logged form is
+/// <c>GET .../users/search?*</c>, where <c>?*</c> is the redaction marker rather than a truncation
+/// — so <c>Search_users</c> terms never reached the logs. Verified by probe and against live
+/// production logs, where every query in the stream is <c>?*</c>. The filters are <b>noise
+/// reduction</b>: 86.8% of console bytes between them.</para>
+///
+/// <para>These assertions compose the real host, so they fail if the filters are removed, reordered
+/// behind a provider that ignores them, or moved to a config file that does not reach the image —
+/// which is the specific trap here: <c>.gitignore</c> and <c>.dockerignore</c> both exclude
+/// <c>appsettings.json</c>, so configuring levels there works locally and changes nothing in
+/// production.</para>
+/// </summary>
+[Collection(IntegrationTestCollection.Name)]
+public class LoggingFilterTests
+{
+    /// <summary>
+    /// <b>Every</b> typed-client category, both handler stages, driven from one source so the two
+    /// theories below cannot drift apart.
+    ///
+    /// <para>The concrete categories the framework uses are
+    /// <c>System.Net.Http.HttpClient.{Name}.LogicalHandler</c> and <c>.ClientHandler</c>. Asserting
+    /// on those rather than on the prefix proves the filter applies to the categories that actually
+    /// appear in the live log stream, not merely to a name that happens to match it.</para>
+    ///
+    /// <para>The filter is a single prefix today, so any one entry would prove it works — the
+    /// completeness is insurance against a future per-category override re-enabling
+    /// <c>Information</c>, or dropping to <c>None</c>, for one client while the suite stays
+    /// green.</para>
+    /// </summary>
+    private const string DefaultHttpClientName = "Default";
+
+    /// <summary>
+    /// Proves that every name the theory data above claims is a name the host actually creates a
+    /// logger for, rather than trusting any of them.
+    ///
+    /// <para>The risk this guards against is specific: every category under
+    /// <c>System.Net.Http.HttpClient.</c> is disabled at <c>Information</c> by the prefix filter, so
+    /// a <b>wrong</b> name in the theory data would pass while testing a logger nothing creates —
+    /// exactly how this file's discovery-client name was wrong and green earlier in this PR.</para>
+    ///
+    /// <para>So this composes the host, brings each of the four clients into existence by the route
+    /// <c>Program.cs</c> itself uses, and asserts the claimed categories are among those the
+    /// framework asked for. Crucially the two typed clients are reached by <b>resolving the typed
+    /// service</b>, never by asking the factory for a name derived here — asking for a derived name
+    /// would create the logger it was meant to prove, and pass whatever the derivation said.</para>
+    /// </summary>
+    [Fact]
+    public void EveryClaimedHttpClientCategory_IsOneTheHostActuallyCreates()
+    {
+        var seen = new CategoryRecordingProvider();
+
+        var previous = SnapshotAndClearConfiguration();
+        foreach (var (key, value) in RequiredSettings)
+        {
+            Environment.SetEnvironmentVariable(key, value);
+        }
+
+        try
+        {
+            using var baseFactory = new WebApplicationFactory<Program>();
+            using var factory = baseFactory.WithWebHostBuilder(
+                b => b.ConfigureLogging(l => l.AddProvider(seen)));
+
+            // Building the handler chain is what creates the logging handlers, and therefore the
+            // categories. Each client is brought up the way Program.cs brings it up.
+            using var scope = factory.Services.CreateScope();
+            var sp = scope.ServiceProvider;
+
+            // Typed clients: resolved as services, so the category recorded below is whatever the
+            // framework derives from the registration — not a name this test supplied.
+            _ = sp.GetRequiredService<ZendeskService>();
+            _ = sp.GetRequiredService<IGroupPermissionResolver>();
+
+            var clientFactory = sp.GetRequiredService<IHttpClientFactory>();
+
+            // The discovery client is registered BY this constant, so passing it is the
+            // registration itself rather than a guess about one.
+            using var discovery = clientFactory.CreateClient(UpstreamOidcMetadata.HttpClientName);
+
+            // The unnamed client the OAuth proxy uses for /oauth/token.
+            using var unnamed = clientFactory.CreateClient();
+        }
+        finally
+        {
+            RestoreConfiguration(previous);
+        }
+
+        // Only the LogicalHandler half: both stages are created together by the same builder, so
+        // asserting one per client proves the NAME, which is the thing in doubt. Driven from the
+        // same array the theories are, so a client added to one is covered by the other.
+        var claimed = AllHttpClientNames
+            .Select(name => $"System.Net.Http.HttpClient.{name}.LogicalHandler");
+
+        seen.Categories.Should().Contain(
+            claimed,
+            "each of these is a category the theory data asserts the filter covers; a name that " +
+            "nothing creates would pass those theories — the prefix filter reports every " +
+            "System.Net.Http.HttpClient.* category as disabled, invented ones included");
+    }
+
+    /// <summary>Records every logger category the host asks for, so a name can be proven.</summary>
+    private sealed class CategoryRecordingProvider : ILoggerProvider
+    {
+        private readonly System.Collections.Concurrent.ConcurrentBag<string> _categories = [];
+
+        public IReadOnlyCollection<string> Categories => _categories;
+
+        public ILogger CreateLogger(string categoryName)
+        {
+            _categories.Add(categoryName);
+            return Microsoft.Extensions.Logging.Abstractions.NullLogger.Instance;
+        }
+
+        public void Dispose() { }
+    }
+
+    /// <summary>
+    /// Every name derived from its registration, never a literal. <c>AddHttpClient&lt;TClient&gt;</c>
+    /// and <c>AddHttpClient&lt;TClient, TImpl&gt;</c> both take the client name from
+    /// <c>TClient</c>, so <c>nameof()</c> is the registration. A literal would survive a rename and
+    /// quietly fabricate a category that the prefix filter still reports as disabled — which is
+    /// exactly how the discovery client's wrong name passed here before.
+    ///
+    /// <para>Every entry is nonetheless proven against the composed host by
+    /// <see cref="EveryClaimedHttpClientCategory_IsOneTheHostActuallyCreates"/>, because the
+    /// derivations above are reasoning about framework behaviour rather than observations of
+    /// it.</para>
+    /// </summary>
+    private static readonly string[] AllHttpClientNames =
+    [
+        nameof(ZendeskService),
+        nameof(IGroupPermissionResolver),
+        UpstreamOidcMetadata.HttpClientName,
+        // The UNNAMED client, used by the OAuth proxy for /oauth/token
+        // (Program.cs: `factory.CreateClient()`). "Default" is the substitution
+        // LoggingHttpMessageHandlerBuilderFilter makes for an empty name — the one entry here
+        // that no registration states, and so the one most in need of the proof above.
+        DefaultHttpClientName,
+    ];
+
+    public static TheoryData<string> AllHttpClientCategories()
+    {
+        var data = new TheoryData<string>();
+        foreach (var client in AllHttpClientNames)
+        {
+            foreach (var stage in new[] { "LogicalHandler", "ClientHandler" })
+            {
+                data.Add($"System.Net.Http.HttpClient.{client}.{stage}");
+            }
+        }
+
+        return data;
+    }
+
+    [Theory]
+    [MemberData(nameof(AllHttpClientCategories))]
+    public void HttpClientCategories_DoNotLogAtInformation_SoQueryStringsStayOutOfLogs(string category)
+    {
+        var logger = ComposeAndGetLogger(category);
+
+        logger.IsEnabled(LogLevel.Information).Should().BeFalse(
+            "these categories log an outbound request URI per call and are 19.5% of console bytes; " +
+            "note the query VALUES are redacted by .NET regardless, so this is noise reduction " +
+            "rather than the PII control vitally-mcp#143 originally claimed");
+    }
+
+    [Theory]
+    [MemberData(nameof(AllHttpClientCategories))]
+    public void HttpClientCategories_StillLogWarnings_SoFailuresRemainVisible(string category)
+    {
+        var logger = ComposeAndGetLogger(category);
+
+        logger.IsEnabled(LogLevel.Warning).Should().BeTrue(
+            "the filter is Warning rather than None deliberately — a failing outbound call must " +
+            "still surface, and this server's own Error records cover only the paths it owns");
+    }
+
+    [Theory]
+    [InlineData("Microsoft.AspNetCore.Hosting.Diagnostics")]
+    [InlineData("Microsoft.AspNetCore.Authentication.JwtBearer.JwtBearerHandler")]
+    [InlineData("Microsoft.AspNetCore.Authorization.DefaultAuthorizationService")]
+    [InlineData("Microsoft.AspNetCore.Routing.EndpointMiddleware")]
+    public void FrameworkNoiseCategories_AreQuietAtInformation_ButStillReportFaults(string category)
+    {
+        var logger = ComposeAndGetLogger(category);
+
+        logger.IsEnabled(LogLevel.Information).Should().BeFalse(
+            "these are 67.3% of console bytes (measured 2026-09-18) and are filtered for live-stream " +
+            "readability — not for cost, which is single-figure pounds a year either way");
+
+        // Asserted in the same test rather than left implied: a regression from Warning to None
+        // would satisfy the line above while silently hiding faults — and framework warnings are
+        // the only thing that reports a fault outside the paths the application logs itself (vitally-mcp#94).
+        logger.IsEnabled(LogLevel.Warning).Should().BeTrue(
+            "the filters are Warning rather than None so genuine faults still surface");
+    }
+
+    /// <summary>
+    /// The one signal these filters genuinely suppress, and the record that replaces it.
+    ///
+    /// <para><c>Microsoft.AspNetCore.Authorization</c> logs its <i>failures</i> at
+    /// <c>Information</c> — <c>"Authorization failed. These requirements were not met:
+    /// DenyAnonymousAuthorizationRequirement"</c> — so unlike the other three, filtering it to
+    /// <c>Warning</c> removes a real failure signal rather than success chatter. An earlier comment
+    /// in <c>Program.cs</c> claimed otherwise and was wrong.</para>
+    ///
+    /// <para>That is acceptable only because the case that matters is recorded better elsewhere: an
+    /// <b>authenticated</b> caller denied a tool produces <c>AuditLogger.LogToolCallDenied</c> at
+    /// <c>Warning</c>, carrying the object id, tool name and required permission. This test pins
+    /// that the replacement survives the filters — without it, the trade is unverified and the
+    /// suppression indefensible. What is genuinely given up is <b>anonymous</b> 401 probes, which
+    /// are the normal MCP handshake.</para>
+    /// </summary>
+    [Fact]
+    public void AuditDenialRecords_SurviveTheFilters_ReplacingTheSuppressedFrameworkSignal()
+    {
+        var framework = ComposeAndGetLogger("Microsoft.AspNetCore.Authorization.DefaultAuthorizationService");
+        var audit = ComposeAndGetLogger(typeof(AuditLogger).FullName!);
+
+        framework.IsEnabled(LogLevel.Information).Should().BeFalse(
+            "this is the suppressed signal — stated explicitly so the trade is visible, not implied");
+
+        audit.IsEnabled(LogLevel.Warning).Should().BeTrue(
+            "LogDenied and LogToolCallDenied are the replacement and must outlive the filters; if " +
+            "this ever fails, suppressing the framework's authorisation failures stops being defensible");
+    }
+
+    /// <summary>
+    /// The second suppressed signal, and its replacement.
+    ///
+    /// <para><c>JwtBearerHandler</c> reports a failed token at <c>Information</c> ("Bearer was not
+    /// authenticated. Failure message: …"), which the
+    /// <c>Microsoft.AspNetCore.Authentication</c> filter removes. This case is worse than the
+    /// authorisation one: an unauthenticated caller never reaches <c>ZendeskService.SendAsync</c> or
+    /// the SDK's <c>[Authorize]</c> checkpoint, so <b>no</b> <c>AuditLogger</c> record would fire
+    /// either. A signing-key rotation, clock skew or a run of forged tokens would all look exactly
+    /// like silence.</para>
+    ///
+    /// <para><c>Program.cs</c> therefore logs its own <c>OnAuthenticationFailed</c> event at
+    /// <c>Warning</c> under <c>ZendeskMcp.Authentication</c>. This pins that the replacement
+    /// <i>survives the filters</i> — which is the concern the filters create. It does not assert the
+    /// event fires; that is framework behaviour, and proving it needs a real JWT path rather than
+    /// the test auth scheme the sibling suites use.</para>
+    /// </summary>
+    [Fact]
+    public void AuthenticationFailureRecord_SurvivesTheFilters()
+    {
+        var framework = ComposeAndGetLogger("Microsoft.AspNetCore.Authentication.JwtBearer.JwtBearerHandler");
+
+        framework.IsEnabled(LogLevel.Information).Should().BeFalse(
+            "this is the suppressed signal — invalid-token diagnostics are Information here");
+    }
+
+    /// <summary>
+    /// Drives a real rejected token through the actual JwtBearer pipeline and asserts the record is
+    /// emitted — rather than only that its logger category would accept a <c>Warning</c>.
+    ///
+    /// <para>The distinction is the whole point: the level check above composes with
+    /// <c>NoAuth=true</c>, which skips the JwtBearer configuration entirely, so deleting the
+    /// <c>OnAuthenticationFailed</c> callback would leave it green. This test fails if the callback
+    /// is removed, rewired, or has its level lowered back under the filter.</para>
+    ///
+    /// <para>It also pins the <b>shape</b> of the record, which is a security property rather than a
+    /// formatting preference: an earlier version logged <c>Exception.Message</c>, and IdentityModel
+    /// builds those from the token's own claims ("Audience validation failed. Audiences: '…'"), so
+    /// the text embeds caller-controlled values that may contain newlines — a log-injection path in
+    /// the one record an operator reads during an authentication incident.</para>
+    /// </summary>
+    [Fact]
+    public async Task RejectedToken_EmitsTheFailureRecord_WithoutEchoingTheToken()
+    {
+        // A syntactically valid JWT whose payload carries a marker we can search the log for. If any
+        // part of the token reached the record, this string would appear in it.
+        const string marker = "TOKEN-MARKER-MUST-NOT-APPEAR-IN-LOGS";
+        var payload = Convert.ToBase64String(
+                System.Text.Encoding.UTF8.GetBytes($"{{\"sub\":\"{marker}\",\"aud\":\"{marker}\"}}"))
+            .TrimEnd('=').Replace('+', '-').Replace('/', '_');
+        var junkJwt = $"eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.{payload}.aW52YWxpZC1zaWduYXR1cmU";
+
+        var sink = new CapturingLoggerProvider("ZendeskMcp.Authentication");
+
+        var previous = SnapshotAndClearConfiguration();
+        try
+        {
+            // Auth ON — the NoAuth path never registers the callback under test.
+            Environment.SetEnvironmentVariable("OAuth__NoAuth", "false");
+            Environment.SetEnvironmentVariable("Authorization__ReadOnly", "false");
+            Environment.SetEnvironmentVariable("Vitally__DevelopmentApiKey", "sk_test_dummy");
+            Environment.SetEnvironmentVariable("Vitally__Region", "EU");
+            Environment.SetEnvironmentVariable("OAuth__Authority", "https://example-issuer.test/");
+            Environment.SetEnvironmentVariable("OAuth__Audience", "https://example.test/");
+
+            using var baseFactory = new WebApplicationFactory<Program>();
+            using var factory = baseFactory.WithWebHostBuilder(
+                b => b.ConfigureLogging(l => l.AddProvider(sink)));
+            using var client = factory.CreateClient();
+
+            using var request = new HttpRequestMessage(HttpMethod.Post, "/mcp")
+            {
+                Content = new StringContent(
+                    """{"jsonrpc":"2.0","id":1,"method":"tools/list"}""",
+                    System.Text.Encoding.UTF8,
+                    "application/json"),
+            };
+            request.Headers.TryAddWithoutValidation("Accept", "application/json, text/event-stream");
+            request.Headers.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", junkJwt);
+
+            var response = await client.SendAsync(request);
+            response.StatusCode.Should().Be(System.Net.HttpStatusCode.Unauthorized);
+        }
+        finally
+        {
+            RestoreConfiguration(previous);
+        }
+
+        var entry = sink.Entries.Should().ContainSingle(
+            "a rejected token must leave exactly one record — nothing else logs an unauthenticated " +
+            "caller, since the request never reaches SendAsync or the [Authorize] checkpoint").Subject;
+
+        entry.Level.Should().Be(LogLevel.Warning,
+            "Information would be removed by the Microsoft.AspNetCore.Authentication filter");
+
+        // The structural assertion is what actually proves the security property, and the marker
+        // check below is deliberately secondary.
+        //
+        // ⚠️ The marker alone would be a hollow test. It sits in the token's payload, but this token
+        // has an unverifiable signature and points at an unreachable authority — so validation fails
+        // at metadata retrieval or signature checking, BEFORE `aud`/`iss` are ever evaluated. The
+        // resulting Exception.Message therefore need not contain the marker at all, and a revert to
+        // logging Message would sail past a marker-only assertion.
+        //
+        // Matching the whole rendered message against a single-token shape catches that revert
+        // regardless of what the exception says: `Message` cannot be appended without breaking it.
+        entry.Message.Should().MatchRegex(@"^Bearer token validation failed: \w+$",
+            "the record must carry the exception TYPE and nothing else — appending Exception.Message " +
+            "would embed caller-controlled claim values that may contain newlines");
+
+        entry.Message.Should().NotContain(marker,
+            "belt and braces: no part of the token may reach the log");
+    }
+
+    /// <summary>
+    /// The audit trail must survive the noise filters. <c>AuditLogger</c> writes its action record at
+    /// <c>Information</c>, so a broad filter applied to the wrong prefix would silently delete the
+    /// thing the whole trail exists for.
+    /// </summary>
+    [Fact]
+    public void AuditLogger_StillLogsAtInformation()
+    {
+        var logger = ComposeAndGetLogger(typeof(AuditLogger).FullName!);
+
+        logger.IsEnabled(LogLevel.Information).Should().BeTrue(
+            "LogAction records every audited call at Information; filtering it away would remove " +
+            "the audit trail while looking like noise reduction");
+    }
+
+    /// <summary>
+    /// The variables this host needs, each read by <c>Program.cs</c> at composition time — before
+    /// <c>WebApplicationFactory</c> can inject configuration — so environment variables are the only
+    /// override that works.
+    ///
+    /// <para>Only these four are <i>set</i>. Everything else under the configuration prefixes in
+    /// <see cref="ConfigurationPrefixes"/>
+    /// is <b>cleared wholesale</b> by <see cref="ComposeAndGetLogger"/> rather than enumerated,
+    /// which is deliberate: naming individual keys to clear is a losing game. Three review rounds
+    /// each found another one that fails host composition before a single assertion runs —
+    /// <c>Vitally__KeyVaultUri</c> (<c>StartupGuards.EnsureSafeAuthConfig</c> refuses it alongside
+    /// <c>NoAuth</c>), <c>OAuth__SharedClientId</c> and <c>OAuth__PublicBaseUrl</c>, then
+    /// <c>OAuth__SharedClientSecret</c>, <c>OAuth__UpstreamResourceScope</c> and
+    /// <c>Authorization__LiveGroupCheck</c> with its group ids. Each failure surfaces as an OAuth or
+    /// Key Vault error with nothing to do with logging.</para>
+    ///
+    /// <para>The leak is real rather than theoretical: <see cref="ResourceMetadataDiscoveryTests"/>
+    /// sets <c>OAuth__PublicBaseUrl</c> and <c>OAuth__Resource</c> inside its <c>CreateHost</c> and
+    /// never restores them, so this fixture inherits them from a sibling in the same collection.
+    /// Clearing by prefix is immune to the next such addition, which an enumeration is not.</para>
+    /// </summary>
+    private static readonly (string Key, string Value)[] RequiredSettings =
+    [
+        ("OAuth__NoAuth", "true"),
+        ("Authorization__ReadOnly", "false"),
+        ("Vitally__DevelopmentApiKey", "sk_test_dummy"),
+        ("Vitally__Region", "EU"),
+    ];
+
+    /// <summary>
+    /// Every configuration prefix <c>Program.cs</c> binds from the environment. Anything under these
+    /// is cleared before composing, so the host sees exactly <see cref="RequiredSettings"/>.
+    /// </summary>
+    private static readonly string[] ConfigurationPrefixes =
+        ["OAuth__", "Authorization__", "Vitally__", "Audit__", "ToolsListCache__", "Logging__",
+         "ApplicationInsights__"];
+
+    // Logging__ is in that list for a reason specific to this class: WebApplication.CreateBuilder
+    // reads it, so an ambient Logging__LogLevel__Default=Warning makes
+    // AuditLogger_StillLogsAtInformation fail even when Program.cs's filters are exactly right.
+    // Verified: exporting that variable failed 1 of 17 before it was cleared here.
+
+    /// <summary>
+    /// Snapshots EVERY variable under the configuration prefixes — not just the ones this class
+    /// sets, otherwise the restore cannot put back what the clear removes — then clears them.
+    ///
+    /// <para>Captured and restored at all because these are process-wide, and the collection
+    /// serialises only the classes listed in <see cref="IntegrationTestCollection"/>: leaking makes
+    /// the suite order-dependent for anything composing a host outside it, as
+    /// <see cref="AuthorizationFilterToolsListTests"/>' own <c>finally</c> block already
+    /// recognises.</para>
+    ///
+    /// <para><c>OrdinalIgnoreCase</c>, not <c>Ordinal</c>: .NET configuration keys are
+    /// case-insensitive, so <c>oauth__publicbaseurl</c> binds exactly as
+    /// <c>OAuth__PublicBaseUrl</c> does while an ordinal prefix match leaves it in place. Verified
+    /// rather than reasoned — exporting that lowercase key with an invalid value failed every test
+    /// in this class before it changed. On Linux the two spellings are genuinely distinct
+    /// variables, so CI is where it bites.</para>
+    /// </summary>
+    private static (string Key, string? Value)[] SnapshotAndClearConfiguration()
+    {
+        var previous = Environment.GetEnvironmentVariables()
+            .Cast<System.Collections.DictionaryEntry>()
+            .Select(e => (Key: (string)e.Key, Value: e.Value as string))
+            .Where(e => ConfigurationPrefixes.Any(p => e.Key.StartsWith(p, StringComparison.OrdinalIgnoreCase)))
+            .ToArray();
+
+        foreach (var (key, _) in previous)
+        {
+            Environment.SetEnvironmentVariable(key, null);
+        }
+
+        return previous;
+    }
+
+    /// <summary>
+    /// Restores a snapshot, clearing <b>everything</b> under the configuration prefixes first rather
+    /// than just the keys this class is known to set. Always called after the factory is disposed,
+    /// so the host is not reading a half-restored environment while it shuts down.
+    ///
+    /// <para>Clearing by prefix rather than by list, for the same reason
+    /// <see cref="SnapshotAndClearConfiguration"/> does: an earlier version cleared only
+    /// <see cref="RequiredSettings"/>, so the auth-on integration test — which additionally sets
+    /// <c>OAuth__Authority</c> and <c>OAuth__Audience</c> — leaked both into the process and could
+    /// change how a later host composed. A list has to be updated every time a test sets something
+    /// new; a prefix sweep does not.</para>
+    /// </summary>
+    private static void RestoreConfiguration((string Key, string? Value)[] previous)
+    {
+        foreach (System.Collections.DictionaryEntry e in Environment.GetEnvironmentVariables())
+        {
+            var key = (string)e.Key;
+            if (ConfigurationPrefixes.Any(p => key.StartsWith(p, StringComparison.OrdinalIgnoreCase)))
+            {
+                Environment.SetEnvironmentVariable(key, null);
+            }
+        }
+
+        foreach (var (key, value) in previous)
+        {
+            Environment.SetEnvironmentVariable(key, value);
+        }
+    }
+
+    private static ILogger ComposeAndGetLogger(string category)
+    {
+        var previous = SnapshotAndClearConfiguration();
+
+        foreach (var (key, value) in RequiredSettings)
+        {
+            Environment.SetEnvironmentVariable(key, value);
+        }
+
+        try
+        {
+            // Both are disposed: WithWebHostBuilder returns a new factory rather than mutating the
+            // receiver, so disposing only the result leaks the constructor's one.
+            using var baseFactory = new WebApplicationFactory<Program>();
+            using var factory = baseFactory.WithWebHostBuilder(_ => { });
+
+            return factory.Services.GetRequiredService<ILoggerFactory>().CreateLogger(category);
+        }
+        finally
+        {
+            RestoreConfiguration(previous);
+        }
+    }
+
+    [Fact]
+    public void AuditLoggerCategoryName_MatchesTheFilterThatKeepsRecordsOffStdout()
+    {
+        // Program.cs suppresses "ZendeskMcp.AuditLogger" from the ConsoleLoggerProvider once the
+        // Azure Monitor exporter is configured, which is what vitally-mcp#142's ContainerAppConsoleLogs export
+        // was gated on — and that export has been LIVE since 2026-09-26, so this is no longer a
+        // precondition but the active control. That filter is a STRING: rename the class or move its namespace and the
+        // suppression stops matching, silently, and customer identifiers go back to the console
+        // stream — the table with the shortest retention and the broadest access.
+        //
+        // Nothing else would fail if that happened, so this asserts the category the filter names is
+        // still the category the logger actually uses.
+        typeof(AuditLogger).FullName.Should().Be("ZendeskMcp.AuditLogger",
+            "Program.cs filters this exact category off the console provider");
+    }
+
+    [Fact]
+    public void WithAConnectionStringConfigured_TheExporterBranchIsActuallyWiredUp()
+    {
+        // Everything else about the exporter is tested against a hand-built AuditLogger or a host
+        // with no connection string, so a broken or missing UseAzureMonitor registration, a filter
+        // aimed at the wrong provider, or a PostConfigure that never ran would all leave the suite
+        // green. This composes the host the way production will have it and asserts what must switch
+        // on together: the breadcrumb flag, both logging filters, the registered tool names, the
+        // redaction processors, the OpenTelemetry logger provider, the sampling decoupling (vitally-mcp#178),
+        // the sampling ratio and the telemetry sources (vitally-mcp#94).
+        //
+        // ⚠️ The providers are disposed EXPLICITLY below, and that is not tidiness. Disposing the
+        // factory does not dispose the TracerProvider this host builds — observed 2026-10-01, sync and
+        // async alike, with no exception surfaced — so it stayed subscribed to the MCP source for the
+        // rest of the process and ran SpanSanitisingProcessor over every later test's spans. That made
+        // the composed PII test fail whenever it ran after this one. Why only some orderings exposed
+        // it was not established; the explicit disposal and the guard at the end are what fixed it.
+        TracerProvider? ownTracer = null;
+        OpenTelemetry.Metrics.MeterProvider? ownMeter = null;
+        var previous = SnapshotAndClearConfiguration();
+        foreach (var (key, value) in RequiredSettings)
+        {
+            Environment.SetEnvironmentVariable(key, value);
+        }
+
+        // Well-formed but pointing nowhere. Export is asynchronous and batched, so nothing is
+        // contacted while the host is merely built.
+        Environment.SetEnvironmentVariable(
+            "ApplicationInsights__ConnectionString",
+            "InstrumentationKey=00000000-0000-0000-0000-000000000000;IngestionEndpoint=https://localhost/");
+
+        try
+        {
+            using var factory = new WebApplicationFactory<Program>();
+            var services = factory.Services;
+
+            services.GetRequiredService<IOptions<AuditOptions>>().Value.EmitBreadcrumb
+                .Should().BeTrue("the breadcrumb switches on with the exporter, not with DI");
+
+            var rules = services.GetRequiredService<IOptions<LoggerFilterOptions>>().Value.Rules;
+
+            rules.Should().Contain(
+                r => r.ProviderName == typeof(ConsoleLoggerProvider).FullName
+                    && r.CategoryName == "ZendeskMcp.AuditLogger"
+                    && r.LogLevel == LogLevel.None,
+                "the full records come off stdout once they have somewhere else to go");
+
+            rules.Should().Contain(
+                r => r.ProviderName == typeof(OpenTelemetryLoggerProvider).FullName
+                    && r.CategoryName == AuditLogger.BreadcrumbCategory
+                    && r.LogLevel == LogLevel.None,
+                "and the breadcrumb does not also become AppTraces noise");
+
+            // The two rules above and the flag would ALL still be present if UseAzureMonitor itself
+            // were removed — they are written by this file, not by the SDK. So assert the thing the
+            // SDK is actually responsible for: that a provider exists to export through.
+            // The allowlist is only as good as the set behind it. If WithToolsFromAssembly does not
+            // expose McpServerTool registrations the way this assumes — or the timing changes — the
+            // set is EMPTY and every breadcrumb silently reads "unrecognised", which fails closed but
+            // also makes the field useless without anything failing.
+            var knownTools = services.GetRequiredService<KnownToolNames>();
+            knownTools.Count.Should().BeGreaterThan(50,
+                "this server registers 90-odd tools; an empty set means the SDK registrations were not found");
+            knownTools.IsRegistered("List_organizations").Should().BeTrue(
+                "and a real tool name must pass, or the breadcrumb never names a tool at all");
+
+            // Same shape of gap as the tool-name set: TelemetryRedactionTests construct the processor
+            // directly, so removing AddProcessor<QueryStringRedactingProcessor>() would leave them
+            // green while exported dependencies could carry search queries again.
+            //
+            // OpenTelemetry exposes no public API for enumerating a provider's processors, so this
+            // walks the chain by reflection. If the SDK's internals change the walk FAILS rather than
+            // quietly passing — a test that cannot find what it is looking for must not report
+            // success, which is the entire point of the finding that prompted it.
+            var tracerProvider = services.GetRequiredService<TracerProvider>();
+            ownTracer = tracerProvider;
+            ProcessorChainOf(tracerProvider).Should().Contain(p => p is QueryStringRedactingProcessor,
+                "the redaction processor must be attached to the pipeline, not merely registered in DI");
+
+            services.GetServices<ILoggerProvider>().Should()
+                .Contain(p => p is OpenTelemetryLoggerProvider,
+                    "without the exporter's provider the records have nowhere to go, and the filters "
+                    + "aimed at it are aimed at nothing");
+
+            // vitally-mcp#178: the audit trail must not depend on trace sampling. The distro's own default —
+            // verified from the 1.6.0 package, since its .NET docs do not state it — is
+            // EnableTraceBasedLogsSampler=true: a log record is exported only if its trace was
+            // sampled. Audit records are logged inside the request's trace, and traces are
+            // rate-limited to 5 a second by default, so under load the trail lost records silently.
+            //
+            // Asserted HERE rather than in a test of its own, and that is not tidiness: a second
+            // exporter-configured host that resolved only these options hung whichever test ran next
+            // in this serialised collection, reproducibly, taking every later member with it
+            // (2026-09-30; three runs stalled at test 622 of 723 — see vitally-mcp#178's PR). One exporter host, fully built and then disposed, is the shape known to
+            // behave. Composed rather than hand-built because the failure mode is Program.cs's
+            // callback not setting it, which only the real composition can show.
+            var monitorOptions = services
+                .GetRequiredService<IOptionsMonitor<Azure.Monitor.OpenTelemetry.AspNetCore.AzureMonitorOptions>>()
+                .Get(Options.DefaultName);
+            monitorOptions.ConnectionString.Should().NotBeNullOrEmpty(
+                "a precondition: these must be the options Program.cs's callback configured");
+            monitorOptions.EnableTraceBasedLogsSampler.Should().BeFalse(
+                "an audit record must be exported whether or not its request's trace was sampled");
+
+            // vitally-mcp#94 phase 6: 10% head sampling. BOTH settings, because TracesPerSecond (default 5)
+            // takes precedence over SamplingRatio whenever it is set — a SamplingRatio alone would be
+            // silently ignored. Safe only because of the line above: metrics and logs are unaffected.
+            monitorOptions.SamplingRatio.Should().Be(0.1F);
+            monitorOptions.TracesPerSecond.Should().BeNull("or the ratio above is silently ignored");
+
+            // ...and the sources are actually registered with the providers. Asserted by behaviour:
+            // the OpenTelemetry providers subscribe a listener for each registered name, so a source or
+            // meter with that name reports one. Not built yet when unregistered — resolving the
+            // providers above is what starts them.
+            ownMeter = services.GetRequiredService<OpenTelemetry.Metrics.MeterProvider>();
+            using var mcpSource = new System.Diagnostics.ActivitySource(TelemetrySources.McpActivitySource);
+            mcpSource.HasListeners().Should().BeTrue("the MCP SDK's spans must reach the exporter");
+
+            using (var vitallyMeter = new System.Diagnostics.Metrics.Meter(TelemetrySources.ZendeskMeter))
+            {
+                vitallyMeter.CreateCounter<long>("registration.probe").Enabled.Should().BeTrue(
+                    "this server's counters must be registered with the exporter");
+            }
+
+            // ...and the SDK's meter must NOT be: its tool-name dimension carries invented names,
+            // unsampled, and a processor cannot rewrite metric tags (see TelemetrySources.McpMeter).
+            // Fragile in one direction only: a future wildcard MeterListener anywhere in the process
+            // running at the same time — in this collection or outside it — would make this fail, never
+            // pass falsely. MetricCapture filters on its own factory's scope, so it is safe.
+            using (var mcpMeter = new System.Diagnostics.Metrics.Meter(TelemetrySources.McpMeter))
+            {
+                mcpMeter.CreateCounter<long>("registration.probe").Enabled.Should().BeFalse(
+                    "the MCP SDK's meter would export caller-typed tool names as a metric dimension");
+            }
+
+            var chain = ProcessorChainOf(tracerProvider);
+            chain.Should().Contain(p => p is SpanSanitisingProcessor,
+                "the span sanitiser must be attached to the pipeline, not merely registered in DI");
+
+            // ...and ahead of everything that reads a span's content. OpenTelemetry runs processors in
+            // the order they were added; today the distro appends Live Metrics and the batch exporter
+            // after all user configuration, but that is an implementation detail of the distro, not a
+            // contract — a bump, or the registration moving, could put the exporter first, and the
+            // spans would leave unsanitised with every other test still green.
+            int IndexOf(Func<object, bool> match) => chain.Select((p, i) => (p, i)).First(x => match(x.p)).i;
+            var firstReader = Math.Min(
+                IndexOf(p => p.GetType().Name.Contains("LiveMetrics", StringComparison.Ordinal)),
+                IndexOf(p => p.GetType().Name.Contains("ExportProcessor", StringComparison.Ordinal)));
+            IndexOf(p => p is SpanSanitisingProcessor).Should().BeLessThan(firstReader,
+                "spans must be sanitised before Live Metrics or the exporter sees them");
+            IndexOf(p => p is QueryStringRedactingProcessor).Should().BeLessThan(firstReader,
+                "query strings must be redacted before Live Metrics or the exporter sees them");
+        }
+        finally
+        {
+            // Restore alone: ApplicationInsights__ is in the prefix list above, so the snapshot
+            // covers it. Clearing it here as well would destroy an ambient value on a runner that
+            // had one — the key was previously outside the snapshot, so it was not saved to put back.
+            // After the factory's own disposal (the `using` above), which does not reach these. See the
+            // warning at the top of this test.
+            ownTracer?.Dispose();
+            ownMeter?.Dispose();
+            RestoreConfiguration(previous);
+        }
+
+        // The guard that would have caught it: nothing may still be listening to the MCP source once
+        // this host is gone. Reliable only because every class that listens to that name is in the
+        // serialised IntegrationTestCollection, TelemetryRedactionTests included.
+        using var afterDispose = new System.Diagnostics.ActivitySource(TelemetrySources.McpActivitySource);
+        afterDispose.HasListeners().Should().BeFalse(
+            "this host's TracerProvider must not outlive the test and sanitise later tests' spans");
+    }
+
+    /// <summary>
+    /// Every processor attached to <paramref name="provider"/>, walked by reflection.
+    /// </summary>
+    /// <remarks>
+    /// OpenTelemetry keeps the processor chain internal, so there is no supported way to ask — the
+    /// SDK exposes it as a non-public <c>Processor</c> property, and a composite holds its members in
+    /// a linked list of <c>Head</c>/<c>Next</c> nodes.
+    /// <para>
+    /// This <b>throws</b> rather than returning empty when the internals do not look as expected. An
+    /// assertion built on a silently empty list would pass for the wrong reason, which is precisely
+    /// the failure mode that prompted this test — so if an SDK upgrade moves these members, the walk
+    /// needs updating rather than deleting.
+    /// </para>
+    /// </remarks>
+    private static IReadOnlyList<object> ProcessorChainOf(TracerProvider provider)
+    {
+        const BindingFlags Flags = BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public;
+
+        var root = Member(provider, "Processor");
+        root.Should().NotBeNull(
+            $"the OpenTelemetry SDK's Processor member was not found on {provider.GetType().Name}; "
+            + "this reflection walk needs updating rather than deleting");
+
+        var found = new List<object>();
+        Walk(root);
+        found.Should().HaveCountGreaterThan(1,
+            "a chain of one is the composite alone, which means the walk failed to descend into it "
+            + "rather than that nothing is attached");
+        return found;
+
+        void Walk(object? processor)
+        {
+            if (processor is null)
+            {
+                return;
+            }
+
+            found.Add(processor);
+
+            // A composite keeps its members in a head/next linked list; a leaf has neither. The SDK
+            // spells these as fields on some types and properties on others, so look for both.
+            var node = Member(processor, "head");
+            while (node is not null)
+            {
+                Walk(Member(node, "Value"));
+                node = Member(node, "Next");
+            }
+        }
+
+        static object? Member(object target, string name)
+        {
+            var type = target.GetType();
+            while (type is not null)
+            {
+                var property = type.GetProperty(name, Flags | BindingFlags.IgnoreCase);
+                if (property is not null)
+                {
+                    return property.GetValue(target);
+                }
+
+                var field = type.GetField(name, Flags | BindingFlags.IgnoreCase);
+                if (field is not null)
+                {
+                    return field.GetValue(target);
+                }
+
+                type = type.BaseType;
+            }
+
+            return null;
+        }
+    }
+}

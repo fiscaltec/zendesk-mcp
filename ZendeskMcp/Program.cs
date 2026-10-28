@@ -1,0 +1,1069 @@
+using System.Diagnostics;
+using System.Text.Json;
+using Azure.Identity;
+using Azure.Monitor.OpenTelemetry.AspNetCore;
+using Azure.Security.KeyVault.Secrets;
+using Microsoft.AspNetCore.Authentication.JwtBearer;
+using Microsoft.AspNetCore.Authorization;
+using Microsoft.AspNetCore.HttpOverrides;
+using Microsoft.Extensions.Caching.Memory;
+using Microsoft.Extensions.Logging.Console;
+using Microsoft.Extensions.Options;
+using ModelContextProtocol;
+using OpenTelemetry.Logs;
+using OpenTelemetry.Trace;
+using ZendeskMcp;
+
+var builder = WebApplication.CreateBuilder(args);
+
+// Log levels are configured HERE rather than in appsettings.json, and that is not a style choice:
+// `.gitignore` (line 111) and `.dockerignore` (line 18) both exclude `appsettings.json` and
+// `appsettings.*.json`, carving out only `appsettings.Example.json`. A file added there would work
+// on a developer machine, never reach the image, and change nothing in production. The exclusion is
+// deliberate — it sits under "Strong-name keys, certificates and other secrets - do NOT commit"
+// beside *.pfx and .env — and is worth keeping, because appsettings.json is exactly where a
+// connection string gets put by reflex.
+//
+// Environment variables are rejected for the same reason the Audit:IncludeReads default lives in
+// code (vitally-mcp#139): a Container App recreate does not inherit them, so the constraint would lapse
+// silently on any target someone forgot.
+//
+// ⚠️ vitally-mcp#143 raised this as a PII control, and that premise was WRONG. Recorded rather than quietly
+// dropped, because the mistaken version is the intuitive one and will be re-derived otherwise.
+//
+// The claim was that these categories log the outbound URI including its query string, so a
+// `Search_users` / `Search_admins` term — potentially a name or email — would reach the logs.
+// **.NET redacts query VALUES by default**: the logged form is
+// `GET https://<subdomain>.zendesk.com/api/v2/search/export?*`, and the `?*` is the redaction marker,
+// not a truncation. Verified twice — by a probe that drove a request carrying a marker through a
+// typed client and found the marker absent from every record, and by reading live production logs,
+// where every query in the stream is `?*`. Nothing here disables it (no `DisableUriRedaction`
+// switch, no `UriRedaction` configuration).
+//
+// So this filter is NOISE REDUCTION, worth 19.5% of console bytes, with defence-in-depth as a
+// footnote: if redaction were ever disabled the filter would still keep the URIs out. Path segments
+// are not redacted. They usually carry record ids, which `AuditLogger` deliberately records anyway —
+// but not always: tools put caller strings into the path unescaped, so a mistyped id is whatever the
+// model typed (vitally-mcp#94). That is why ZendeskService's failure record logs only the resource type.
+builder.Logging.AddFilter("System.Net.Http.HttpClient", LogLevel.Warning);
+
+// Noise. Measured against live production on 2026-09-18 over a 300-record sample: these four
+// categories are 67.3% of console bytes, `Hosting.Diagnostics` alone accounting for 83 of ~150 log
+// entries. Unfiltered the stream runs ~9.1 MB/day; these filters remove ~6.1 MB/day.
+//
+// ⚠️ That is NOT a cost argument, and an earlier version of this comment claimed it was — "what
+// makes retaining the audit trail affordable". 2.24 GB/year is single-figure pounds at Log Analytics
+// rates, and per-table retention means the noise can expire at 30 days regardless of what the audit
+// table keeps. The saving is real and financially irrelevant.
+//
+// They are kept for READABILITY of the live stream. `az containerapp logs show --type console` is
+// how a running container is debugged, and it was the only way to see startup failures until phase 2b
+// of vitally-mcp#142 began exporting console logs on 2026-09-26. Two-thirds chatter makes that materially worse — hunting audit
+// records in an unfiltered stream is what prompted measuring this in the first place.
+//
+// Sampling caveat, so the figures are not over-trusted: 4.2 minutes on a quiet morning with 5 audit
+// records in it. The ratio is probably stable; the absolute volume is a floor, not a ceiling, and
+// Audit:IncludeReads is now on, which adds audit volume specifically.
+builder.Logging.AddFilter("Microsoft.AspNetCore.Hosting.Diagnostics", LogLevel.Warning);
+builder.Logging.AddFilter("Microsoft.AspNetCore.Authentication", LogLevel.Warning);
+builder.Logging.AddFilter("Microsoft.AspNetCore.Authorization", LogLevel.Warning);
+builder.Logging.AddFilter("Microsoft.AspNetCore.Routing", LogLevel.Warning);
+
+// Warning rather than None, so a failing outbound call still surfaces. This server's own failure
+// records (vitally-mcp#94) cover only the paths it owns — a failed tool call (ToolCallFailureLog), a non-2xx from
+// Zendesk (ZendeskService.SendAsync), a Key Vault fetch (KeyVaultZendeskTokenStore) — plus the Warning
+// sites in the Graph and OIDC resolvers, the rate limiter and the authentication re-emit below.
+// Hosting and routing faults surface only through these framework categories, so silencing them
+// entirely would still blind the server to a class of failure.
+//
+// ⚠️ One exception, stated because an earlier version of this comment claimed otherwise and was
+// wrong: `Microsoft.AspNetCore.Authorization` logs its *failures* at Information, not Warning
+// ("Authorization failed. These requirements were not met: DenyAnonymousAuthorizationRequirement").
+// So this filter does suppress a genuine failure signal rather than only success chatter.
+//
+// Accepted deliberately, because the signal is covered better elsewhere or is not worth recording:
+//
+//   - an AUTHENTICATED caller denied a tool is recorded by AuditLogger.LogToolCallDenied at
+//     Warning, with the caller's object id, the tool name and the required permission — strictly
+//     more useful than the framework line, and it survives these filters (pinned by
+//     LoggingFilterTests).
+//   - an ANONYMOUS request failing DenyAnonymousAuthorizationRequirement is the normal MCP
+//     unauthenticated probe. It was ~10% of a live console sample, it produces a 401 the client
+//     expects, and recording every one as a "failure" is what made the trail unreadable.
+//
+// What this gives up: a flood of anonymous 401s is no longer visible in logs. If that ever needs
+// watching it belongs in a counter or ContainerAppHTTPLogs (design phase 6), not in Information-level
+// framework text — a metric can be alerted on, and these lines never could be.
+
+// PostConfigure + a forced IOptions resolution after WebApplicationBuilder.Build() gives
+// us fail-fast startup validation without the boilerplate of a separate IValidateOptions
+// implementation. If Validate() throws, the app crashes immediately after Build() rather
+// than serving requests with bad config.
+builder.Services.AddOptions<ZendeskServerOptions>()
+    .Bind(builder.Configuration.GetSection(ZendeskServerOptions.SectionName))
+    .PostConfigure(o => o.Validate());
+
+builder.Services.AddOptions<OAuthOptions>()
+    .Bind(builder.Configuration.GetSection(OAuthOptions.SectionName))
+    .PostConfigure(o => o.Validate());
+
+builder.Services.AddOptions<ToolAuthorizationOptions>()
+    .Bind(builder.Configuration.GetSection(ToolAuthorizationOptions.SectionName))
+    .PostConfigure(o => o.Validate());
+
+builder.Services.AddOptions<AuditOptions>()
+    .Bind(builder.Configuration.GetSection(AuditOptions.SectionName));
+
+builder.Services.AddOptions<ToolsListCacheOptions>()
+    .Bind(builder.Configuration.GetSection(ToolsListCacheOptions.SectionName))
+    .PostConfigure(o => o.Validate());
+
+builder.Services.AddMemoryCache();
+
+// Needed so ToolAuthorizer can read the authenticated ClaimsPrincipal inside tool invocations.
+builder.Services.AddHttpContextAccessor();
+
+// Shared managed-identity credential (managed identity in prod, az login locally) used for both
+// Key Vault and the Microsoft Graph group-membership lookup.
+builder.Services.AddSingleton<Azure.Core.TokenCredential>(_ => new DefaultAzureCredential());
+
+// Route telemetry to Application Insights, and with it the audit records (vitally-mcp#147). Registered only
+// when a connection string is configured, so local development and the test hosts are untouched —
+// the same conditional shape as the Key Vault client above.
+//
+// ⚠️ The connection string is still REQUIRED despite `DisableLocalAuth = true` on the component, and
+// vitally-mcp#147 implied otherwise. What that setting refuses is the instrumentation key inside it being used
+// as a *credential*; the string itself still names the component and its ingestion endpoint, so
+// omitting it leaves the exporter with nowhere to send. The credential replaces the authentication,
+// not the address.
+var appInsightsConnection = builder.Configuration["ApplicationInsights:ConnectionString"];
+var exporterConfigured = !string.IsNullOrWhiteSpace(appInsightsConnection);
+
+// Forced either way, and deliberately OUTSIDE the branch. AuditOptions binds from the Audit: section,
+// so `Audit__EmitBreadcrumb=true` would otherwise switch the breadcrumb on with no exporter — and
+// with no exporter the console suppression is not registered either, so every call would emit the
+// full record AND the breadcrumb. It is a derived fact about the wiring, not an operator's choice.
+builder.Services.PostConfigure<AuditOptions>(o => o.EmitBreadcrumb = exporterConfigured);
+
+if (exporterConfigured)
+{
+    builder.Services.AddOpenTelemetry().UseAzureMonitor(options =>
+    {
+        options.ConnectionString = appInsightsConnection;
+
+        // The same DefaultAzureCredential the Key Vault client uses, which already resolves this
+        // Container App's user-assigned identity — so there is one credential path rather than two,
+        // and a managed-identity misconfiguration fails the same way for both.
+        options.Credential = new DefaultAzureCredential();
+
+        // ⚠️ The audit trail must not depend on trace sampling (vitally-mcp#178). The distro's default —
+        // verified from the 1.6.0 package, since the distro's docs do not state it — is TRUE: a log
+        // record is exported only if its trace was sampled. All four audit record types are logged
+        // inside the request's trace, and traces are rate-limited to 5 a second by default, so under
+        // sustained load a proportion of requests silently lost their records from AppEvents.
+        // Off, every log record is exported regardless, and trace sampling becomes a cost lever that
+        // can be turned without touching the audit trail. (Mind that TracesPerSecond takes precedence
+        // over SamplingRatio: percentage sampling needs TracesPerSecond = null too.) Pinned by
+        // LoggingFilterTests.WithAConnectionStringConfigured_TheExporterBranchIsActuallyWiredUp.
+        options.EnableTraceBasedLogsSampler = false;
+
+        // 10% head sampling of traces (vitally-mcp#94, phase 6). BOTH lines are needed: TracesPerSecond (default
+        // 5) takes precedence over SamplingRatio whenever it is set, so the ratio alone would be
+        // silently ignored. Safe only because of EnableTraceBasedLogsSampler = false above — logs,
+        // the audit records among them, are exported regardless, and metrics are never sampled.
+        //
+        // Head sampling decides at the root, before the outcome is known, so "errors at 100%" is not
+        // available from it. Failures stay visible, unsampled, through the vitally-mcp#94 failure records; a trace
+        // of a particular failure may or may not have been kept.
+        options.SamplingRatio = 0.1F;
+        options.TracesPerSecond = null;
+    });
+
+    // The MCP SDK's spans, sanitised, and this server's counters (vitally-mcp#94). The SDK's source name is
+    // Experimental.-prefixed in 2.2.0 — see TelemetrySources — and a name nothing publishes would be
+    // accepted silently, which is why a composed test proves it is real.
+    //
+    // ⚠️ The SDK's METER is deliberately not registered: its tool-name dimension carries invented
+    // names, unsampled, and a processor cannot rewrite metric tags. See TelemetrySources.McpMeter.
+    // SpanSanitisingProcessor strips caller text from the spans that ARE exported; it needs
+    // KnownToolNames, registered below, so it resolves from DI rather than being constructed here.
+    builder.Services.AddOpenTelemetry()
+        .WithTracing(tracing => tracing
+            .AddSource(TelemetrySources.McpActivitySource)
+            .AddProcessor<SpanSanitisingProcessor>())
+        .WithMetrics(metrics => metrics.AddMeter(TelemetrySources.ZendeskMeter));
+    builder.Services.AddSingleton<SpanSanitisingProcessor>();
+
+    // UseAzureMonitor turns on automatic HttpClient dependency collection, and this server puts
+    // free-text search terms into Zendesk query strings — Search_tickets and Search_users pass theirs
+    // as ?query=<value>, routinely a customer name or email. Those spans become AppDependencies rows, a
+    // different table from the audit records with its own retention, which AuditLogger's
+    // ResourcePath stripping does nothing for.
+    //
+    // Defence in depth rather than a fix for a live leak: on .NET 9+ the runtime redacts url.full
+    // itself. But that redaction is switchable process-wide (System.Net.Http.DisableUriRedaction),
+    // so this makes the guarantee local to this repository rather than inherited from a default
+    // nothing here controls. See QueryStringRedactingProcessor.
+    builder.Services.AddOpenTelemetry()
+        .WithTracing(tracing => tracing.AddProcessor<QueryStringRedactingProcessor>());
+    builder.Services.AddSingleton<QueryStringRedactingProcessor>();
+
+    // Take the audit records OFF stdout, now that they have somewhere else to go. This is what
+    // vitally-mcp#142's ContainerAppConsoleLogs export WAS gated on, and that export went live on 2026-09-26 —
+    // so this filter is now the only thing keeping customer identifiers and search terms out of a
+    // table with the shortest retention and the broadest access. It is load-bearing, not tidying.
+    //
+    // Provider-specific, and deliberately inside this branch: with no exporter configured there is
+    // nowhere else for a record to go, so suppressing the console locally would discard the audit
+    // trail rather than move it.
+    builder.Logging.AddFilter<ConsoleLoggerProvider>("ZendeskMcp.AuditLogger", LogLevel.None);
+
+    // ...and send the breadcrumb the other way. AuditLogger emits a customer-data-free line under
+    // its own category so something survives an export that silently fails — OpenTelemetry export is
+    // asynchronous, so an ingestion outage cannot throw back into the emitting call, and without this
+    // a lost export would take the record from AppEvents and stdout both.
+    //
+    // Suppressed from the OTel provider so the two records go to exactly one destination each rather
+    // than both: the full record to AppEvents, the breadcrumb to the console. Otherwise the
+    // breadcrumb would also land in AppTraces as noise.
+    builder.Logging.AddFilter<OpenTelemetryLoggerProvider>(AuditLogger.BreadcrumbCategory, LogLevel.None);
+
+
+}
+
+// Live group-permission resolver (Microsoft Graph). Registered always; only invoked when
+// Authorization:LiveGroupCheck is enabled. The short timeout bounds how long a slow or
+// unreachable Graph can stall a tool call; it does NOT buy a fallback. vitally-mcp#108 removed the
+// fall-through to the token claim, so what a timeout reaches is the retained stale set
+// (Authorization:LiveGroupStaleSeconds) and, past that window, a denial — see
+// GraphGroupPermissionResolver. This comment said "degrades to the token-claim fallback"
+// for long enough to outlive the fallback itself.
+builder.Services.AddHttpClient<IGroupPermissionResolver, GraphGroupPermissionResolver>(c =>
+{
+    c.Timeout = TimeSpan.FromSeconds(5);
+});
+
+// SecretClient registration uses the *validated* options (via IOptions) rather than raw
+// config, so trimmed/URI-checked KeyVaultUri is what's constructed. Conditional on the
+// raw config being present so the registration only fires when KV is actually configured.
+var zendeskSection = builder.Configuration.GetSection(ZendeskServerOptions.SectionName);
+var keyVaultConfigured = !string.IsNullOrWhiteSpace(zendeskSection["KeyVaultUri"]);
+if (keyVaultConfigured)
+{
+    builder.Services.AddSingleton(sp =>
+    {
+        var opts = sp.GetRequiredService<IOptions<ZendeskServerOptions>>().Value;
+        return new SecretClient(new Uri(opts.KeyVaultUri!), sp.GetRequiredService<Azure.Core.TokenCredential>());
+    });
+}
+
+// The server's own counters (vitally-mcp#94). Singleton because a Meter lives for the process; IMeterFactory,
+// which the host registers, owns its lifetime. Every consumer takes it as an optional constructor
+// parameter, so this registration is what turns the counters on.
+builder.Services.AddSingleton<ZendeskMetrics>();
+
+// Per-user Zendesk OAuth. The token store is Key Vault in any deployed environment and in-memory
+// only for local development, where nothing should outlive the process. The connect links and
+// attempt state go through IDistributedCache, in-memory today: correct only while the app runs a
+// single replica (containerapps.tf pins max_replicas = 1 for that reason), and a registration
+// change — not a code change — to share across replicas later.
+builder.Services.AddDistributedMemoryCache();
+if (keyVaultConfigured)
+{
+    builder.Services.AddSingleton<IZendeskTokenStore, KeyVaultZendeskTokenStore>();
+}
+else
+{
+    builder.Services.AddSingleton<IZendeskTokenStore, InMemoryZendeskTokenStore>();
+}
+builder.Services.AddHttpClient(ZendeskOAuthClient.HttpClientName, c => c.Timeout = TimeSpan.FromSeconds(15));
+builder.Services.AddSingleton<ZendeskOAuthClient>();
+builder.Services.AddSingleton<ZendeskConnectLinks>();
+builder.Services.AddSingleton<ZendeskUploadSlots>();
+builder.Services.AddScoped<ZendeskCredentialProvider>();
+builder.Services.AddScoped<ToolAuthorizer>();
+// The names this server actually registered, so the audit breadcrumb can tell a real tool from one
+// a caller invented — the audit filter runs for unknown names too, and the console stream is the one
+// that must stay customer-data-free.
+builder.Services.AddSingleton(sp => new KnownToolNames(
+    sp.GetServices<ModelContextProtocol.Server.McpServerTool>().Select(t => t.ProtocolTool.Name)));
+
+builder.Services.AddScoped<AuditLogger>();
+
+// Scoped, and that is the whole contract: the tool's ZendeskService writes what it touched into
+// this, and the call-tool filter below reads it back. Registered per-request so one caller's reads
+// can never appear in another's record — and so that, in stateless mode, each tools/call gets a
+// fresh one. A singleton here would merge every caller's activity into one running tally.
+builder.Services.AddScoped<ToolCallAuditContext>();
+builder.Services.AddTransient<ZendeskRateLimitHandler>();
+
+builder.Services.AddHttpClient<ZendeskService>(c => c.Timeout = TimeSpan.FromSeconds(100))
+    .AddHttpMessageHandler<ZendeskRateLimitHandler>();
+
+var oauthSection = builder.Configuration.GetSection(OAuthOptions.SectionName);
+var noAuth = oauthSection.GetValue<bool>("NoAuth");
+
+// Upstream endpoint resolution. Singleton so the last-known-good fallback outlives the cache TTL;
+// its own named HttpClient so the discovery fetch cannot inherit another client's handlers, and so
+// tests can substitute a stub handler for it alone.
+builder.Services.AddHttpClient(UpstreamOidcMetadata.HttpClientName, c => c.Timeout = TimeSpan.FromSeconds(10));
+builder.Services.AddSingleton<UpstreamOidcMetadata>();
+
+// Fail fast on an unauthenticated production-looking config (NoAuth + Key Vault).
+StartupGuards.EnsureSafeAuthConfig(noAuth, zendeskSection["KeyVaultUri"]);
+StartupGuards.EnsureDevelopmentTokenIsLocal(zendeskSection["DevelopmentApiToken"], zendeskSection["KeyVaultUri"], noAuth);
+
+if (!noAuth)
+{
+    builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
+        .AddJwtBearer();
+
+    // Configure JwtBearer from the *validated* OAuthOptions (trimmed/URI-checked by
+    // OAuthOptions.Validate) rather than the raw IConfiguration values. This guarantees
+    // that what JwtBearer sees matches what passed validation.
+    builder.Services.AddOptions<JwtBearerOptions>(JwtBearerDefaults.AuthenticationScheme)
+        .Configure<IOptions<OAuthOptions>>((jwt, oauth) =>
+        {
+            jwt.Authority = oauth.Value.Authority;
+            // ValidAudiences rather than the single-valued jwt.Audience: which audience a provider
+            // stamps on an access token is a property of the token version, not of our config. An
+            // Entra v1 token names the App ID URI (OAuth:Audience); a v2 token names the resource
+            // application's appId GUID — which, because one registration is both our OAuth client
+            // and our API resource, is OAuth:SharedClientId. Accepting both settles it rather than
+            // betting on it. See OAuthOptions.ValidAudiences.
+            jwt.TokenValidationParameters.ValidAudiences = oauth.Value.ValidAudiences;
+
+            // MCP requires the 401 to point at the protected-resource metadata document. Without
+            // this, clients can only guess the well-known location. Built from PublicBaseUrl so a
+            // Host header cannot inject the pointer; falls back to the request origin in local dev.
+            jwt.Events = new JwtBearerEvents
+            {
+                OnChallenge = context =>
+                {
+                    var baseUrl = GetServerBaseUrl(context.HttpContext, oauth.Value.PublicBaseUrl);
+
+                    var metadataUrl = $"{baseUrl}{ProtectedResourceMetadataBuilder.MetadataPath}/mcp";
+
+                    // Build a single WWW-Authenticate challenge and call HandleResponse() to stop
+                    // JwtBearerHandler appending its own bare "Bearer" afterward — two challenges
+                    // is HTTP-legal, but a client that reads only one of them (first or last) then
+                    // sees no resource_metadata pointer at all, which is the exact discovery
+                    // failure this task exists to close. Setting the status code ourselves is what
+                    // makes suppressing the default handler safe here; ResourceMetadataDiscoveryTests
+                    // pins the 401 independently, so the deploy.yml smoke contract stays covered.
+                    context.Response.StatusCode = StatusCodes.Status401Unauthorized;
+
+                    var challenge = $"Bearer resource_metadata=\"{metadataUrl}\"";
+                    if (context.AuthenticateFailure is not null)
+                    {
+                        // A token was presented but failed validation — preserve that diagnostic
+                        // (the default handler would otherwise add it) so expired/invalid-token
+                        // issues stay debuggable in production. Never echo exception text or any
+                        // token content into the header; the description stays generic.
+                        challenge += ", error=\"invalid_token\", error_description=\"The access token is invalid or expired\"";
+                    }
+                    context.Response.Headers.WWWAuthenticate = challenge;
+
+                    context.HandleResponse();
+                    return Task.CompletedTask;
+                },
+
+                // The replacement for a signal the logging filters suppress, and the reason they can
+                // safely suppress it. JwtBearerHandler reports a failed token at INFORMATION
+                // ("Bearer was not authenticated. Failure message: …"), which
+                // `AddFilter("Microsoft.AspNetCore.Authentication", Warning)` removes.
+                //
+                // Unlike the authorisation case, nothing else would record it: an unauthenticated
+                // caller never reaches ZendeskService.SendAsync or the SDK's [Authorize] checkpoint,
+                // so neither LogDenied nor LogToolCallDenied fires. Without this the failures that
+                // matter most would be invisible — an Entra signing-key rotation, clock skew, or a
+                // run of forged tokens all look identical to silence, and you would learn about them
+                // from users rather than from logs.
+                //
+                // Warning so it outlives the filter, and the exception TYPE ONLY — never the message.
+                //
+                // ⚠️ An earlier version logged `context.Exception.Message` on the grounds that it
+                // carries no credential material. That was the wrong test. IdentityModel builds
+                // those messages from the *token's own claims* — "IDX10214: Audience validation
+                // failed. Audiences: '<aud>'", "IDX10205: Issuer validation failed. Issuer:
+                // '<iss>'" — so the text embeds attacker-supplied values of unbounded length that
+                // may contain newlines. Writing that into a log is a log-injection path: a crafted
+                // `aud` containing a line break can forge whatever log line it likes, in the one
+                // record an operator would consult during an authentication incident.
+                //
+                // The type alone is the better diagnostic anyway, and it is a closed set:
+                // SecurityTokenExpiredException, SecurityTokenInvalidSignatureException,
+                // SecurityTokenSignatureKeyNotFoundException (a signing-key rotation),
+                // SecurityTokenInvalidAudienceException, SecurityTokenInvalidIssuerException,
+                // SecurityTokenNotYetValidException. That distinguishes every failure mode worth
+                // acting on, with nothing the caller controls.
+                OnAuthenticationFailed = context =>
+                {
+                    context.HttpContext.RequestServices
+                        .GetRequiredService<ILoggerFactory>()
+                        .CreateLogger("ZendeskMcp.Authentication")
+                        .LogWarning(
+                            "Bearer token validation failed: {FailureType}",
+                            context.Exception.GetType().Name);
+
+                    return Task.CompletedTask;
+                }
+            };
+        });
+}
+
+// Registered unconditionally, including in NoAuth dev mode. The MCP SDK fails *closed*: with an
+// authorisation attribute on a tool but no policy services (and no AddAuthorizationFilters() below),
+// both tools/list and tools/call fail — observed as JSON-RPC -32603 "An error occurred." Since every
+// tool carries [Authorize], guarding either of these on !noAuth leaves local development with a
+// server that can neither list nor call anything. Verified both ways round; the regression is pinned
+// by AuthorizationFilterToolsListTests.NoAuthDevMode_SeesEveryToolUnfiltered, which asserts the full
+// tool count and so fails whichever way this breaks. Discovery is still unfiltered in dev mode —
+// ZendeskPermissionHandler short-circuits to success while
+// ToolAuthorizer.IsAuthorizationBypassedAsync() is true (RBAC off or NoAuth).
+//
+// Scoped, not singleton: ZendeskPermissionHandler depends on the scoped ToolAuthorizer, and a
+// singleton capturing it would be a captive-dependency bug.
+builder.Services.AddScoped<IAuthorizationHandler, ZendeskPermissionHandler>();
+
+// Policy *names* must be compile-time constants for [Authorize(Policy = "...")], so they are
+// literals here. The permission *values* carried by each requirement come from
+// ToolAuthorizationOptions, so a deployment that renames a permission stays consistent.
+var permissions = builder.Configuration.GetSection(ToolAuthorizationOptions.SectionName)
+    .Get<ToolAuthorizationOptions>() ?? new ToolAuthorizationOptions();
+// Validate() must be called here, not just relied upon via the IOptions PostConfigure above.
+// It trims the permission strings, and ToolAuthorizer receives the *validated* instance — so
+// without this a config value like "zendesk:read " (trailing space) would reach the [Authorize]
+// policy requirement untrimmed while the SendAsync backstop compared against the trimmed form.
+// Discovery filtering and enforcement would then disagree, which is the one thing sharing
+// HasEffectivePermissionAsync is supposed to make impossible.
+permissions.Validate();
+
+builder.Services.AddAuthorizationBuilder()
+    .AddPolicy("zendesk:read", p => p.AddRequirements(new ZendeskPermissionRequirement(permissions.ReadPermission)))
+    .AddPolicy("zendesk:write", p => p.AddRequirements(new ZendeskPermissionRequirement(permissions.WritePermission)))
+    .AddPolicy("zendesk:delete", p => p.AddRequirements(new ZendeskPermissionRequirement(permissions.DeletePermission)));
+
+// Read the read-only flag from raw config at startup (same pattern as `noAuth` above) so the
+// destructive tools can be filtered out of tools/list for read-only deployments.
+var readOnlyMode = builder.Configuration.GetSection(ToolAuthorizationOptions.SectionName).GetValue<bool>("ReadOnly");
+
+// Bound separately for the list-tools filter below, which is constructed at composition time.
+var toolsListCache = builder.Configuration.GetSection(ToolsListCacheOptions.SectionName)
+    .Get<ToolsListCacheOptions>() ?? new ToolsListCacheOptions();
+toolsListCache.Validate();
+
+var mcpBuilder = builder.Services.AddMcpServer(options => options.ServerInstructions = ZendeskServerInstructions.Text)
+    .WithHttpTransport(options => options.Stateless = true)
+    .WithToolsFromAssembly();
+
+// Applies [Authorize] on tools: filters tools/list per caller and rejects unauthorised calls
+// before they reach the handler. Not guarded on !noAuth — see the AddAuthorizationBuilder comment
+// above: with authorisation metadata on a tool and this call missing, tools/list fails outright, so
+// omitting it in dev mode breaks local development. NoAuth is handled inside the policy handler.
+//
+// The checkpoint this installs sits *outside* the whole call-tool filter pipeline (the SDK's
+// "alternate-result pipeline"), so a refused call never reaches the filters registered below —
+// including the error-surfacing one. That is why the denial is audited from
+// ZendeskPermissionHandler rather than from a filter here.
+mcpBuilder.AddAuthorizationFilters();
+
+mcpBuilder.WithRequestFilters(filters =>
+{
+    // Surface the real failure reason (Zendesk body / read-only / RBAC denial / validation / connect link) to the
+    // client instead of the SDK's generic "An error occurred invoking 'X'." Unexpected exceptions
+    // propagate so the SDK keeps its protocol-error / cancellation handling and generic message.
+    //
+    // Failures are also logged here (vitally-mcp#94), bar RBAC denials (LogDenied has them) and a cancelled
+    // caller. Before that, a SURFACEABLE failure was converted into a result and left no server-side
+    // trace at all. The second branch is different: the SDK already logs an exception that escapes
+    // this filter, with the exception attached, so what this adds there is the correlation id that
+    // joins it to the audit record. See ToolCallFailureLog for why the message itself is never logged.
+    filters.AddCallToolFilter(next => async (context, cancellationToken) =>
+    {
+        try
+        {
+            return await next(context, cancellationToken);
+        }
+        catch (Exception ex) when (ToolErrorResult.IsSurfaceable(ex))
+        {
+            ToolCallFailureLog.Write(context.Services, context.Params?.Name, ex, cancellationToken);
+            return ToolErrorResult.Build(ex);
+        }
+        catch (Exception ex)
+        {
+            ToolCallFailureLog.Write(context.Services, context.Params?.Name, ex, cancellationToken);
+            throw;
+        }
+    });
+
+    // The audit record for the call itself (vitally-mcp#147). Registered after the error-surfacing filter so it
+    // still runs when that filter converts an exception into an error result — the record must exist
+    // for a failed call as much as a successful one, since an attempted deletion that errored is
+    // exactly the sort of event an access trail is kept for.
+    filters.AddCallToolFilter(next => async (context, cancellationToken) =>
+    {
+        var auditContext = context.Services?.GetService<ToolCallAuditContext>();
+        var audit = context.Services?.GetService<AuditLogger>();
+        if (auditContext is null || audit is null)
+        {
+            return await next(context, cancellationToken);
+        }
+
+        var started = Stopwatch.GetTimestamp();
+        var outcome = "ok";
+        try
+        {
+            var result = await next(context, cancellationToken);
+            if (result.IsError == true)
+            {
+                outcome = "error";
+            }
+
+            return result;
+        }
+        catch
+        {
+            outcome = "error";
+            throw;
+        }
+        finally
+        {
+            // An audit write must never be the reason a call fails. This runs in a `finally`, so an
+            // exception escaping it would replace a perfectly good result with
+            // "An error occurred invoking 'X'" — and a telemetry sink refusing writes is exactly the
+            // sort of thing that happens during the incident the trail is wanted for. Losing the
+            // record is bad; losing the user's call as well is worse, and inexplicable client-side.
+            //
+            // Swallowed rather than re-logged, because in this configuration the logger IS the sink
+            // that just failed. Note this catches only a SYNCHRONOUS failure: the Azure Monitor
+            // exporter is asynchronous, so a lost export never reaches here — the breadcrumb on
+            // AuditLogger.BreadcrumbCategory is what covers that, emitted unconditionally because
+            // there is no failure signal to react to.
+            try
+            {
+                var summary = auditContext.Summarise();
+                audit.LogToolCall(new ToolCallAudit(
+                    ToolName: context.Params?.Name ?? "unknown",
+                    Arguments: AuditArguments.Format(context.Params?.Arguments),
+                    Records: summary,
+                    Outcome: outcome,
+                    Duration: Stopwatch.GetElapsedTime(started),
+                    CorrelationId: auditContext.CorrelationId,
+                    PermissionTier: summary.PermissionTier,
+                    TierServedStale: summary.TierServedStale,
+                    // Read per call, not per session: 2026-07-28 removed the `initialize` handshake,
+                    // so in stateless mode the client identifies itself in each request's `_meta` and
+                    // there is no session state to have cached it in. A legacy-path caller sends
+                    // none, and `unknown` is the honest answer there.
+                    McpClient: context.JsonRpcRequest?.Context?.ClientInfo?.Name));
+            }
+            catch (Exception auditFailure) when (auditFailure is not OperationCanceledException)
+            {
+                // Deliberately ignored. See above.
+            }
+        }
+    });
+
+    // Advertise how long clients may cache tools/list (2026-07-28 spec). Private scope because
+    // the list is per-caller once authorisation filtering is on.
+    if (toolsListCache.Enabled)
+    {
+        filters.AddListToolsFilter(next => async (context, cancellationToken) =>
+        {
+            var result = await next(context, cancellationToken);
+            result.TimeToLive = toolsListCache.TimeToLive;
+            result.CacheScope = toolsListCache.Scope;
+            return result;
+        });
+    }
+
+    // Read-only deployments: hide destructive tools from tools/list (enforcement is in ToolAuthorizer).
+    if (readOnlyMode)
+    {
+        filters.AddListToolsFilter(next => async (context, cancellationToken) =>
+        {
+            var result = await next(context, cancellationToken);
+            result.Tools = ReadOnlyToolFilter.FilterTools(result.Tools, readOnly: true);
+            return result;
+        });
+    }
+});
+
+// Honour X-Forwarded-Proto / X-Forwarded-Host from Container Apps ingress so absolute URLs
+// (issuer, registration_endpoint, etc.) emit the public https scheme rather than the
+// internal http scheme the container sees.
+//
+// Trust model: the container is not directly reachable from the public internet — the
+// Container Apps ingress is the only path in, and it overwrites/normalises the
+// X-Forwarded-* headers from clients before forwarding. So we trust those headers
+// implicitly via network isolation, not via authentication of the headers themselves.
+// KnownNetworks/KnownProxies are cleared because we don't know the ACA ingress IP range
+// statically. ForwardLimit=1 is defence-in-depth: it limits how many entries the
+// middleware will process, preventing client-supplied chained headers from being honoured
+// even if the ingress ever stops normalising them. If this app ever became reachable
+// outside of an ingress (e.g. via private endpoint exposure), this configuration would
+// need to tighten — either via KnownNetworks pinning or by removing ForwardedHeaders
+// support entirely.
+builder.Services.Configure<ForwardedHeadersOptions>(options =>
+{
+    options.ForwardedHeaders = ForwardedHeaders.XForwardedProto | ForwardedHeaders.XForwardedHost | ForwardedHeaders.XForwardedFor;
+    options.ForwardLimit = 1;
+    // KnownIPNetworks replaces the legacy KnownNetworks per ASPDEPR005 (.NET 10).
+    options.KnownIPNetworks.Clear();
+    options.KnownProxies.Clear();
+});
+
+var app = builder.Build();
+
+// Fail-fast: force resolution of bound + PostConfigured options now so misconfiguration
+// throws at startup rather than at first request.
+_ = app.Services.GetRequiredService<IOptions<ZendeskServerOptions>>().Value;
+var oauthOptions = app.Services.GetRequiredService<IOptions<OAuthOptions>>().Value;
+_ = app.Services.GetRequiredService<IOptions<ToolAuthorizationOptions>>().Value;
+
+// Same fail-fast intent, one step further out: prove the upstream provider actually publishes the
+// four endpoints the proxy needs before serving anything. Blocking here is the point — two of them
+// go into a metadata document clients trust. See StartupGuards for why it is fatal.
+//
+// `SharedClientId` is read from the resolved options rather than from `oauthSection` alongside
+// `noAuth` above, and the difference is load-bearing: that composition-time read happens before
+// WebApplicationFactory injects its configuration, so a raw read here would report the proxy
+// disabled in every integration test and quietly skip the guard the tests exist to pin.
+await StartupGuards.EnsureUpstreamOidcEndpointsAsync(
+    app.Services.GetRequiredService<UpstreamOidcMetadata>(),
+    proxyEnabled: !string.IsNullOrWhiteSpace(oauthOptions.SharedClientId),
+    timeout: TimeSpan.FromSeconds(15));
+
+app.UseForwardedHeaders();
+
+// Unauthenticated liveness/readiness probe for Container Apps. This endpoint carries no
+// RequireAuthorization() (and the MCP endpoint's auth requirement doesn't apply to it), so
+// platform health checks reach it without a token.
+app.MapGet("/health", () => Results.Ok(new { status = "healthy" }));
+
+if (noAuth)
+{
+    app.Logger.LogWarning("Zendesk MCP server running with NoAuth=true. This is for local development only — DO NOT use in production.");
+}
+
+// Prefer the configured canonical origin when set; otherwise derive from the request. The
+// configured value defends against Host-header injection into the OAuth metadata documents.
+static string GetServerBaseUrl(HttpContext ctx, string? publicBaseUrl)
+{
+    return string.IsNullOrWhiteSpace(publicBaseUrl)
+        ? $"{ctx.Request.Scheme}://{ctx.Request.Host}"
+        : publicBaseUrl;
+}
+
+// RFC 9728 — Protected Resource Metadata, served from both the canonical path and the
+// resource-path-suffixed variant (…/mcp) that RFC 9728 and the MCP SDK prefer. Clients probe
+// either, so serving both removes a discovery failure mode. Points clients at the authorization
+// server, which for the DCR-proxy variant is *us* (so we can intercept registration). The actual
+// Token ISSUANCE still happens upstream, but almost none of the RFC 8414 document points there.
+// `authorization_endpoint`, `token_endpoint` and `registration_endpoint` are all OURS — clients talk
+// to the proxy, which forwards — and only `jwks_uri` and `userinfo_endpoint` name the provider.
+// Do not "correct" the first three to the upstream URLs: that bypasses the proxy, so the DCR shim
+// never runs and /oauth/callback never injects `iss`. Note what this does NOT rest on — RFC 8414
+// §3.3 constrains the `issuer` FIELD to the origin that served the document, and says nothing about
+// where the endpoint URLs point. §3.3 is why `issuer` names us (see below); the endpoints are ours
+// because the proxy has to be in the path at all. See the façade section in CLAUDE.md.
+// Serialised with the SDK's own options rather than the ASP.NET Core defaults, because those
+// write every unset optional property as an explicit `null`. RFC 9728 §3.2 says an unused
+// metadata parameter is *omitted*, and strict clients enforce the difference: the published
+// @modelcontextprotocol/client schema types `jwks_uri` as a string and rejects the whole
+// document on a null, before any part of the OAuth flow is reached.
+var resourceMetadataHandler = (HttpContext ctx, IOptions<OAuthOptions> oauth) =>
+    Results.Json(
+        ProtectedResourceMetadataBuilder.Build(oauth.Value, GetServerBaseUrl(ctx, oauth.Value.PublicBaseUrl)),
+        McpJsonUtilities.DefaultOptions);
+
+app.MapGet(ProtectedResourceMetadataBuilder.MetadataPath, resourceMetadataHandler);
+app.MapGet($"{ProtectedResourceMetadataBuilder.MetadataPath}/mcp", resourceMetadataHandler);
+
+// RFC 8414 — Authorization Server Metadata, served by us when the DCR proxy is enabled.
+// `issuer` names our *own* origin, not the upstream provider's. §3.3 requires the issuer to
+// correspond to the URL the document was fetched from (an anti-mix-up control), and from the
+// client's point of view we genuinely are the authorization server: authorize, token and register
+// are all ours. The upstream provider still issues the tokens, which is why `jwks_uri` and
+// `userinfo_endpoint` remain upstream — and why they are read from its own discovery document
+// rather than assembled from Authority, which cannot produce Entra's endpoint shapes. Declaring our
+// origin here is coupled to the `iss` injection in /oauth/callback below — see the façade section in
+// CLAUDE.md before changing either.
+app.MapGet("/.well-known/oauth-authorization-server", async (HttpContext ctx, IOptions<OAuthOptions> oauth, UpstreamOidcMetadata upstream) =>
+{
+    var o = oauth.Value;
+    if (string.IsNullOrWhiteSpace(o.SharedClientId))
+    {
+        // No proxy configured — return a 404 so clients fall back to the upstream AS metadata.
+        return Results.NotFound();
+    }
+    var endpoints = await upstream.GetAsync(ctx.RequestAborted);
+    var ourBase = GetServerBaseUrl(ctx, o.PublicBaseUrl);
+    return Results.Json(new
+    {
+        issuer = ourBase,
+        authorization_endpoint = $"{ourBase}/oauth/authorize",
+        token_endpoint = $"{ourBase}/oauth/token",
+        userinfo_endpoint = endpoints.UserInfoEndpoint,
+        jwks_uri = endpoints.JwksUri,
+        registration_endpoint = $"{ourBase}/oauth/register",
+        // Shared with the RFC 9728 document rather than restated, so the two lists cannot drift.
+        // The API scope is named in the form the upstream provider will actually accept — see
+        // ProtectedResourceMetadataBuilder.ScopesFor.
+        scopes_supported = ProtectedResourceMetadataBuilder.ScopesFor(o),
+        response_types_supported = new[] { "code" },
+        grant_types_supported = new[] { "authorization_code", "refresh_token" },
+        token_endpoint_auth_methods_supported = new[] { "none" },
+        code_challenge_methods_supported = new[] { "S256" },
+        // RFC 9207. Honest only because /oauth/callback injects `iss` unconditionally — a client
+        // that sees this flag and then no `iss` on the authorization response treats the absence
+        // as a stripped-parameter attack and aborts, so the two must ship together.
+        authorization_response_iss_parameter_supported = true
+    });
+});
+
+// OAuth 2.0 Authorization Code proxy. The shared upstream app — the Entra registration
+// `Zendesk MCP` on both deployed targets — registers ONE callback per origin
+// (`https://zendesk-mcp.fiscaltec.com/oauth/callback` and the staging equivalent), not one globally:
+// each target sends its own, so removing either breaks that target's sign-in.
+//
+// The client's `redirect_uri` is VALIDATED, not merely accepted — `IsRedirectUriAllowed` permits
+// RFC 8252 loopback URIs on any port plus the configured `AllowedClientRedirectUris`, and rejects
+// everything else. That check is the only thing between this proxy and an open redirector with
+// authorisation-code theft; never widen it. What follows validation is the substitution: save the
+// client's URI keyed by `state`, send our own fixed callback upstream, and at /oauth/callback look
+// the original up and redirect there. That is what lets random loopback ports and claude.ai's
+// hosted callback coexist with one registration — and that is needed for EVERY client redirect_uri
+// here, loopback included. Entra does have a loopback exemption (it ignores the port on
+// `http://localhost`) but it applies to PUBLIC clients, and this registration is not one: entra.tf
+// declares a `web {}` block with two fixed HTTPS callbacks, i.e. a confidential client, which is what
+// lets the proxy inject the secret at /oauth/token. So the substitution is load-bearing for loopback
+// too, not only for claude.ai's hosted callback.
+//
+// Do not narrow this to "only the hosted callback needs it" on the strength of Entra's general
+// loopback behaviour — that exemption is real and simply does not reach this app.
+app.MapGet("/oauth/authorize", async (HttpContext ctx, IOptions<OAuthOptions> oauth, IMemoryCache cache, UpstreamOidcMetadata upstream) =>
+{
+    var o = oauth.Value;
+    if (string.IsNullOrWhiteSpace(o.SharedClientId))
+    {
+        return Results.Problem(detail: "OAuth proxy not configured.", statusCode: StatusCodes.Status503ServiceUnavailable);
+    }
+
+    var query = ctx.Request.Query;
+    var clientRedirectUri = query["redirect_uri"].ToString();
+    var state = query["state"].ToString();
+
+    if (string.IsNullOrWhiteSpace(clientRedirectUri) || string.IsNullOrWhiteSpace(state))
+    {
+        return Results.BadRequest(new { error = "invalid_request", error_description = "Missing redirect_uri or state" });
+    }
+
+    // Without this check, /oauth/callback would happily redirect victims to any attacker-
+    // supplied URL with the authorisation code in the query string — and because we replace
+    // the upstream redirect_uri with our own fixed callback, the provider's own allowlist
+    // offers no protection (every redirect_uri passes there). Loopback any-port is allowed per
+    // RFC 8252 §7.3 (Claude Code, VS Code, Cursor, MCP Inspector); cloud-hosted MCP callbacks
+    // must be listed in OAuth:AllowedClientRedirectUris.
+    if (!o.IsRedirectUriAllowed(clientRedirectUri))
+    {
+        return Results.BadRequest(new { error = "invalid_request", error_description = "redirect_uri is not allowed" });
+    }
+
+    // RFC 8707. `resource` is what binds the audience of the token that comes back — this proxy
+    // sends no `audience` parameter anywhere — so a client must not be able to ask to be bound to
+    // an audience this server never published. Refuse a mismatch regardless of what happens to the
+    // value afterwards, because the check is about what we are willing to request, not about which
+    // provider consumes it.
+    //
+    // What happens afterwards is OAuth:UpstreamResourceScope's job. Empty: the value is relayed
+    // verbatim, which is what RFC 8707 specifies and what a conforming provider expects. Set
+    // (Entra, and so both deployed targets): it is dropped here and the configured scope carries
+    // the same meaning instead, because Entra's v2 authorize endpoint
+    // refuses *any* `resource` alongside a custom-API `scope` — AADSTS9010010, "the resource
+    // parameter provided in the request doesn't match with the requested scopes". Verified against
+    // the live tenant on 2026-09-02: the slashed form, the exact App ID URI and an unregistered
+    // value all return 400 alike. It is a resource-vs-scope consistency check, not a comparison
+    // against identifierUris, so no amount of reshaping the value would have worked.
+    //
+    // Indexer lookups on IQueryCollection are case-insensitive, so an oddly-cased `RESOURCE` is
+    // validated here too — and refused if it does not match. When the parameter is terminated the
+    // forwarding loop drops it case-insensitively as well; when it is relayed, the loop preserves
+    // the caller's key casing and such a pair travels upstream as-is, which a conformant provider
+    // ignores because RFC 6749 defines parameter names as lowercase literals. vitally-mcp#123 tracks stripping
+    // those rather than relying on it.
+    if (query.ContainsKey("resource")
+        && query["resource"].Any(value => !o.IsResourceIndicatorAllowed(value ?? string.Empty)))
+    {
+        return Results.BadRequest(new
+        {
+            error = "invalid_target",
+            error_description = "The resource parameter does not match the resource identifier this server publishes."
+        });
+    }
+
+    cache.Set($"oauth-proxy:state:{state}", clientRedirectUri, TimeSpan.FromMinutes(10));
+
+    var ourCallback = $"{GetServerBaseUrl(ctx, o.PublicBaseUrl)}/oauth/callback";
+    var endpoints = await upstream.GetAsync(ctx.RequestAborted);
+    // Repeated `scope` is not legal OAuth, but a client that sends it means the union — so join on
+    // a space rather than letting StringValues.ToString() comma-splice the values into one token.
+    var mergedScope = o.TerminatesResourceParameter
+        ? o.MergeUpstreamScope(string.Join(' ', query["scope"].Select(v => v ?? string.Empty)))
+        : null;
+    // The provider is free to publish an authorization_endpoint that already carries a query
+    // (nothing in OIDC Discovery forbids it), so pick the separator rather than assuming '?'.
+    var separator = endpoints.AuthorizationEndpoint.Contains('?') ? '&' : '?';
+    var sb = new System.Text.StringBuilder(endpoints.AuthorizationEndpoint).Append(separator);
+    foreach (var kv in query)
+    {
+        if (kv.Key == "redirect_uri") continue;
+        // Strip `prompt` — some MCP clients send `prompt=consent`, which forces the provider to
+        // re-prompt every session even when consent has already been granted. Without prompt=*
+        // the cached grant is honoured and an authorization code is issued silently.
+        if (kv.Key == "prompt") continue;
+        if (mergedScope is not null
+            && (string.Equals(kv.Key, "resource", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(kv.Key, "scope", StringComparison.OrdinalIgnoreCase)))
+        {
+            // Terminated here (`resource`) or re-emitted once below in merged form (`scope`).
+            // OrdinalIgnoreCase and not ==: a `RESOURCE` that survived would defeat the whole point
+            // of dropping it, and letting a `SCOPE` through would put two scope parameters upstream.
+            continue;
+        }
+        foreach (var v in kv.Value)
+        {
+            sb.Append(Uri.EscapeDataString(kv.Key)).Append('=').Append(Uri.EscapeDataString(v ?? string.Empty)).Append('&');
+        }
+    }
+    if (mergedScope is not null)
+    {
+        sb.Append("scope=").Append(Uri.EscapeDataString(mergedScope)).Append('&');
+    }
+    sb.Append("redirect_uri=").Append(Uri.EscapeDataString(ourCallback));
+    return Results.Redirect(sb.ToString());
+});
+
+app.MapGet("/oauth/callback", (HttpContext ctx, IOptions<OAuthOptions> oauth, IMemoryCache cache) =>
+{
+    var state = ctx.Request.Query["state"].ToString();
+    if (string.IsNullOrWhiteSpace(state))
+    {
+        return Results.BadRequest(new { error = "invalid_request", error_description = "Missing state" });
+    }
+
+    if (!cache.TryGetValue<string>($"oauth-proxy:state:{state}", out var clientRedirectUri) || string.IsNullOrWhiteSpace(clientRedirectUri))
+    {
+        return Results.BadRequest(new { error = "invalid_request", error_description = "Unknown or expired state" });
+    }
+    cache.Remove($"oauth-proxy:state:{state}");
+
+    var separator = clientRedirectUri.Contains('?') ? "&" : "?";
+    var sb = new System.Text.StringBuilder(clientRedirectUri).Append(separator);
+    foreach (var kv in ctx.Request.Query)
+    {
+        // Drop any upstream `iss` — ours is appended below. A provider configured for RFC 9207
+        // sends one naming itself, and whether it does is provider-side configuration we don't
+        // control. Forwarding it would contradict the issuer we publish; appending ours alongside
+        // would leave the client two values to choose between. Clients compare a *present* `iss`
+        // against the metadata issuer even when the parameter is not advertised, so both shapes
+        // fail rather than degrade.
+        // OrdinalIgnoreCase, not ==: IQueryCollection lookups are case-insensitive but enumeration
+        // yields keys as they were parsed, so an exact match would forward a differently-cased
+        // `ISS` alongside the one we append below.
+        if (string.Equals(kv.Key, "iss", StringComparison.OrdinalIgnoreCase)) continue;
+        foreach (var v in kv.Value)
+        {
+            sb.Append(Uri.EscapeDataString(kv.Key)).Append('=').Append(Uri.EscapeDataString(v ?? string.Empty)).Append('&');
+        }
+    }
+    // RFC 9207 §2 — name ourselves as the issuer of this authorization response. Must match the
+    // `issuer` in our RFC 8414 document byte for byte: the comparison is simple string equality,
+    // with no scheme/host case folding, trailing-slash or percent-encoding normalisation applied.
+    sb.Append("iss=").Append(Uri.EscapeDataString(GetServerBaseUrl(ctx, oauth.Value.PublicBaseUrl)));
+    return Results.Redirect(sb.ToString().TrimEnd('&'));
+});
+
+app.MapPost("/oauth/token", async (HttpContext ctx, IOptions<OAuthOptions> oauth, IHttpClientFactory factory, UpstreamOidcMetadata upstream) =>
+{
+    var o = oauth.Value;
+    var ourCallback = $"{GetServerBaseUrl(ctx, o.PublicBaseUrl)}/oauth/callback";
+
+    var form = await ctx.Request.ReadFormAsync();
+    // Same audience-binding control as /oauth/authorize, applied to the form body — a refresh
+    // exchange can carry `resource` just as a code exchange can. See the comment there for what
+    // OAuth:UpstreamResourceScope then does with a value that passes.
+    if (form.ContainsKey("resource")
+        && form["resource"].Any(value => !o.IsResourceIndicatorAllowed(value ?? string.Empty)))
+    {
+        return Results.BadRequest(new
+        {
+            error = "invalid_target",
+            error_description = "The resource parameter does not match the resource identifier this server publishes."
+        });
+    }
+
+    // Merged for both grants, not just refresh. On a refresh exchange it is load-bearing: Entra
+    // issues the new access token for whatever resource `scope` names, so a client that refreshes
+    // with only the OIDC scopes would silently be handed a token for the wrong audience. On a code
+    // exchange it is redundant but harmless — the scope was already consented at /oauth/authorize —
+    // and applying one rule to both is easier to keep true than a per-grant one.
+    var mergedScope = o.TerminatesResourceParameter
+        ? o.MergeUpstreamScope(string.Join(' ', form["scope"].Select(v => v ?? string.Empty)))
+        : null;
+
+    var pairs = new List<KeyValuePair<string, string>>();
+    var sawRedirect = false;
+    foreach (var kv in form)
+    {
+        if (kv.Key == "redirect_uri")
+        {
+            pairs.Add(new KeyValuePair<string, string>("redirect_uri", ourCallback));
+            sawRedirect = true;
+        }
+        else if (mergedScope is not null
+            && (string.Equals(kv.Key, "resource", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(kv.Key, "scope", StringComparison.OrdinalIgnoreCase)))
+        {
+            // Terminated (`resource`) or replaced by the merged value below (`scope`) — see the
+            // matching skip in /oauth/authorize.
+            continue;
+        }
+        else
+        {
+            foreach (var v in kv.Value)
+            {
+                pairs.Add(new KeyValuePair<string, string>(kv.Key, v ?? string.Empty));
+            }
+        }
+    }
+    if (mergedScope is not null)
+    {
+        pairs.Add(new KeyValuePair<string, string>("scope", mergedScope));
+    }
+    // Restrict the grants this proxy will service. We inject a confidential client_secret
+    // below, so we must never forward a grant the shared app shouldn't service — otherwise a
+    // caller could request e.g. grant_type=client_credentials and receive a valid token for
+    // our audience with no user sign-in, bypassing authentication entirely. The metadata
+    // document advertises only these two grants (RFC 8414); enforce that here too.
+    var grantType = pairs.FirstOrDefault(p => p.Key == "grant_type").Value;
+    if (grantType is not ("authorization_code" or "refresh_token"))
+    {
+        return Results.BadRequest(new
+        {
+            error = "unsupported_grant_type",
+            error_description = "This server only supports the authorization_code and refresh_token grants."
+        });
+    }
+
+    // The redirect_uri parameter must match exactly what was sent in /authorize for code
+    // exchange (per OAuth 2.0). Refresh-grant requests don't include it; only inject for code.
+    if (grantType == "authorization_code" && !sawRedirect)
+    {
+        pairs.Add(new KeyValuePair<string, string>("redirect_uri", ourCallback));
+    }
+
+    // Confidential-client auth: inject the secret server-side. Clients (Claude Code etc.)
+    // never see it — they post as if they were a public client, we add the secret on the way
+    // upstream. This authenticates the token exchange and nothing else — it is NOT what suppresses the
+    // consent screen, and conflating the two invites removing the wrong setting. Consent suppression is
+    // provider-side configuration this code never touches: on Entra, tenant-wide admin consent plus
+    // `api.preAuthorizedApplications` naming the app itself. Remove the secret injection and the
+    // token exchange fails; remove the provider-side settings and every user sees a consent prompt
+    // instead.
+    if (!string.IsNullOrWhiteSpace(o.SharedClientSecret))
+    {
+        pairs.RemoveAll(p => p.Key == "client_secret");
+        pairs.Add(new KeyValuePair<string, string>("client_secret", o.SharedClientSecret));
+        // Never pair the injected secret with a caller-supplied client_id — clamp to our shared app.
+        pairs.RemoveAll(p => p.Key == "client_id");
+        pairs.Add(new KeyValuePair<string, string>("client_id", o.SharedClientId));
+    }
+
+    var endpoints = await upstream.GetAsync(ctx.RequestAborted);
+    var client = factory.CreateClient();
+    using var upstreamResponse = await client.PostAsync(endpoints.TokenEndpoint, new FormUrlEncodedContent(pairs), ctx.RequestAborted);
+    var body = await upstreamResponse.Content.ReadAsStringAsync(ctx.RequestAborted);
+    return Results.Content(body, upstreamResponse.Content.Headers.ContentType?.MediaType ?? "application/json", System.Text.Encoding.UTF8, (int)upstreamResponse.StatusCode);
+});
+
+// RFC 7591 — Dynamic Client Registration intercept. We always return the same pre-registered
+// shared client_id regardless of what the client requests. Echoes the requested redirect_uris
+// so the client's local OAuth loop stays self-consistent.
+app.MapPost("/oauth/register", async (HttpContext ctx, IOptions<OAuthOptions> oauth) =>
+{
+    var o = oauth.Value;
+    if (string.IsNullOrWhiteSpace(o.SharedClientId))
+    {
+        return Results.Problem(
+            detail: "DCR proxy not configured. Set OAuth:SharedClientId.",
+            statusCode: StatusCodes.Status503ServiceUnavailable);
+    }
+
+    string[] redirectUris = ["http://localhost"];
+    try
+    {
+        ctx.Request.EnableBuffering();
+        using var doc = await JsonDocument.ParseAsync(ctx.Request.Body);
+        if (doc.RootElement.TryGetProperty("redirect_uris", out var arr) && arr.ValueKind == JsonValueKind.Array)
+        {
+            var uris = arr.EnumerateArray()
+                .Select(x => x.GetString())
+                .Where(s => !string.IsNullOrWhiteSpace(s))
+                .Select(s => s!)
+                .ToArray();
+            // Echo back only redirect_uris that the proxy would actually accept on /authorize.
+            // Letting a non-allowed URI through here would mislead well-behaved clients into
+            // configuring a redirect that we'd then reject at the authorize step.
+            var accepted = uris.Where(o.IsRedirectUriAllowed).ToArray();
+            if (accepted.Length == 0 && uris.Length > 0)
+            {
+                return Results.BadRequest(new
+                {
+                    error = "invalid_redirect_uri",
+                    error_description = "None of the requested redirect_uris are permitted by this server."
+                });
+            }
+            if (accepted.Length > 0) redirectUris = accepted;
+        }
+    }
+    catch (JsonException)
+    {
+        // Tolerate clients that send empty or malformed bodies — they still get the static client_id back.
+    }
+
+    return Results.Json(new
+    {
+        client_id = o.SharedClientId,
+        client_id_issued_at = DateTimeOffset.UtcNow.ToUnixTimeSeconds(),
+        redirect_uris = redirectUris,
+        grant_types = new[] { "authorization_code", "refresh_token" },
+        response_types = new[] { "code" },
+        token_endpoint_auth_method = "none",
+        application_type = "native"
+    }, statusCode: StatusCodes.Status201Created);
+});
+
+// The browser half of each person's Zendesk connection (/zendesk/connect, /zendesk/callback) and the
+// one-shot attachment upload URLs (/uploads/{slot}). Unauthenticated by bearer token on purpose — a
+// browser or curl has none; each authenticates with a capability issued to a signed-in tool caller.
+app.MapZendeskConnect();
+app.MapZendeskUploads();
+
+if (!noAuth)
+{
+    app.UseAuthentication();
+    app.UseAuthorization();
+}
+
+var mcp = app.MapMcp("/mcp");
+if (!noAuth)
+{
+    mcp.RequireAuthorization();
+}
+
+app.Run();
+
+// Make Program accessible to integration tests in the test project.
+public partial class Program { }

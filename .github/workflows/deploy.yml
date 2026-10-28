@@ -1,0 +1,361 @@
+name: Deploy
+
+# Deploys the image to one of the Container Apps targets in `vitally-prod-rg-uksouth`: `production`
+# (the default) or `staging`. The release train calls it twice -- staging, then production with the
+# digest staging was rolled to (vitally-mcp#171). The ACR has public network access
+# disabled, so the image cannot be built/pushed to it from a GitHub-hosted runner. Instead we build +
+# push to a private GHCR package, then `az acr import` (server-side, works with public access
+# disabled) pulls it into the private ACR, and `az containerapp update` rolls the app. OIDC auth as
+# the user-assigned managed identity (federated credential subject
+# repo:fiscaltec/vitally-mcp:environment:<target> -- one per target). Callable manually
+# (workflow_dispatch) or by the release train (workflow_call). On a failed health/smoke check it rolls
+# the Container App back to the previous image.
+#
+# BUILD ONCE, IMPORT BY DIGEST. The build step outputs the GHCR manifest digest, and the import
+# pulls `ghcr…@<digest>` -- never `ghcr…:<tag>` -- into the ACR tag. A caller that already has a
+# digest (the train's production call, passing what staging ran) sets `image_digest`, and the build
+# is skipped entirely. Two reasons, both from vitally-mcp#171:
+#   * a rebuild of the same ref is not guaranteed byte-identical, so production would ship an image
+#     staging never smoke-tested; and
+#   * `az acr import --force` of a REBUILT image would overwrite the tag staging's revision points
+#     at, and staging (minReplicas 0, referencing a tag) would cold-start into production's rebuild.
+# Within one train run, importing the same digest into the same tag is a no-op on content, so neither
+# can happen. The revision still references the readable tag (`vitally-mcp:v4.7.0`); the digest is
+# what the tag held AT IMPORT TIME, printed in the job summary. ACR's data plane is unreachable from a
+# hosted runner (public access disabled), so the import IS the verification -- there is no read-back.
+#
+# ⚠️ OUTSIDE the train the hazard is still live: a manual dispatch that REUSES an existing tag without
+# `image_digest` rebuilds and `--force`-imports over it, and staging (minReplicas 0) cold-starts into
+# that rebuild. To re-deploy a tag that already shipped, pass its digest (from the earlier job
+# summary) or re-run the train's failed jobs, which keeps staging's digest.
+#
+# THE TARGET IS A GITHUB ENVIRONMENT NAME, and everything that differs between targets is an
+# environment-scoped variable (CONTAINER_APP, PUBLIC_ORIGIN) rather than a literal in this file, so
+# the smoke test, the metadata verification and the rollback are shared by every target instead of
+# being duplicated per target and left to drift. Adding a target is a GitHub environment plus a
+# federated credential, with no change here.
+#
+# `staging` exists for the Entra migration (vitally-mcp#102/#112): authentication has the largest blast radius in
+# this system, so IdP changes are validated on staging first. Its hostname is deliberately stable --
+# identity-provider identifiers are immutable and must equal the server origin, so an ephemeral one
+# orphans an app registration per run.
+on:
+  workflow_dispatch:
+    inputs:
+      target:
+        description: "Deployment target (GitHub environment)"
+        required: false
+        default: production
+        type: choice
+        options:
+          - production
+          - staging
+      ref:
+        description: "Git ref (branch/tag/SHA) to deploy"
+        required: false
+        type: string
+      image_tag:
+        description: "Image tag to publish (default sha-<short-sha> of the chosen ref)"
+        required: false
+        type: string
+      image_digest:
+        description: "Skip the build and deploy this already-pushed GHCR digest (sha256:…). Requires image_tag. Normally empty"
+        required: false
+        type: string
+  workflow_call:
+    inputs:
+      target:
+        # `type: choice` is workflow_dispatch-only, so callers get a plain string. The default keeps
+        # the release train's existing call site (which passes no target) shipping to production.
+        description: "Deployment target (GitHub environment)"
+        required: false
+        default: production
+        type: string
+      ref:
+        description: "Git ref (branch/tag/SHA) to deploy"
+        required: false
+        type: string
+      image_tag:
+        description: "Image tag to publish (default sha-<short-sha> of the chosen ref)"
+        required: false
+        type: string
+      image_digest:
+        # Set by the release train's production call to the digest its staging call deployed, so
+        # both targets run one build. Empty means build from `ref`.
+        description: "Skip the build and deploy this already-pushed GHCR digest (sha256:…)"
+        required: false
+        type: string
+      require_image_digest:
+        # Set by the train's production call when staging DEPLOYED. Without it, a break anywhere in
+        # the four-hop output chain (step -> job -> workflow_call -> needs) would hand production an
+        # empty digest, which reads as "build from ref" -- a silent rebuild of exactly the kind this
+        # design exists to prevent. With it, an empty digest fails the run instead.
+        description: "Fail rather than build if image_digest is empty"
+        required: false
+        default: false
+        type: boolean
+    outputs:
+      image_digest:
+        description: "The GHCR manifest digest this run imported and rolled the target to"
+        value: ${{ jobs.deploy.outputs.image_digest }}
+    secrets:
+      AZURE_CLIENT_ID:
+        required: true
+      AZURE_TENANT_ID:
+        required: true
+      AZURE_SUBSCRIPTION_ID:
+        required: true
+
+concurrency:
+  # Per target: a staging deploy must not queue behind a production one, and two deploys to the same
+  # target must still serialise -- they race on one Container App's revisions.
+  group: deploy-${{ inputs.target }}
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: Build, import to ACR, roll Container App
+    permissions:
+      id-token: write # OIDC token for azure/login
+      contents: read
+      packages: write # push to GHCR
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.target }}
+    outputs:
+      image_digest: ${{ steps.digest.outputs.digest }}
+    env:
+      # ACR_NAME / RESOURCE_GROUP / IMAGE_NAME are shared by every target and stay repo-level.
+      # CONTAINER_APP and PUBLIC_ORIGIN are set per environment; both targets set them explicitly so
+      # neither silently inherits the other's. The URLs are built from PUBLIC_ORIGIN in the steps --
+      # one `env:` entry cannot reference a sibling.
+      ACR_NAME: ${{ vars.ACR_NAME }}
+      RESOURCE_GROUP: ${{ vars.RESOURCE_GROUP }}
+      CONTAINER_APP: ${{ vars.CONTAINER_APP }}
+      IMAGE_NAME: ${{ vars.IMAGE_NAME }}
+      PUBLIC_ORIGIN: ${{ vars.PUBLIC_ORIGIN }}
+    steps:
+      # Runs before anything is built, imported or rolled, so a misconfigured target cannot leave a
+      # half-deployed app or a rollback to reason about. PUBLIC_ORIGIN earns the check on its own:
+      # it used to be a hardcoded production URL, and unset it would make every smoke assertion below
+      # run against a relative path, fail, and roll back a deploy that was in fact fine.
+      - name: Check the target's configuration is complete
+        run: |
+          set -euo pipefail
+          missing=""
+          for v in ACR_NAME RESOURCE_GROUP CONTAINER_APP IMAGE_NAME PUBLIC_ORIGIN; do
+            [ -n "${!v:-}" ] || missing="$missing $v"
+          done
+          if [ -n "$missing" ]; then
+            echo "::error::Target '$TARGET' is missing variable(s):$missing -- set them on the '$TARGET' GitHub environment (or repo-level if shared by every target)."
+            exit 1
+          fi
+          # Must be scheme + host ONLY. No normalisation is applied, deliberately: PUBLIC_ORIGIN is
+          # concatenated into the smoke URLs and handed to verify-oauth-metadata.sh, which compares
+          # the published `issuer` to it literally. A path is the realistic mistake rather than a
+          # theoretical one -- this repo's docs are full of `https://<host>/mcp` URLs, and pasting one
+          # here would build `.../mcp/health`, fail every assertion below and roll back a healthy
+          # deploy. Rejecting `/`, `?` and `#` in the authority also subsumes the trailing slash.
+          case "$PUBLIC_ORIGIN" in
+            https://*) origin_host="${PUBLIC_ORIGIN#https://}" ;;
+            *) echo "::error::PUBLIC_ORIGIN must be an absolute https origin (got '$PUBLIC_ORIGIN')"; exit 1 ;;
+          esac
+          case "$origin_host" in
+            "" | */* | *\?* | *"#"*)
+              echo "::error::PUBLIC_ORIGIN must be scheme and host only -- no path, query, fragment or trailing slash (got '$PUBLIC_ORIGIN')"
+              exit 1
+              ;;
+          esac
+          echo "Target '$TARGET': app=$CONTAINER_APP origin=$PUBLIC_ORIGIN"
+        env:
+          TARGET: ${{ inputs.target }}
+
+      - name: Checkout repository
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+
+      - name: Resolve image tag and GHCR repo
+        id: vars
+        env:
+          INPUT_IMAGE_TAG: ${{ inputs.image_tag }}
+        run: |
+          set -euo pipefail
+          if [ -n "$INPUT_IMAGE_TAG" ]; then
+            tag="$INPUT_IMAGE_TAG"
+          else
+            tag="sha-$(git rev-parse --short HEAD)"
+          fi
+          if ! printf '%s' "$tag" | grep -Eq '^[A-Za-z0-9._-]+$'; then
+            echo "::error::Invalid image tag '$tag' (allowed characters: A-Za-z0-9._-)"
+            exit 1
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "ghcr=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_OUTPUT"
+
+      # Build only when no digest was given AND none was required. A required-but-missing digest must
+      # fail at "Resolve the image digest" WITHOUT building first: a build would push over the GHCR
+      # tag before the failure, mutating the registry for a deploy that is then refused.
+      - name: Log in to GHCR
+        if: ${{ inputs.image_digest == '' && !inputs.require_image_digest }}
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push image to GHCR
+        id: build
+        if: ${{ inputs.image_digest == '' && !inputs.require_image_digest }}
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          file: Dockerfile
+          push: true
+          tags: ${{ steps.vars.outputs.ghcr }}:${{ steps.vars.outputs.tag }}
+
+      # The one digest this run deploys: the build's, or the caller's. Validated so an empty or
+      # malformed value fails here rather than turning the import below into a pull of `…@`.
+      - name: Resolve the image digest
+        id: digest
+        env:
+          GIVEN: ${{ inputs.image_digest }}
+          BUILT: ${{ steps.build.outputs.digest }}
+          REQUIRED: ${{ inputs.require_image_digest }}
+          GIVEN_TAG: ${{ inputs.image_tag }}
+          TAG: ${{ steps.vars.outputs.tag }}
+          TARGET: ${{ inputs.target }}
+        run: |
+          set -euo pipefail
+          if [ "$REQUIRED" = "true" ] && [ -z "$GIVEN" ]; then
+            echo "::error::A digest was required (staging deployed one) but none reached this call. Refusing to build: production would ship an image staging never ran."
+            exit 1
+          fi
+          # A given digest with a DEFAULTED tag would label it `sha-<ref>`, which may name a different
+          # build than the one the digest came from.
+          if [ -n "$GIVEN" ] && [ -z "$GIVEN_TAG" ]; then
+            echo "::error::image_digest requires an explicit image_tag"
+            exit 1
+          fi
+          if [ -n "$GIVEN" ]; then digest="$GIVEN"; source="given by the caller (build skipped)"
+          else digest="$BUILT"; source="built by this run"; fi
+          if ! printf '%s' "$digest" | grep -Eqx 'sha256:[0-9a-f]{64}'; then
+            echo "::error::Image digest '$digest' ($source) is not sha256:<64 hex>"
+            exit 1
+          fi
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+          echo "Deploying $TAG = $digest, $source"
+          echo "**$TARGET**: \`$TAG\` = \`$digest\` ($source)" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Azure login (OIDC)
+        uses: azure/login@a641126d1b8aa4d1fa005f4f92df94a3a4c4c906 # v3
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Capture current image (for rollback)
+        run: |
+          set -euo pipefail
+          az config set extension.use_dynamic_install=yes_without_prompt
+          prev=$(az containerapp show -g "$RESOURCE_GROUP" -n "$CONTAINER_APP" \
+            --query "properties.template.containers[0].image" -o tsv)
+          echo "Previous image: $prev"
+          if [ -z "$prev" ]; then
+            echo "::error::Could not determine the current image; aborting before deploy so rollback stays possible."
+            exit 1
+          fi
+          echo "PREV_IMAGE=$prev" >> "$GITHUB_ENV"
+
+      - name: Import image into the private ACR (server-side)
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          az acr import \
+            --name "$ACR_NAME" \
+            --source "${{ steps.vars.outputs.ghcr }}@${{ steps.digest.outputs.digest }}" \
+            --image "$IMAGE_NAME:${{ steps.vars.outputs.tag }}" \
+            --username "${{ github.actor }}" \
+            --password "$GHCR_TOKEN" \
+            --force
+
+      - name: Update Container App revision
+        run: |
+          set -euo pipefail
+          az containerapp update \
+            --name "$CONTAINER_APP" \
+            --resource-group "$RESOURCE_GROUP" \
+            --image "$ACR_NAME.azurecr.io/$IMAGE_NAME:${{ steps.vars.outputs.tag }}"
+
+      - name: Verify deployment (revision health + smoke)
+        run: |
+          set -euo pipefail
+          latest=$(az containerapp show -g "$RESOURCE_GROUP" -n "$CONTAINER_APP" \
+            --query "properties.latestRevisionName" -o tsv)
+          echo "Latest revision: $latest"
+          prov=""
+          health=""
+          for i in $(seq 1 12); do
+            prov=$(az containerapp revision show -g "$RESOURCE_GROUP" -n "$CONTAINER_APP" --revision "$latest" \
+              --query "properties.provisioningState" -o tsv 2>/dev/null || echo "")
+            health=$(az containerapp revision show -g "$RESOURCE_GROUP" -n "$CONTAINER_APP" --revision "$latest" \
+              --query "properties.healthState" -o tsv 2>/dev/null || echo "")
+            echo "attempt $i: provisioning=$prov health=$health"
+            if [ "$prov" = "Provisioned" ] && { [ "$health" = "Healthy" ] || [ "$health" = "None" ]; }; then
+              break
+            fi
+            sleep 15
+          done
+          if [ "$prov" != "Provisioned" ] || { [ "$health" != "Healthy" ] && [ "$health" != "None" ]; }; then
+            echo "::error::Revision $latest did not become healthy (provisioning=$prov health=$health)"
+            exit 1
+          fi
+          # Smoke (with retries): a freshly-swapped single-revision app may take a short while to
+          # start serving on the public FQDN, so retry before failing (and triggering a rollback).
+          # /health must be 200; unauthenticated /mcp must be 401 (app live + OAuth gate enforced).
+          # curl already emits "000" as the http_code on a connection failure; `|| true` just stops
+          # set -e aborting the loop so we can retry. No sleep after the final attempt.
+          health_code=""
+          for i in $(seq 1 6); do
+            health_code=$(curl -s -o /dev/null -w "%{http_code}" --max-time 20 "$PUBLIC_ORIGIN/health" || true)
+            echo "/health -> ${health_code:-000} (attempt $i)"
+            [ "$health_code" = "200" ] && break
+            [ "$i" -lt 6 ] && sleep 10
+          done
+          [ "$health_code" = "200" ] || { echo "::error::/health not 200 after retries (last: ${health_code:-000})"; exit 1; }
+          mcp_code=""
+          for i in $(seq 1 6); do
+            mcp_code=$(curl -s -o /dev/null -w "%{http_code}" --max-time 20 -X POST "$PUBLIC_ORIGIN/mcp" \
+              -H "Content-Type: application/json" -d '{"jsonrpc":"2.0","id":1,"method":"initialize"}' || true)
+            echo "/mcp (unauthenticated) -> ${mcp_code:-000} (attempt $i)"
+            [ "$mcp_code" = "401" ] && break
+            [ "$i" -lt 6 ] && sleep 10
+          done
+          [ "$mcp_code" = "401" ] || { echo "::error::/mcp unauthenticated not 401 after retries (last: ${mcp_code:-000}, expected 401)"; exit 1; }
+
+      # The step above proves the app is live and the auth gate is enforced (whichever provider is
+      # configured — the 401 contract is provider-independent). It cannot tell whether
+      # the OAuth metadata documents are correct: a wrong `issuer`, a broken
+      # `issuer` <-> `authorization_servers` pairing, a bad `jwks_uri`, an `/oauth/authorize` pointed
+      # at the wrong upstream, a dropped `iss` flag or a null-serialised optional all leave /health at
+      # 200 and the 401 challenge intact while breaking every MCP client at its next
+      # re-authentication. That gap made the rollback below read as assurance it did not provide
+      # (vitally-mcp#110). A separate step, not an extension of the one above, so the health/401 assertions stay
+      # untouched — `failure()` on the rollback step is job-scoped, so this still triggers it.
+      - name: Verify OAuth metadata documents (RFC 8414 / RFC 9728)
+        # Invoked through `bash` rather than relying on the executable bit. The repo is authored on
+        # Windows with core.filemode=false, so a future edit can silently drop the mode and this step
+        # would fail with "Permission denied" on a deploy rather than in review.
+        run: bash .github/scripts/verify-oauth-metadata.sh "$PUBLIC_ORIGIN"
+
+      - name: Roll back on failure
+        if: ${{ failure() && env.PREV_IMAGE != '' }}
+        run: |
+          set -euo pipefail
+          echo "::warning::Deploy verification failed — rolling back to $PREV_IMAGE"
+          az containerapp update \
+            --name "$CONTAINER_APP" \
+            --resource-group "$RESOURCE_GROUP" \
+            --image "$PREV_IMAGE"
+          echo "::error::Deploy failed and was rolled back to $PREV_IMAGE"
+          exit 1

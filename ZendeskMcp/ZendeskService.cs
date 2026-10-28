@@ -1,0 +1,495 @@
+using System.Diagnostics;
+using System.Net;
+using System.Text;
+using System.Text.Json;
+using System.Text.Json.Nodes;
+using Microsoft.Extensions.Caching.Memory;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Options;
+
+namespace ZendeskMcp;
+
+/// <summary>
+/// The one path every Zendesk API call takes. Each call is authorised against the caller's tier
+/// (by HTTP verb, as in <see cref="ToolAuthorizer"/>), made with the caller's own Zendesk credential
+/// (<see cref="ZendeskCredentialProvider"/>), and recorded in the audit trail with the record ids it
+/// returned. Tools build requests and shape results; they never talk to Zendesk any other way.
+/// </summary>
+public class ZendeskService
+{
+    private readonly HttpClient _httpClient;
+    private readonly ZendeskServerOptions _options;
+    private readonly ZendeskCredentialProvider _credentials;
+    private readonly ToolAuthorizer _authorizer;
+    private readonly AuditLogger _audit;
+    private readonly ToolCallAuditContext? _auditContext;
+    private readonly ILogger<ZendeskService> _logger;
+    private readonly ZendeskMetrics? _metrics;
+    private readonly IMemoryCache? _cache;
+    private readonly string _baseUrl;
+
+    public ZendeskService(
+        HttpClient httpClient,
+        IOptions<ZendeskServerOptions> options,
+        ZendeskCredentialProvider credentials,
+        ToolAuthorizer authorizer,
+        AuditLogger audit,
+        ToolCallAuditContext? auditContext = null,
+        ILogger<ZendeskService>? logger = null,
+        ZendeskMetrics? metrics = null,
+        IMemoryCache? cache = null)
+    {
+        _httpClient = httpClient;
+        _options = options.Value;
+        _credentials = credentials;
+        _authorizer = authorizer;
+        _audit = audit;
+        _auditContext = auditContext;
+        _logger = logger ?? Microsoft.Extensions.Logging.Abstractions.NullLogger<ZendeskService>.Instance;
+        _metrics = metrics;
+        _cache = cache;
+        _baseUrl = _options.BaseUrl;
+    }
+
+    /// <summary>The validated Zendesk options, for tools that read the feature switches and limits.</summary>
+    public ZendeskServerOptions Options => _options;
+
+    /// <summary>The credential provider, for the connection tools.</summary>
+    public ZendeskCredentialProvider Credentials => _credentials;
+
+    /// <summary>The account's own origin, e.g. <c>https://fiscaltec.zendesk.com</c>.</summary>
+    public string BaseUrl => _baseUrl;
+
+    public Task<JsonNode> GetAsync(string path, IEnumerable<KeyValuePair<string, string?>>? query = null, string? brandUrl = null, CancellationToken cancellationToken = default) =>
+        SendJsonAsync(HttpMethod.Get, path, query, body: null, brandUrl, headers: null, cancellationToken);
+
+    public Task<JsonNode> PostAsync(string path, JsonNode? body, IEnumerable<KeyValuePair<string, string?>>? query = null, string? brandUrl = null, IReadOnlyDictionary<string, string>? headers = null, CancellationToken cancellationToken = default) =>
+        SendJsonAsync(HttpMethod.Post, path, query, body, brandUrl, headers, cancellationToken);
+
+    public Task<JsonNode> PutAsync(string path, JsonNode? body, IEnumerable<KeyValuePair<string, string?>>? query = null, string? brandUrl = null, CancellationToken cancellationToken = default) =>
+        SendJsonAsync(HttpMethod.Put, path, query, body, brandUrl, headers: null, cancellationToken);
+
+    public Task<JsonNode> DeleteAsync(string path, IEnumerable<KeyValuePair<string, string?>>? query = null, string? brandUrl = null, CancellationToken cancellationToken = default) =>
+        SendJsonAsync(HttpMethod.Delete, path, query, body: null, brandUrl, headers: null, cancellationToken);
+
+    /// <summary>
+    /// POSTs raw bytes (Zendesk's <c>/api/v2/uploads</c> takes the file as the body, not JSON).
+    /// </summary>
+    public async Task<JsonNode> PostBinaryAsync(string path, IEnumerable<KeyValuePair<string, string?>>? query, byte[] content, string contentType, CancellationToken cancellationToken = default)
+    {
+        var url = BuildUrl(path, query, baseUrl: null);
+        using var httpContent = new ByteArrayContent(content);
+        httpContent.Headers.ContentType = System.Net.Http.Headers.MediaTypeHeaderValue.Parse(contentType);
+        var body = await SendAsync(HttpMethod.Post, url, httpContent, headers: null, cancellationToken);
+        return ParseOrEmpty(body);
+    }
+
+    /// <summary>
+    /// Follows Zendesk cursor pagination (<c>page[size]</c>/<c>page[after]</c>, answered with
+    /// <c>meta.has_more</c> and <c>meta.after_cursor</c>) and returns the items of
+    /// <paramref name="arrayProperty"/> across pages, up to <paramref name="maxItems"/> or
+    /// <see cref="ZendeskServerOptions.MaxAutoPageFetches"/> pages, whichever comes first.
+    /// </summary>
+    public async Task<PagedItems> GetAllPagesAsync(string path, IEnumerable<KeyValuePair<string, string?>>? query, string arrayProperty, int maxItems, string? brandUrl = null, int pageSize = 100, CancellationToken cancellationToken = default)
+    {
+        var items = new List<JsonNode>();
+        var baseQuery = (query ?? []).Where(kv => kv.Key is not "page[size]" and not "page[after]").ToList();
+        string? after = null;
+        var pages = 0;
+        var hasMore = false;
+        var sideloads = new JsonObject();
+
+        while (true)
+        {
+            var pageQuery = new List<KeyValuePair<string, string?>>(baseQuery) { new("page[size]", pageSize.ToString(System.Globalization.CultureInfo.InvariantCulture)) };
+            if (after is not null)
+            {
+                pageQuery.Add(new("page[after]", after));
+            }
+
+            var page = await GetAsync(path, pageQuery, brandUrl, cancellationToken);
+            pages++;
+
+            if (page[arrayProperty] is JsonArray array)
+            {
+                foreach (var item in array)
+                {
+                    if (item is not null && items.Count < maxItems)
+                    {
+                        items.Add(item.DeepClone());
+                    }
+                }
+            }
+
+            // Sideloaded collections (users, organizations, groups...) arrive beside the main array on
+            // every page; merge them so a caller paging tickets can still resolve every requester.
+            if (page is JsonObject pageObject)
+            {
+                foreach (var (name, value) in pageObject)
+                {
+                    if (name == arrayProperty || name is "meta" or "links" || value is not JsonArray sideArray)
+                    {
+                        continue;
+                    }
+
+                    if (sideloads[name] is not JsonArray merged)
+                    {
+                        merged = new JsonArray();
+                        sideloads[name] = merged;
+                    }
+
+                    foreach (var element in sideArray)
+                    {
+                        merged.Add(element?.DeepClone());
+                    }
+                }
+            }
+
+            hasMore = page["meta"]?["has_more"]?.GetValue<bool>() == true;
+            after = page["meta"]?["after_cursor"]?.GetValue<string>();
+
+            if (!hasMore || string.IsNullOrEmpty(after) || items.Count >= maxItems)
+            {
+                break;
+            }
+
+            if (pages >= _options.MaxAutoPageFetches)
+            {
+                _auditContext?.MarkPagerTruncated();
+                _metrics?.PagerTruncated(ResourceTypeOf(BuildUrl(path, null, null)));
+                break;
+            }
+        }
+
+        return new PagedItems(items, hasMore ? after : null, hasMore, pages, sideloads);
+    }
+
+    /// <summary>
+    /// Downloads a file from Zendesk — an attachment's <c>content_url</c>. The caller's credential is
+    /// sent only to the account's own origin or one of its brands' Help Center hosts; any other host is
+    /// refused rather than fetched, so a URL taken from ticket content can never carry a token away.
+    /// </summary>
+    public async Task<DownloadedFile> DownloadAsync(string absoluteUrl, CancellationToken cancellationToken = default)
+    {
+        if (!Uri.TryCreate(absoluteUrl, UriKind.Absolute, out var uri) || uri.Scheme != Uri.UriSchemeHttps)
+        {
+            throw new ArgumentException("The attachment URL is not an absolute https URL.");
+        }
+
+        if (!await IsAccountHostAsync(uri.Host, cancellationToken))
+        {
+            throw new ArgumentException($"Refusing to download from '{uri.Host}': it is not this Zendesk account's host.");
+        }
+
+        await AuthorizeAsync(HttpMethod.Get, absoluteUrl, cancellationToken);
+
+        using var request = new HttpRequestMessage(HttpMethod.Get, uri);
+        request.Headers.Authorization = await _credentials.GetAuthorizationAsync(cancellationToken);
+
+        var started = Stopwatch.GetTimestamp();
+        using var response = await _httpClient.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
+        _audit.LogAction(HttpMethod.Get, absoluteUrl, (int)response.StatusCode, _auditContext?.CorrelationId, Stopwatch.GetElapsedTime(started));
+
+        if (!response.IsSuccessStatusCode)
+        {
+            throw new HttpRequestException(
+                $"Zendesk returned {(int)response.StatusCode} {response.ReasonPhrase} for the attachment.",
+                inner: null,
+                statusCode: response.StatusCode);
+        }
+
+        if (response.Content.Headers.ContentLength is { } length && length > _options.MaxAttachmentBytes)
+        {
+            throw new ArgumentException($"The file is {length} bytes; the limit is {_options.MaxAttachmentBytes}.");
+        }
+
+        await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken);
+        using var buffer = new MemoryStream();
+        var chunk = new byte[81920];
+        int read;
+        while ((read = await stream.ReadAsync(chunk, cancellationToken)) > 0)
+        {
+            buffer.Write(chunk, 0, read);
+            if (buffer.Length > _options.MaxAttachmentBytes)
+            {
+                throw new ArgumentException($"The file is larger than the {_options.MaxAttachmentBytes}-byte limit.");
+            }
+        }
+
+        return new DownloadedFile(buffer.ToArray(), response.Content.Headers.ContentType?.MediaType);
+    }
+
+    /// <summary>
+    /// Resolves an optional <c>brand_url</c> argument to a base URL to call, accepting only the
+    /// account's own brands. Null or empty means the default brand.
+    /// </summary>
+    /// <remarks>
+    /// ⚠️ This is a credential boundary, not input tidying. The base URL decides where the caller's
+    /// Zendesk token is sent, and a <c>brand_url</c> can come from a model that has just read untrusted
+    /// ticket or article content. Anything that is not a host <c>/api/v2/brands</c> names is refused.
+    /// </remarks>
+    public async Task<string?> ResolveBrandBaseUrlAsync(string? brandUrl, CancellationToken cancellationToken = default)
+    {
+        if (string.IsNullOrWhiteSpace(brandUrl))
+        {
+            return null;
+        }
+
+        if (!Uri.TryCreate(brandUrl.Trim(), UriKind.Absolute, out var uri) || uri.Scheme != Uri.UriSchemeHttps)
+        {
+            throw new ArgumentException($"brand_url must be an https URL such as 'https://{_options.Subdomain}.zendesk.com' (got '{brandUrl}').");
+        }
+
+        if (!await IsAccountHostAsync(uri.Host, cancellationToken))
+        {
+            throw new ArgumentException($"brand_url '{uri.Host}' is not one of this Zendesk account's brands. Use List_brands to see them.");
+        }
+
+        return $"https://{uri.Host}";
+    }
+
+    /// <summary>Builds an absolute URL from an <c>/api/v2/...</c> path and query, escaping every query value.</summary>
+    public string BuildUrl(string path, IEnumerable<KeyValuePair<string, string?>>? query, string? baseUrl)
+    {
+        if (!path.StartsWith('/'))
+        {
+            throw new ArgumentException("Zendesk paths must start with '/'.", nameof(path));
+        }
+
+        var url = (baseUrl ?? _baseUrl) + path;
+        var pairs = (query ?? [])
+            .Where(kv => kv.Value is not null)
+            .Select(kv => $"{Uri.EscapeDataString(kv.Key)}={Uri.EscapeDataString(kv.Value!)}")
+            .ToList();
+        return pairs.Count == 0 ? url : $"{url}?{string.Join("&", pairs)}";
+    }
+
+    /// <summary>Escapes one caller-supplied path segment (a locale, a key) so it cannot change the path.</summary>
+    public static string Segment(string value) => Uri.EscapeDataString(value);
+
+    private async Task<JsonNode> SendJsonAsync(HttpMethod method, string path, IEnumerable<KeyValuePair<string, string?>>? query, JsonNode? body, string? brandUrl, IReadOnlyDictionary<string, string>? headers, CancellationToken cancellationToken)
+    {
+        var baseUrl = await ResolveBrandBaseUrlAsync(brandUrl, cancellationToken);
+        var url = BuildUrl(path, query, baseUrl);
+        using var content = body is null ? null : new StringContent(body.ToJsonString(), Encoding.UTF8, "application/json");
+        var json = await SendAsync(method, url, content, headers, cancellationToken);
+        return ParseOrEmpty(json);
+    }
+
+    private async Task AuthorizeAsync(HttpMethod method, string url, CancellationToken cancellationToken)
+    {
+        // Server-side RBAC backstop: every Zendesk call passes through here, so checking the caller's
+        // permission against the HTTP verb covers every tool in one place, including the ones whose
+        // [Authorize] attribute names the wrong tier by mistake. A denied attempt is itself worth
+        // recording in the audit trail.
+        try
+        {
+            await _authorizer.EnsureAuthorizedAsync(method, cancellationToken);
+        }
+        catch (UnauthorizedAccessException)
+        {
+            _audit.LogDenied(method, url, _auditContext?.CorrelationId);
+            throw;
+        }
+    }
+
+    private async Task<string> SendAsync(HttpMethod method, string url, HttpContent? content, IReadOnlyDictionary<string, string>? headers, CancellationToken cancellationToken)
+    {
+        await AuthorizeAsync(method, url, cancellationToken);
+
+        using var request = new HttpRequestMessage(method, url);
+        if (content is not null)
+        {
+            request.Content = content;
+        }
+
+        if (headers is not null)
+        {
+            foreach (var (name, value) in headers)
+            {
+                request.Headers.TryAddWithoutValidation(name, value);
+            }
+        }
+
+        request.Headers.Authorization = await _credentials.GetAuthorizationAsync(cancellationToken);
+
+        // Timed from send to body read, so the upstream record carries the duration that lets a slow
+        // composite tool be decomposed into its calls. That includes any 429 waits inside the
+        // rate-limit handler, deliberately: they are part of what the caller waited for.
+        var started = Stopwatch.GetTimestamp();
+        using var response = await _httpClient.SendAsync(request, cancellationToken);
+        var body = await response.Content.ReadAsStringAsync(cancellationToken);
+        var elapsed = Stopwatch.GetElapsedTime(started);
+
+        _audit.LogAction(method, url, (int)response.StatusCode, _auditContext?.CorrelationId, elapsed);
+
+        if (response.StatusCode == HttpStatusCode.Unauthorized)
+        {
+            // The caller's own token was refused, which no retry fixes: forget it and hand them a
+            // fresh connect link instead of Zendesk's bare 401.
+            throw await _credentials.OnTokenRejectedAsync(cancellationToken);
+        }
+
+        if (!response.IsSuccessStatusCode)
+        {
+            // Status and resource TYPE only, never the body or the rest of the path: Zendesk's error
+            // bodies can quote the record that failed validation, and paths carry caller text. The
+            // correlation id joins this line to the audit records, which is where the detail lives.
+            LogBestEffort(() => _logger.Log(ToolCallFailureLog.LevelFor(response.StatusCode),
+                "Zendesk upstream call failed: {Method} {ResourceType} returned {StatusCode} correlation={CorrelationId}",
+                method.Method, ResourceTypeOf(url), (int)response.StatusCode,
+                _auditContext?.CorrelationId ?? "none"));
+
+            // Zendesk explains a refusal in the body ({"error":"RecordInvalid","details":{...}}), and
+            // that explanation is what the model needs to correct its next call.
+            var bodySnippet = string.IsNullOrWhiteSpace(body) ? "(empty body)" : Truncate(body, 1024);
+            throw new HttpRequestException(
+                $"Zendesk returned {(int)response.StatusCode} {response.ReasonPhrase}. Body: {bodySnippet}",
+                inner: null,
+                statusCode: response.StatusCode);
+        }
+
+        // Capture the records touched HERE, from the raw body, because tools reshape it afterwards and
+        // a narrowed result may no longer carry the ids.
+        try
+        {
+            var touched = AuditRecordIds.Extract(body);
+            if (touched.IdsRecorded == 0)
+            {
+                touched = AuditRecordIds.FromMutationUrl(method, url);
+            }
+
+            _auditContext?.RecordUpstream(touched);
+        }
+        catch (Exception)
+        {
+            // The audit sidecar must never be the reason a call fails.
+        }
+
+        return body;
+    }
+
+    private async Task<bool> IsAccountHostAsync(string host, CancellationToken cancellationToken)
+    {
+        var ownHost = new Uri(_baseUrl).Host;
+        if (string.Equals(host, ownHost, StringComparison.OrdinalIgnoreCase))
+        {
+            return true;
+        }
+
+        var brandHosts = await GetBrandHostsAsync(cancellationToken);
+        return brandHosts.Contains(host);
+    }
+
+    // The hosts of the account's brands: each brand's {subdomain}.zendesk.com and its host mapping.
+    // Cached for ten minutes across callers, because the list is account configuration rather than
+    // anything personal, and every Help Center tool with a brand_url consults it.
+    private async Task<HashSet<string>> GetBrandHostsAsync(CancellationToken cancellationToken)
+    {
+        const string cacheKey = "zendesk-brand-hosts";
+        if (_cache is not null && _cache.TryGetValue<HashSet<string>>(cacheKey, out var cached) && cached is not null)
+        {
+            return cached;
+        }
+
+        var hosts = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var brands = await GetAllPagesAsync("/api/v2/brands", null, "brands", maxItems: 1000, cancellationToken: cancellationToken);
+        foreach (var brand in brands.Items)
+        {
+            AddHost(brand?["brand_url"]?.GetValue<string>());
+            var mapping = brand?["host_mapping"]?.GetValue<string>();
+            if (!string.IsNullOrWhiteSpace(mapping))
+            {
+                hosts.Add(mapping.Trim());
+            }
+        }
+
+        _cache?.Set(cacheKey, hosts, TimeSpan.FromMinutes(10));
+        return hosts;
+
+        void AddHost(string? url)
+        {
+            if (!string.IsNullOrWhiteSpace(url) && Uri.TryCreate(url, UriKind.Absolute, out var parsed))
+            {
+                hosts.Add(parsed.Host);
+            }
+        }
+    }
+
+    // The first path segments this code builds, and so the only ones safe to put on the console.
+    private static readonly HashSet<string> KnownResourceTypes = new(StringComparer.Ordinal)
+    {
+        "attachments", "brands", "custom_statuses", "dynamic_content", "groups", "guide", "help_center",
+        "incremental", "macros", "oauth", "organization_memberships", "organizations", "satisfaction_ratings",
+        "search", "slas", "ticket_fields", "ticket_forms", "ticket_metrics", "tickets", "triggers", "uploads",
+        "users",
+    };
+
+    // `/api/v2/tickets/<id>/comments` → `/api/v2/tickets/…`. Only the first segment after /api/v2/ is
+    // fixed by this code rather than by a caller, so it is the only one safe to log to the console.
+    // Read from the RAW string and checked against the allowlist, never from a parsed Uri (which would
+    // normalise dot-segments first); anything else reads `unrecognised`, failing closed.
+    private string ResourceTypeOf(string url)
+    {
+        var marker = url.IndexOf("/api/v2/", StringComparison.Ordinal);
+        if (marker < 0)
+        {
+            return "/api/v2/(unrecognised)";
+        }
+
+        var rest = url.AsSpan(marker + "/api/v2/".Length);
+        var end = rest.IndexOfAny('/', '?', '\\');
+        var segment = (end < 0 ? rest : rest[..end]).ToString();
+        if (segment.EndsWith(".json", StringComparison.Ordinal))
+        {
+            segment = segment[..^5];
+        }
+
+        if (!KnownResourceTypes.Contains(segment))
+        {
+            return "/api/v2/(unrecognised)";
+        }
+
+        return end >= 0 && rest[end] == '/' ? $"/api/v2/{segment}/…" : $"/api/v2/{segment}";
+    }
+
+    private static JsonNode ParseOrEmpty(string json)
+    {
+        if (string.IsNullOrWhiteSpace(json))
+        {
+            return new JsonObject();
+        }
+
+        try
+        {
+            return JsonNode.Parse(json) ?? new JsonObject();
+        }
+        catch (JsonException)
+        {
+            throw new HttpRequestException("Zendesk returned a response that is not JSON.");
+        }
+    }
+
+    // A failure log must never change what the call returns: it sits just before the exception that
+    // carries Zendesk's explanation to the client.
+    private static void LogBestEffort(Action write)
+    {
+        try
+        {
+            write();
+        }
+        catch (Exception)
+        {
+            // Deliberately ignored.
+        }
+    }
+
+    private static string Truncate(string value, int max) =>
+        value.Length <= max ? value : value[..max] + "…(truncated)";
+}
+
+/// <summary>Items gathered across pages, with the cursor to continue from when the pager stopped early.</summary>
+public sealed record PagedItems(IReadOnlyList<JsonNode> Items, string? NextCursor, bool HasMore, int PagesFetched, JsonObject Sideloads);
+
+/// <summary>A downloaded file.</summary>
+public sealed record DownloadedFile(byte[] Content, string? ContentType);
