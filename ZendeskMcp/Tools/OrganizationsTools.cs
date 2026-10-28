@@ -180,6 +180,22 @@ public static class OrganizationsTools
             return Result("already_member", membershipId, isDefault, null, warnings);
         }
 
+        // Live, on an account that allows one organisation per user, creating a second membership does
+        // not fail: Zendesk silently replaces the first. So the account's setting is read before
+        // writing, and a user who belongs elsewhere is only moved when replace_existing says so. A
+        // setting that cannot be read counts as one organisation per user, the reading that changes less.
+        if (memberships.Count > 0 && !await AllowsMultipleOrganizationsAsync(zendesk, cancellationToken))
+        {
+            if (replace_existing != true)
+            {
+                throw new ArgumentException(
+                    $"User {user_id} belongs to organisation {ToolJson.Long(memberships[0]["organization_id"])}, and this Zendesk account allows one organisation per user, so adding them here would remove them from it. "
+                    + "Pass replace_existing true to move them into this organisation.");
+            }
+
+            return await MoveAsync();
+        }
+
         JsonNode? created = null;
         try
         {
@@ -196,9 +212,9 @@ public static class OrganizationsTools
         }
         catch (HttpRequestException ex) when (ex.StatusCode == HttpStatusCode.UnprocessableEntity && memberships.Count > 0)
         {
-            // Unverified against the live API: how Zendesk words the refusal on accounts that allow one
-            // organisation per user. A 422 for a user who already has a membership is read as that.
-            // Not live-tested (a write); Zendesk's documentation does not give the wording either.
+            // A backstop: the setting read above should have caught a one-organisation account, and live
+            // Zendesk replaces rather than refuses there. A 422 for a user who already has a membership
+            // is still read as that refusal.
             if (replace_existing != true)
             {
                 var current = memberships[0];
@@ -207,8 +223,23 @@ public static class OrganizationsTools
                     + "Pass replace_existing true to move them into this organisation instead. Zendesk said: " + ex.Message);
             }
 
-            // Moving the user by setting their organisation, never by deleting the old membership: the
-            // write tier must not need delete rights.
+            return await MoveAsync();
+        }
+
+        var createdDefault = MacroSupport.ParseBool(created?["default"]) == true || make_default == true;
+        AddSharingWarning(warnings, user, organization);
+        if (createdDefault || memberships.Count == 0)
+        {
+            // A first membership becomes the default whatever was asked.
+            AddDefaultWarning(warnings);
+        }
+
+        return Result("created", ToolJson.Long(created?["id"]), createdDefault || memberships.Count == 0, null, warnings);
+
+        // Moving the user by setting their organisation, never by deleting the old membership: the
+        // write tier must not need delete rights.
+        async Task<string> MoveAsync()
+        {
             var previousId = ToolJson.Long(memberships[0]["organization_id"]);
             JsonNode? previous = null;
             if (previousId is { } pid)
@@ -231,16 +262,20 @@ public static class OrganizationsTools
             return Result("moved", ToolJson.Long(moved?["id"]), true,
                 new JsonObject { ["id"] = previousId, ["name"] = previous?["name"]?.DeepClone() }, warnings);
         }
+    }
 
-        var createdDefault = MacroSupport.ParseBool(created?["default"]) == true || make_default == true;
-        AddSharingWarning(warnings, user, organization);
-        if (createdDefault || memberships.Count == 0)
+    /// <summary>Whether the account lets a user belong to several organisations; false when it cannot be read.</summary>
+    private static async Task<bool> AllowsMultipleOrganizationsAsync(ZendeskService zendesk, CancellationToken cancellationToken)
+    {
+        try
         {
-            // A first membership becomes the default whatever was asked.
-            AddDefaultWarning(warnings);
+            var settings = await zendesk.GetAsync("/api/v2/account/settings", cancellationToken: cancellationToken);
+            return MacroSupport.ParseBool(settings["settings"]?["user"]?["multiple_organizations"]) == true;
         }
-
-        return Result("created", ToolJson.Long(created?["id"]), createdDefault || memberships.Count == 0, null, warnings);
+        catch (HttpRequestException)
+        {
+            return false;
+        }
     }
 
     private static void AddSharingWarning(JsonArray warnings, JsonNode user, JsonNode organization)

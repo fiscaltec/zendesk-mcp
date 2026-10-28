@@ -137,8 +137,10 @@ public class OrganizationsToolsTests
 
     private const string EndUser = """{"user":{"id":500,"name":"Ann","role":"end-user"}}""";
 
-    private static Func<RecordedRequest, FakeResponse> Routes(string memberships, Func<RecordedRequest, FakeResponse>? post = null) => r => (r.Method.Method, r.Path) switch
+    private static Func<RecordedRequest, FakeResponse> Routes(string memberships, Func<RecordedRequest, FakeResponse>? post = null, bool? multipleOrganizations = false) => r => (r.Method.Method, r.Path) switch
     {
+        ("GET", "/api/v2/account/settings") when multipleOrganizations is { } multiple =>
+            FakeResponse.Json("{\"settings\":{\"user\":{\"multiple_organizations\":" + (multiple ? "true" : "false") + "}}}"),
         ("GET", "/api/v2/users/500") => FakeResponse.Json(EndUser),
         ("GET", "/api/v2/organizations/7") => FakeResponse.Json($$$"""{"organization":{{{Acme}}}}"""),
         ("GET", "/api/v2/organizations/3") => FakeResponse.Json("""{"organization":{"id":3,"name":"Old Co"}}"""),
@@ -164,7 +166,7 @@ public class OrganizationsToolsTests
     [Fact]
     public async Task AddUserToOrganization_Creates_AndWarnsThatSharedTicketsBecomeVisible()
     {
-        var (fake, zendesk) = Build(Routes("""{"organization_memberships":[{"id":1,"organization_id":3,"default":true}],"meta":{"has_more":false}}"""), allowChanges: true);
+        var (fake, zendesk) = Build(Routes("""{"organization_memberships":[{"id":1,"organization_id":3,"default":true}],"meta":{"has_more":false}}""", multipleOrganizations: true), allowChanges: true);
         using var _ = fake;
 
         var result = Parse(await OrganizationsTools.AddUserToOrganization(zendesk, 500, 7));
@@ -193,17 +195,21 @@ public class OrganizationsToolsTests
         fake.Requests.Single(r => r.Method == HttpMethod.Put).Path.Should().Be("/api/v2/users/500/organization_memberships/55/make_default");
     }
 
-    [Fact]
-    public async Task AddUserToOrganization_SingleOrganizationAccount_RefusesWithoutReplaceExisting()
+    [Theory]
+    [InlineData(false)]
+    [InlineData(null)]
+    public async Task AddUserToOrganization_SingleOrganizationAccount_RefusesWithoutReplaceExisting_BeforeWriting(bool? multipleOrganizations)
     {
+        // Live, Zendesk accepts the second membership and silently drops the first, so the refusal has
+        // to come before any write. A setting that cannot be read (null) is treated the same way.
         var memberships = """{"organization_memberships":[{"id":1,"organization_id":3,"default":true}],"meta":{"has_more":false}}""";
-        var (fake, zendesk) = Build(Routes(memberships, _ => FakeResponse.WithStatus(HttpStatusCode.UnprocessableEntity, """{"error":"RecordInvalid"}""")), allowChanges: true);
+        var (fake, zendesk) = Build(Routes(memberships, multipleOrganizations: multipleOrganizations), allowChanges: true);
         using var _ = fake;
 
         var act = () => OrganizationsTools.AddUserToOrganization(zendesk, 500, 7);
 
         await act.Should().ThrowAsync<ArgumentException>().WithMessage("*replace_existing*");
-        fake.Requests.Should().NotContain(r => r.Method == HttpMethod.Put || r.Method == HttpMethod.Delete);
+        fake.Requests.Should().OnlyContain(r => r.Method == HttpMethod.Get, "nothing may be written without replace_existing");
     }
 
     [Fact]
@@ -214,7 +220,7 @@ public class OrganizationsToolsTests
         var after = """{"organization_memberships":[{"id":2,"organization_id":7,"default":true}],"meta":{"has_more":false}}""";
         var (fake, zendesk) = Build(r => r.Path == "/api/v2/users/500/organization_memberships"
                 ? FakeResponse.Json(calls++ == 0 ? before : after)
-                : Routes(before, _ => FakeResponse.WithStatus(HttpStatusCode.UnprocessableEntity))(r),
+                : Routes(before)(r),
             allowChanges: true);
         using var _ = fake;
 
