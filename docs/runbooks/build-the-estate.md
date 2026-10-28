@@ -35,6 +35,11 @@ Zendesk OAuth client `fiscal_zendesk_mcp`, and the subscription's `NetworkWatche
   Shell has none, so that one block runs on a workstation.
 - **Every block is a `( … )` subshell with `set -euo pipefail`.** A failing command ends the block
   without closing Cloud Shell. Paste one block at a time and read its output before the next.
+  ⚠️ **Only at an interactive prompt or through `bash <file>`.** Bash ignores `set -e` inside any
+  command that is itself part of an `&&`/`||` list, so a tool that wraps what it runs (an agent
+  harness, `eval "…" && …`) silently turns every block into one that carries on past a failure.
+  Found running this from a Claude Code cloud session (2026-10-28, #3); there each block is saved to
+  a file and run with `bash`.
 - **Every block starts by sourcing `~/zendesk-estate.env`** (written by *Set these first*) and
   checking the subscription and tenant, so a block can be run after a Cloud Shell timeout (20 idle
   minutes) without re-pasting anything earlier. `~` is persisted by Cloud Shell; that file holds no
@@ -273,7 +278,8 @@ done
 # Proves gh can reach THIS repo, not just that a login exists. Not `gh auth status`: in a Claude Code
 # cloud session the proxy-injected token serves REST but fails that check (2026-10-28, #3).
 gh api "repos/$GH_REPO" --silent || { echo "gh cannot reach $GH_REPO — run 'gh auth login' first, then re-run this block"; exit 1; }
-[ -d "$REPO_DIR/.git" ] || gh repo clone "$GH_REPO" "$REPO_DIR"
+# git, not `gh repo clone`: that is GraphQL underneath, which cloud sessions refuse. The repo is public.
+[ -d "$REPO_DIR/.git" ] || git clone -q "https://github.com/$GH_REPO.git" "$REPO_DIR"
 git -C "$REPO_DIR" fetch -q origin main && git -C "$REPO_DIR" checkout -q main && git -C "$REPO_DIR" pull -q --ff-only
 )
 ```
