@@ -94,21 +94,37 @@ public class ZendeskService
     /// <paramref name="arrayProperty"/> across pages, up to <paramref name="maxItems"/> or
     /// <see cref="ZendeskServerOptions.MaxAutoPageFetches"/> pages, whichever comes first.
     /// </summary>
+    /// <remarks>
+    /// Some endpoints ignore <c>page[size]</c> and answer with offset pagination instead
+    /// (<c>/api/v2/guide/permission_groups</c> does, 30 a page). When a page carries no <c>meta</c>
+    /// but a <c>next_page</c> URL, its <c>page</c> and <c>per_page</c> values are followed; only those
+    /// two integers are taken from it, never its host or path.
+    /// </remarks>
     public async Task<PagedItems> GetAllPagesAsync(string path, IEnumerable<KeyValuePair<string, string?>>? query, string arrayProperty, int maxItems, string? brandUrl = null, int pageSize = 100, CancellationToken cancellationToken = default)
     {
         var items = new List<JsonNode>();
-        var baseQuery = (query ?? []).Where(kv => kv.Key is not "page[size]" and not "page[after]").ToList();
+        var baseQuery = (query ?? []).Where(kv => kv.Key is not "page[size]" and not "page[after]" and not "page" and not "per_page").ToList();
         string? after = null;
+        (string Page, string PerPage)? offset = null;
         var pages = 0;
         var hasMore = false;
         var sideloads = new JsonObject();
 
         while (true)
         {
-            var pageQuery = new List<KeyValuePair<string, string?>>(baseQuery) { new("page[size]", pageSize.ToString(System.Globalization.CultureInfo.InvariantCulture)) };
-            if (after is not null)
+            var pageQuery = new List<KeyValuePair<string, string?>>(baseQuery);
+            if (offset is { } next)
             {
-                pageQuery.Add(new("page[after]", after));
+                pageQuery.Add(new("page", next.Page));
+                pageQuery.Add(new("per_page", next.PerPage));
+            }
+            else
+            {
+                pageQuery.Add(new("page[size]", pageSize.ToString(System.Globalization.CultureInfo.InvariantCulture)));
+                if (after is not null)
+                {
+                    pageQuery.Add(new("page[after]", after));
+                }
             }
 
             var page = await GetAsync(path, pageQuery, brandUrl, cancellationToken);
@@ -149,10 +165,20 @@ public class ZendeskService
                 }
             }
 
-            hasMore = page["meta"]?["has_more"]?.GetValue<bool>() == true;
-            after = page["meta"]?["after_cursor"]?.GetValue<string>();
+            if (page["meta"] is null && OffsetNextPage(page["next_page"]) is { } nextOffset)
+            {
+                offset = nextOffset;
+                hasMore = true;
+                after = null;
+            }
+            else
+            {
+                offset = null;
+                hasMore = page["meta"]?["has_more"]?.GetValue<bool>() == true;
+                after = page["meta"]?["after_cursor"]?.GetValue<string>();
+            }
 
-            if (!hasMore || string.IsNullOrEmpty(after) || items.Count >= maxItems)
+            if (!hasMore || (offset is null && string.IsNullOrEmpty(after)) || items.Count >= maxItems)
             {
                 break;
             }
@@ -166,6 +192,22 @@ public class ZendeskService
         }
 
         return new PagedItems(items, hasMore ? after : null, hasMore, pages, sideloads);
+    }
+
+    /// <summary>The <c>page</c> and <c>per_page</c> of an offset-paginated <c>next_page</c> URL, or null.</summary>
+    private static (string Page, string PerPage)? OffsetNextPage(JsonNode? nextPage)
+    {
+        if (nextPage is not JsonValue value || !value.TryGetValue<string>(out var url)
+            || !Uri.TryCreate(url, UriKind.Absolute, out var uri))
+        {
+            return null;
+        }
+
+        var parameters = System.Web.HttpUtility.ParseQueryString(uri.Query);
+        return int.TryParse(parameters["page"], System.Globalization.NumberStyles.None, System.Globalization.CultureInfo.InvariantCulture, out var page)
+               && int.TryParse(parameters["per_page"], System.Globalization.NumberStyles.None, System.Globalization.CultureInfo.InvariantCulture, out var perPage)
+            ? (page.ToString(System.Globalization.CultureInfo.InvariantCulture), perPage.ToString(System.Globalization.CultureInfo.InvariantCulture))
+            : null;
     }
 
     /// <summary>
@@ -357,6 +399,9 @@ public class ZendeskService
             }
 
             request.Headers.Authorization = authorization;
+
+            // Zendesk refuses a path without a .json suffix with 415 unless the request asks for JSON.
+            request.Headers.Accept.Add(new System.Net.Http.Headers.MediaTypeWithQualityHeaderValue("application/json"));
 
             // Timed from send to body read, so the upstream record carries the duration that lets a slow
             // composite tool be decomposed into its calls. That includes any 429 waits inside the

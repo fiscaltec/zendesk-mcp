@@ -33,6 +33,19 @@ public class ZendeskServiceTests
     }
 
     [Fact]
+    public async Task EveryRequest_AsksForJson()
+    {
+        using var zendesk = TestHelpers.CreateFakeZendesk(_ => FakeResponse.Json("{}"));
+        var service = TestHelpers.BuildZendeskService(zendesk.Client);
+
+        await service.GetAsync("/api/v2/brands");
+        await service.PostAsync("/api/v2/tickets", new JsonObject());
+
+        zendesk.Requests.Should().AllSatisfy(r => r.Headers["Accept"].Should().Be("application/json",
+            "Zendesk answers 415 to a path without .json unless the request asks for JSON"));
+    }
+
+    [Fact]
     public async Task AZendeskRefusal_SurfacesItsBody()
     {
         using var zendesk = TestHelpers.CreateFakeZendesk(_ => FakeResponse.WithStatus(HttpStatusCode.UnprocessableEntity,
@@ -60,6 +73,28 @@ public class ZendeskServiceTests
         paged.HasMore.Should().BeFalse();
         paged.PagesFetched.Should().Be(2);
         ((JsonArray)paged.Sideloads["users"]!).Should().HaveCount(2);
+    }
+
+    [Fact]
+    public async Task GetAllPages_FollowsAnOffsetNextPage_WhenTheEndpointIgnoresCursors()
+    {
+        // permission_groups answers page[size] with offset pagination; only page and per_page are
+        // taken from next_page, so a foreign host in it never receives the request.
+        using var zendesk = TestHelpers.CreateFakeZendesk(r => r.Query("page") switch
+        {
+            null => FakeResponse.Json("{\"permission_groups\":[{\"id\":1}],\"next_page\":\"https://elsewhere.example/api/v2/guide/permission_groups.json?per_page=30&page=2\",\"count\":2}"),
+            _ => FakeResponse.Json("{\"permission_groups\":[{\"id\":2}],\"next_page\":null,\"count\":2}"),
+        });
+        var service = TestHelpers.BuildZendeskService(zendesk.Client);
+
+        var paged = await service.GetAllPagesAsync("/api/v2/guide/permission_groups", null, "permission_groups", maxItems: 100);
+
+        paged.Items.Select(g => g["id"]!.GetValue<long>()).Should().Equal(1, 2);
+        paged.HasMore.Should().BeFalse();
+        zendesk.Requests.Should().AllSatisfy(r => r.Url.Host.Should().Be("acme.zendesk.com"));
+        zendesk.Requests[1].Query("page").Should().Be("2");
+        zendesk.Requests[1].Query("per_page").Should().Be("30");
+        zendesk.Requests[1].Query("page[size]").Should().BeNull();
     }
 
     [Fact]
