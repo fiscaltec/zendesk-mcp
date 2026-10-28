@@ -1,5 +1,5 @@
 # Copy to terraform.tfvars (gitignored) and fill in, OR supply each value as TF_VAR_<name>.
-# Everything not listed here has a default in variables.tf / entra.tf / keyvault.tf.
+# Everything not listed here, apart from the secrets below, has a default in variables.tf / entra.tf.
 
 # Tag imported into the ACR for the first create (README.md, step 3). Ignored afterwards.
 image_tag         = "<tag>"

@@ -103,15 +103,27 @@ public static class ZendeskConnectEndpoints
             }
 
             ZendeskOAuthClient.TokenResponse token;
-            ZendeskIdentity identity;
             try
             {
                 token = await oauthClient.ExchangeCodeAsync(code, CallbackUrl(ctx, oauth.Value), attempt.CodeVerifier, ctx.RequestAborted);
-                identity = await oauthClient.GetIdentityAsync(token.AccessToken, ctx.RequestAborted);
             }
             catch (ZendeskOAuthException ex)
             {
                 return Page(StatusCodes.Status502BadGateway, "Connection not completed", ex.Message);
+            }
+
+            ZendeskIdentity identity;
+            try
+            {
+                identity = await oauthClient.GetIdentityAsync(token.AccessToken, ctx.RequestAborted);
+            }
+            catch (Exception ex) when (ex is ZendeskOAuthException or HttpRequestException or System.Text.Json.JsonException)
+            {
+                // A token whose owner could not be checked is never stored, and is revoked straight
+                // away like a refused one, rather than left live at Zendesk.
+                await oauthClient.RevokeAsync(token.AccessToken, ctx.RequestAborted);
+                return Page(StatusCodes.Status502BadGateway, "Connection not completed",
+                    ex is ZendeskOAuthException ? ex.Message : "Zendesk could not confirm who this sign-in belongs to. Open your connect link again.");
             }
 
             var refusal = Refusal(identity, attempt.SignInName, zendesk.Value.RequireEmailMatch);

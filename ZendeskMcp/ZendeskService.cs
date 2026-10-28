@@ -383,8 +383,9 @@ public partial class ZendeskService
         for (var attempt = 1; ; attempt++)
         {
             // A fresh message per attempt (a request message cannot be sent twice); the content is
-            // buffered and HttpClient leaves it undisposed, so it can ride the retry.
-            using var request = new HttpRequestMessage(method, url);
+            // buffered and HttpClient leaves it undisposed, so it can ride the retry. Disposing a
+            // message disposes its content, so the content is detached before each message goes.
+            using var request = new DetachingRequest(method, url);
             if (content is not null)
             {
                 request.Content = content;
@@ -484,9 +485,37 @@ public partial class ZendeskService
         return brandHosts.TryGetValue(host, out var canonical) ? canonical : null;
     }
 
+    /// <summary>
+    /// A request message whose disposal leaves its content alone, so the same buffered body can be
+    /// sent again after a 401 (a plain <see cref="HttpRequestMessage"/> disposes its content, and the
+    /// retry would throw <see cref="ObjectDisposedException"/>).
+    /// </summary>
+    private sealed class DetachingRequest(HttpMethod method, string url) : HttpRequestMessage(method, url)
+    {
+        protected override void Dispose(bool disposing)
+        {
+            Content = null;
+            base.Dispose(disposing);
+        }
+    }
+
+    // True for any spelling of an API path a server might route as one: "/api/…", "//api/…",
+    // "/%2Fapi/…" and "/api%2F…". Uri already resolves dot segments and unescapes "%61pi".
+    internal static bool IsApiPath(Uri uri)
+    {
+        var path = Uri.UnescapeDataString(uri.AbsolutePath).Replace('\\', '/');
+        while (path.Contains("//", StringComparison.Ordinal))
+        {
+            path = path.Replace("//", "/", StringComparison.Ordinal);
+        }
+
+        return path.StartsWith("/api/", StringComparison.OrdinalIgnoreCase)
+            || path.Equals("/api", StringComparison.OrdinalIgnoreCase);
+    }
+
     private async Task<DownloadTarget?> CredentialTargetAsync(Uri uri, CancellationToken cancellationToken)
     {
-        if (uri.AbsolutePath.StartsWith("/api/", StringComparison.OrdinalIgnoreCase))
+        if (IsApiPath(uri))
         {
             throw new ArgumentException("Refusing to download an API path; only files can be downloaded.");
         }

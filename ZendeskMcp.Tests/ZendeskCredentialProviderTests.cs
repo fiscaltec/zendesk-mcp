@@ -76,6 +76,26 @@ public class ZendeskCredentialProviderTests
     }
 
     [Fact]
+    public async Task AZendesk401_OnAWrite_RetriesWithTheSameBody()
+    {
+        // The retry re-sends the buffered body; disposing the first request must not dispose it.
+        using var zendesk = TestHelpers.CreateFakeZendesk(request => request.Path switch
+        {
+            "/oauth/tokens" => FakeResponse.Json("{\"access_token\":\"fresh\",\"refresh_token\":\"r2\",\"expires_in\":7200}"),
+            _ when request.Headers["Authorization"] == "Bearer revoked-early" => FakeResponse.WithStatus(HttpStatusCode.Unauthorized),
+            _ => FakeResponse.Json(TestHelpers.GetSampleTicketJson()),
+        });
+        var (service, _) = TestHelpers.BuildUserZendeskService(zendesk.Client, TestHelpers.SampleToken("revoked-early", refreshToken: "r1"));
+
+        var result = await service.PutAsync("/api/v2/tickets/101", new System.Text.Json.Nodes.JsonObject { ["ticket"] = new System.Text.Json.Nodes.JsonObject { ["priority"] = "low" } });
+
+        result["ticket"]!["id"]!.GetValue<long>().Should().Be(101);
+        var puts = zendesk.Requests.Where(r => r.Method == HttpMethod.Put).ToList();
+        puts.Should().HaveCount(2);
+        puts[1].Body.Should().Be(puts[0].Body).And.Contain("\"priority\":\"low\"");
+    }
+
+    [Fact]
     public async Task AZendesk401_ForATokenAlreadyReplaced_RetriesWithTheNewOne_AndForgetsNothing()
     {
         using var zendesk = TestHelpers.CreateFakeZendesk(request =>

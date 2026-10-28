@@ -191,13 +191,19 @@ public class ZendeskServiceTests
         zendesk.Requests.Should().NotContain(r => r.Url.Host == "odd.example");
     }
 
-    [Fact]
-    public async Task ADownload_OfAnApiPath_IsRefused()
+    [Theory]
+    [InlineData("https://acme.zendesk.com/api/v2/users/me.json")]
+    [InlineData("https://acme.zendesk.com//api/v2/users/me.json")]
+    [InlineData("https://acme.zendesk.com/%2Fapi/v2/users/me.json")]
+    [InlineData("https://acme.zendesk.com/api%2Fv2/users/me.json")]
+    [InlineData("https://acme.zendesk.com/API/v2/users/me.json")]
+    [InlineData("https://acme.zendesk.com/x/../api/v2/users/me.json")]
+    public async Task ADownload_OfAnApiPath_IsRefused(string url)
     {
         using var zendesk = TestHelpers.CreateFakeZendesk(_ => FakeResponse.Json("{}"));
         var service = TestHelpers.BuildZendeskService(zendesk.Client);
 
-        var act = () => service.DownloadAsync("https://acme.zendesk.com/api/v2/users/me.json");
+        var act = () => service.DownloadAsync(url);
 
         await act.Should().ThrowAsync<ArgumentException>().WithMessage("*API path*");
         zendesk.Requests.Should().BeEmpty("an image src in an article must not make each reader's token call the API");

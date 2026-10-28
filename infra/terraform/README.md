@@ -125,7 +125,10 @@ export TF_VAR_teams_webhook_url='…'
 # Plan to a file, read it line by line, and apply exactly that file. Everything should read as a
 # create, with the names, hostnames and groups you decided. (An untargeted plan stops at the
 # Container Apps' secret precondition until step 2 — expected.)
+# image_tag and staging_image_tag have no default and are only known after step 3; neither app is
+# in this targeted set, so placeholders satisfy the prompt and change nothing.
 terraform plan -out=foundation.tfplan \
+  -var image_tag=placeholder -var staging_image_tag=placeholder \
   -target=azuread_application_pre_authorized.self \
   -target=azuread_application_api_access.self \
   -target=azuread_application_api_access.msgraph \
@@ -217,7 +220,8 @@ binding, add it to that app's `ignore_changes` rather than applying.
 az ad group member add --group sg-zendesk-readers --member-id 6ba9bf61-e959-4dd9-8a96-d477a35b0d03
 me=$(az ad user show --id dsearle@fiscaltec.com --query id -o tsv)
 for g in readers editors admins; do az ad group member add --group "sg-zendesk-$g" --member-id "$me"; done
-``` Gate 1 (`entra_gate1_group_object_ids`) must name the department groups
+```
+Gate 1 (`entra_gate1_group_object_ids`) must name the department groups
 **directly**: the app-assignment gate ignores nesting, so assigning a tier group would admit only its
 direct members.
 

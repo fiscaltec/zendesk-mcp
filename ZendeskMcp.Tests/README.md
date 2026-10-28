@@ -5,8 +5,8 @@ FluentAssertions + Moq + the ASP.NET Core test host, fully in-process — no Zen
 identity provider, no Key Vault.
 
 ```powershell
-dotnet test ZendeskMcp.sln -c Debug                                  # the summary line carries the total
-dotnet test ZendeskMcp.sln -c Debug --filter-class "*TicketsToolsTests"
+dotnet test --solution ZendeskMcp.sln -c Debug                                  # the summary line carries the total
+dotnet test --solution ZendeskMcp.sln -c Debug --filter-class "*TicketsToolsTests"
 ```
 
 No total is written here: a count in prose is only right on the day it is written.

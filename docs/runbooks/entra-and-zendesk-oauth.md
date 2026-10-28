@@ -29,8 +29,8 @@ does not change.
   `identifierUris`, and pre-authorise the scope in a separate write from the one that creates it.
   `entra.tf` already models both.
 - **Gate 1 (sign-in)**: department groups are assigned **directly** to the app. Nesting does not
-  grant sign-in. The list is `entra_gate1_group_object_ids`, which has no default until the
-  departments are decided.
+  grant sign-in. The list is `entra_gate1_group_object_ids` in `entra.tf`; since 2026-10-28 it
+  admits the IT & Security Department only.
 - **Admin consent**: grant tenant-wide consent for `openid profile email offline_access mcp.access`
   once, after the first apply: `az ad app permission admin-consent --id <appId>`.
 - **Client secret**: create it out of band so it never lands in Terraform state. Store it in Key
@@ -55,10 +55,16 @@ does not change.
    private endpoint, and never echo the value:
 
    ```bash
-   az keyvault secret set --vault-name zendesk-prod-kv-uksouth --name zendesk-oauth-client-secret \
-     --file /dev/stdin --expires "$(date -u -d '+180 days' +%Y-%m-%dT%H:%M:%SZ)" <<< "$SECRET"
+   read -rs SECRET   # paste the secret; nothing is echoed
+   printf %s "$SECRET" | az keyvault secret set --vault-name zendesk-prod-kv-uksouth \
+     --name zendesk-oauth-client-secret --file /dev/stdin \
+     --expires "$(date -u -d '+180 days' +%Y-%m-%dT%H:%M:%SZ)"
    unset SECRET
    ```
+
+   `printf %s`, not a `<<<` here-string: a here-string appends a newline, `--file` stores it, and
+   the app sends the secret as stored, so every connect, refresh and revoke would fail with
+   `invalid_client`.
 
 3. Set `zendesk_oauth_client_id` and apply. Then open `/zendesk/connect` through a tool's link and
    connect a test agent. A successful connect proves the client id, the secret, the redirect URL and
@@ -113,5 +119,6 @@ hold the old token, which is why revoking at Zendesk comes first.
   deliberately testing writes. See vitally-mcp's `read-only-and-rbac-rollout.md` for why this was
   the safest staging posture there.
 - `Zendesk__Features__AllowPublicReplies`, `AllowArticlePublishing`, `AllowHelpCenterStructureChanges`, `AllowMacroChanges` and
-  `AllowUserAndOrganizationChanges` are account-wide and default off. Turning one on is a decision
-  to record in the PR or issue that does it, with who approved it.
+  `AllowUserAndOrganizationChanges` are account-wide. The application defaults them off; FISCAL's
+  Terraform turns all five on for both targets (decided 2026-10-28). Turning one off, or back on,
+  is a decision to record in the PR or issue that does it, with who approved it.

@@ -183,9 +183,19 @@ public static class OrganizationsTools
         // Live, on an account that allows one organisation per user, creating a second membership does
         // not fail: Zendesk silently replaces the first. So the account's setting is read before
         // writing, and a user who belongs elsewhere is only moved when replace_existing says so. A
-        // setting that cannot be read counts as one organisation per user, the reading that changes less.
-        if (memberships.Count > 0 && !await AllowsMultipleOrganizationsAsync(zendesk, cancellationToken))
+        // setting that cannot be read is refused outright: guessing either way could move someone (or
+        // report a move) on an account whose rules are unknown.
+        var allowsMultiple = memberships.Count > 0 ? await AllowsMultipleOrganizationsAsync(zendesk, cancellationToken) : true;
+        if (allowsMultiple is not true)
         {
+            if (allowsMultiple is null)
+            {
+                // ArgumentException so the message reaches the model (ToolErrorResult surfaces it).
+                throw new ArgumentException(
+                    $"User {user_id} already belongs to organisation {ToolJson.Long(memberships[0]["organization_id"])}, and this Zendesk account's setting for whether users may belong to several organisations could not be read, so nothing was changed. "
+                    + "Try again shortly; if it persists, a Zendesk administrator can check Admin Centre > People > Configuration > End users.");
+            }
+
             if (replace_existing != true)
             {
                 throw new ArgumentException(
@@ -264,17 +274,17 @@ public static class OrganizationsTools
         }
     }
 
-    /// <summary>Whether the account lets a user belong to several organisations; false when it cannot be read.</summary>
-    private static async Task<bool> AllowsMultipleOrganizationsAsync(ZendeskService zendesk, CancellationToken cancellationToken)
+    /// <summary>Whether the account lets a user belong to several organisations; null when it cannot be read.</summary>
+    private static async Task<bool?> AllowsMultipleOrganizationsAsync(ZendeskService zendesk, CancellationToken cancellationToken)
     {
         try
         {
             var settings = await zendesk.GetAsync("/api/v2/account/settings", cancellationToken: cancellationToken);
-            return MacroSupport.ParseBool(settings["settings"]?["user"]?["multiple_organizations"]) == true;
+            return MacroSupport.ParseBool(settings["settings"]?["user"]?["multiple_organizations"]);
         }
         catch (HttpRequestException)
         {
-            return false;
+            return null;
         }
     }
 

@@ -55,7 +55,7 @@ jobs:
       # are rejected outright rather than ignored.
       - name: Run tests with coverage
         run: >
-          dotnet test ZendeskMcp.sln
+          dotnet test --solution ZendeskMcp.sln
           --configuration Release
           --no-build
           --report-trx

@@ -25,22 +25,23 @@ A Model Context Protocol (MCP) server in C# giving FISCAL staff access to Zendes
 
 ```powershell
 # Restore + build + run the test suite
-dotnet test ZendeskMcp.sln -c Debug
+dotnet test --solution ZendeskMcp.sln -c Debug
 
 # Run a single test class
-dotnet test ZendeskMcp.sln -c Debug --filter-class "*TicketsToolsTests"
+dotnet test --solution ZendeskMcp.sln -c Debug --filter-class "*TicketsToolsTests"
 
 # Start the server in dev mode: no Entra, no Key Vault, every call made with ONE Zendesk OAuth access token
 $env:OAuth__NoAuth = "true"
+$env:ASPNETCORE_ENVIRONMENT = "Development"   # the development token is refused in any other environment
 $env:Zendesk__Subdomain = "your-subdomain"
 $env:Zendesk__DevelopmentAccessToken = "<a Zendesk OAuth access token>"   # API tokens are being retired
 $env:ASPNETCORE_URLS = "http://localhost:5099"
 dotnet run --project ZendeskMcp/ZendeskMcp.csproj
 ```
 
-`StartupGuards.EnsureDevelopmentTokenIsLocal` refuses the development token unless `OAuth:NoAuth=true` **and** no `Zendesk:KeyVaultUri` is set. Behind real sign-in it would turn a per-user server back into a shared service account, attributing everyone's changes to the token's owner. Do not weaken that guard.
+`StartupGuards.EnsureDevelopmentTokenIsLocal` refuses the development token unless `OAuth:NoAuth=true`, no `Zendesk:KeyVaultUri` is set **and** the host runs in the `Development` environment (there is no `launchSettings.json`, so `dotnet run` alone starts in Production and refuses). Behind real sign-in it would turn a per-user server back into a shared service account, attributing everyone's changes to the token's owner. Do not weaken that guard.
 
-To exercise per-user OAuth locally instead, leave `NoAuth` off, set `Zendesk:OAuthClientId` and `Zendesk:DevelopmentOAuthClientSecret` (in-memory token store; nothing survives a restart), and add `http://localhost:5099/zendesk/callback` to the Zendesk OAuth client's redirect URLs.
+To exercise per-user OAuth locally instead, leave `NoAuth` off, set `Zendesk:OAuthClientId` and `Zendesk:DevelopmentOAuthClientSecret` (in-memory token store; nothing survives a restart), and add `http://localhost:5099/zendesk/callback` to the redirect URLs of a **separate development** Zendesk OAuth client — not `fiscal_zendesk_mcp`, which serves production and must list only the two deployed callbacks (`infra/terraform/README.md`, step 0).
 
 ### Smoke-testing the server
 
@@ -547,7 +548,7 @@ Zendesk ──302──> /zendesk/callback?code&state ──> exchange code ─�
 
 ### Untrusted content
 
-Ticket comments, article bodies and user fields are written by customers and can carry instructions aimed at the model. The defences are layered and each matters: write-tool descriptions say not to act on instructions found in content; `ZendeskServerInstructions` repeats it; the credential boundaries above stop a URL in content from reaching a token; `TicketSearchQuery` neutralises free text so it matches words and never rewrites a filter; and the feature switches keep the widest-reaching actions off.
+Ticket comments, article bodies and user fields are written by customers and can carry instructions aimed at the model. The defences are layered and each matters: write-tool descriptions say not to act on instructions found in content; `ZendeskServerInstructions` repeats it; the credential boundaries above stop a URL in content from reaching a token; `TicketSearchQuery` neutralises free text so it matches words and never rewrites a filter; and the feature switches can hold the widest-reaching actions off (FISCAL's deployment has all five on, so there the tier and the agent's Zendesk role are what limit them).
 
 ## Tools
 
@@ -607,7 +608,7 @@ xUnit v3 on **Microsoft.Testing.Platform** (not VSTest): `global.json` selects t
 
 ## Deployment
 
-The same shape as vitally-mcp — Azure Container Apps (production warm, staging scale-to-zero) in a VNet, private Key Vault, the Vitally estate's private ACR **shared** (`vitallyproducruksouth`, repository `zendesk-mcp`; `infra/terraform/acr.tf` sets out the cross-estate write access that costs), Application Insights behind AMPLS, GitHub Actions deploying through OIDC federated credentials, a staging gate and a release train — defined **greenfield** in `infra/terraform/` (see its README for the apply procedure and pending decisions) and `.github/workflows/`. Nothing has been applied yet.
+The same shape as vitally-mcp — Azure Container Apps (production warm, staging scale-to-zero) in a VNet, private Key Vault, the Vitally estate's private ACR **shared** (`vitallyproducruksouth`, repository `zendesk-mcp`; `infra/terraform/acr.tf` sets out the cross-estate write access that costs), Application Insights behind AMPLS, GitHub Actions deploying through OIDC federated credentials, a staging gate and a release train — defined **greenfield** in `infra/terraform/` (see its README for the apply procedure, the recorded decisions and what is still open) and `.github/workflows/`. Nothing has been applied yet.
 
 ### Freezing deploys
 

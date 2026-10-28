@@ -27,7 +27,7 @@ RG=zendesk-prod-rg-uksouth
 # warm revision keeps the OLD secret. That is invisible until the superseded credential is
 # deleted, and then surfaces as INTERMITTENT invalid_client depending on which revision answers —
 # far harder to diagnose than a clean failure. Same pattern, and same reasoning, as the staging
-# read-only guard in CLAUDE.md.
+# read-only guard in vitally-mcp's CLAUDE.md.
 #
 # ⚠️ `for REV in $(az …)` on its own is NOT this check: a failed or empty listing runs the body
 #    zero times and exits 0, so an outage or a missing role reads exactly like success.

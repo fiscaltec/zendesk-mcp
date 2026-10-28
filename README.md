@@ -64,10 +64,11 @@ Configuration comes from environment variables in deployed targets (double-under
 
 ```powershell
 # Restore + build + run the test suite
-dotnet test ZendeskMcp.sln -c Debug
+dotnet test --solution ZendeskMcp.sln -c Debug
 
 # Start the server in dev mode: no Entra, no Key Vault, every call made with one Zendesk OAuth access token
 $env:OAuth__NoAuth = "true"
+$env:ASPNETCORE_ENVIRONMENT = "Development"   # the development token is refused in any other environment
 $env:Zendesk__Subdomain = "your-subdomain"
 $env:Zendesk__DevelopmentAccessToken = "<a Zendesk OAuth access token>"   # API tokens are being retired
 $env:ASPNETCORE_URLS = "http://localhost:5099"
@@ -133,7 +134,7 @@ Everything vitally-mcp documents about the Entra façade, live group RBAC, the `
 - **No shared credential.** A person with no Zendesk connection gets a connect link, never a call made as someone else. The development API token exists only for unauthenticated local runs; startup refuses it otherwise.
 - **Tokens at rest.** Each person's Zendesk grant is one Key Vault secret, readable only by the server's managed identity. Disconnecting revokes the token at Zendesk and writes a tombstone version. It does not delete the secret, because a soft-deleted name could not be reused until purged. Revoking someone urgently: remove them from the `sg-zendesk-*` groups (takes effect within about a minute while Graph is reachable), and suspend or downgrade them in Zendesk, which invalidates their token there. See [ACCESS.md](ACCESS.md#urgent-revocation).
 - **Credential boundaries in the transport.** `brand_url` arguments and attachment downloads are resolved against the account's own brand hosts (`/api/v2/brands`) before any request is made. Any other host is refused, so a URL taken from ticket or article content can never receive the caller's token.
-- **Untrusted content.** Ticket comments, article bodies and user fields can carry instructions aimed at the model. Write tools tell the model not to act on them, and the server instructions repeat it. The feature switches keep the widest-reaching actions off until an administrator decides otherwise.
+- **Untrusted content.** Ticket comments, article bodies and user fields can carry instructions aimed at the model. Write tools tell the model not to act on them, and the server instructions repeat it. The feature switches can hold the widest-reaching actions off; FISCAL's deployment has all five on, so there an agent's tier and Zendesk role are what limit them.
 - **Audit.** Zendesk's own audit log attributes changes to the agent. This server's trail adds reads, the Entra identity, the tool and its arguments. Upstream response bodies are never logged — tickets carry customer data.
 
 ## Before production

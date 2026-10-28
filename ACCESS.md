@@ -152,7 +152,7 @@ Do all of these, in this order:
 3. **Disable the Entra account and revoke their sessions.** This stops new sign-ins and refreshes.
 4. Optionally, remove their stored token: the Key Vault secret `zendesk-user-<object id>` (or
    `zendesk-staging-user-…`). Write a new version whose value is `{"revoked":true}` rather than
-   deleting it — see the Key Vault section in `CLAUDE.md`.
+   deleting it — see the `KeyVaultZendeskTokenStore` row under *Per-user Zendesk OAuth* in `CLAUDE.md`.
 
 An Entra access token they already hold stays valid until it expires (about 60–90 minutes). Step 2
 is what makes that harmless for Zendesk. If you need to stop all writes for everyone at once, set

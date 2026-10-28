@@ -729,6 +729,14 @@ public static class TicketsTools
         var addTags = Tags(additional_tags, "additional_tags");
         var dropTags = Tags(remove_tags, "remove_tags");
 
+        // Tag changes send the ticket's whole tag list (see below), and drop-down, multi-select and
+        // checkbox values are tags too: sent with custom_fields, that list would still carry each
+        // field's old value and could re-apply it. Two calls keep both changes exact.
+        if ((addTags is not null || dropTags is not null) && custom_fields is { Length: > 0 })
+        {
+            throw new ArgumentException("Change tags (additional_tags, remove_tags) and custom_fields in separate calls: field values are stored as tags, so one call could undo the field change.");
+        }
+
         // Read the ticket first: its type decides the problem-ticket check, and its updated_at lets
         // the update refuse to overwrite a change someone else made in the meantime.
         var current = (await zendesk.GetAsync($"/api/v2/tickets/{Id(ticket_id)}", cancellationToken: cancellationToken))["ticket"]

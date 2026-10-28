@@ -195,21 +195,36 @@ public class OrganizationsToolsTests
         fake.Requests.Single(r => r.Method == HttpMethod.Put).Path.Should().Be("/api/v2/users/500/organization_memberships/55/make_default");
     }
 
-    [Theory]
-    [InlineData(false)]
-    [InlineData(null)]
-    public async Task AddUserToOrganization_SingleOrganizationAccount_RefusesWithoutReplaceExisting_BeforeWriting(bool? multipleOrganizations)
+    [Fact]
+    public async Task AddUserToOrganization_SingleOrganizationAccount_RefusesWithoutReplaceExisting_BeforeWriting()
     {
         // Live, Zendesk accepts the second membership and silently drops the first, so the refusal has
-        // to come before any write. A setting that cannot be read (null) is treated the same way.
+        // to come before any write.
         var memberships = """{"organization_memberships":[{"id":1,"organization_id":3,"default":true}],"meta":{"has_more":false}}""";
-        var (fake, zendesk) = Build(Routes(memberships, multipleOrganizations: multipleOrganizations), allowChanges: true);
+        var (fake, zendesk) = Build(Routes(memberships, multipleOrganizations: false), allowChanges: true);
         using var _ = fake;
 
         var act = () => OrganizationsTools.AddUserToOrganization(zendesk, 500, 7);
 
         await act.Should().ThrowAsync<ArgumentException>().WithMessage("*replace_existing*");
         fake.Requests.Should().OnlyContain(r => r.Method == HttpMethod.Get, "nothing may be written without replace_existing");
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData(true)]
+    public async Task AddUserToOrganization_UnreadableAccountSetting_RefusesEvenWithReplaceExisting(bool? replaceExisting)
+    {
+        // The settings route answers 404 here, so whether users may hold several organisations is
+        // unknown. Guessing either way could move someone or report a move that did not happen.
+        var memberships = """{"organization_memberships":[{"id":1,"organization_id":3,"default":true}],"meta":{"has_more":false}}""";
+        var (fake, zendesk) = Build(Routes(memberships, multipleOrganizations: null), allowChanges: true);
+        using var _ = fake;
+
+        var act = () => OrganizationsTools.AddUserToOrganization(zendesk, 500, 7, replace_existing: replaceExisting);
+
+        await act.Should().ThrowAsync<ArgumentException>().WithMessage("*could not be read*");
+        fake.Requests.Should().OnlyContain(r => r.Method == HttpMethod.Get, "nothing may be written while the account's rule is unknown");
     }
 
     [Fact]

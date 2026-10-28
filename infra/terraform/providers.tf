@@ -30,7 +30,7 @@ provider "azurerm" {
   subscription_id = var.subscription_id
   features {
     key_vault {
-      # Never auto-purge: both vaults have purge protection on.
+      # Never auto-purge: the vault has purge protection on.
       purge_soft_delete_on_destroy = false
     }
   }

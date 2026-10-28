@@ -823,4 +823,16 @@ public class TicketsToolsTests
         var act = () => TicketsTools.UpdateTicket(TestHelpers.BuildZendeskService(fake.Client), 101, additional_tags: ["two words"]);
         await act.Should().ThrowAsync<ArgumentException>().WithMessage("*additional_tags*");
     }
+
+    [Fact]
+    public async Task UpdateTicket_RefusesTagChangesWithCustomFields_BeforeAnyRequest()
+    {
+        // Field values are tags, and a tag change sends the whole list, which would still hold the
+        // field's old value.
+        using var fake = UpdateFake(Ticket101);
+        var act = () => TicketsTools.UpdateTicket(TestHelpers.BuildZendeskService(fake.Client), 101,
+            remove_tags: ["old"], custom_fields: [new TicketCustomFieldInput(7, "opt_b")]);
+        await act.Should().ThrowAsync<ArgumentException>().WithMessage("*separate calls*");
+        fake.Requests.Should().BeEmpty();
+    }
 }

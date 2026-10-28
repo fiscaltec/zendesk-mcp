@@ -236,15 +236,27 @@ public sealed class ZendeskCredentialProvider(
     public async Task<bool> DisconnectAsync(CancellationToken cancellationToken = default)
     {
         var objectId = RequireObjectId();
-        var token = await store.GetAsync(objectId, cancellationToken);
-        if (token is null)
-        {
-            return false;
-        }
 
-        await oauthClient.RevokeAsync(token.AccessToken, cancellationToken);
-        await store.RemoveAsync(objectId, cancellationToken);
-        return true;
+        // Under the person's lock, as refresh and reconnect are: otherwise a refresh already in
+        // flight could save its renewed grant after the tombstone and silently undo the disconnect.
+        var gate = LockFor(objectId);
+        await gate.WaitAsync(cancellationToken);
+        try
+        {
+            var token = await store.GetAsync(objectId, cancellationToken);
+            if (token is null)
+            {
+                return false;
+            }
+
+            await oauthClient.RevokeAsync(token.AccessToken, cancellationToken);
+            await store.RemoveAsync(objectId, cancellationToken);
+            return true;
+        }
+        finally
+        {
+            gate.Release();
+        }
     }
 
     /// <summary>The caller's stored grant without refreshing it, or null.</summary>
