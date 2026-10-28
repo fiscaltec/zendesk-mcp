@@ -137,13 +137,15 @@ that assumes prior conversation is an issue that cannot be worked.
    from one closed as won't-fix or duplicate.
 6. If work stalls, swap the status for `status: blocked` and comment what's blocking.
 
-**What actually gates a merge** — the `Secure branches` ruleset as vitally-mcp runs it (verified
-there 2026-08-18). ⚠️ **This repository needs that ruleset applied before the first merge to `main`** (#2);
-until then nothing below is enforced by GitHub, only by the hook. In vitally-mcp:
-`required_approving_review_count` is **0** — no approving review is needed. What is required is all
+**What actually gates a merge** — the `Secure branches` ruleset (id `26057156`), applied here on
+2026-10-28 as a field-for-field copy of vitally-mcp's (`16293585`), compared rule by rule (#2). It
+covers the default branch: no deletion, no force-push, squash only, and
+`required_approving_review_count` **0** — no approving review is needed. What is required is all
 review threads resolved, the branch up to date with `main` (`strict_required_status_checks_policy`),
-and these checks green: `Analyze (csharp)`, `Validate PR title`, `Build and test (ubuntu-latest,
-net10.0)`, `nuget-vuln`, `image-cve`. Read the ruleset rather than inferring from
+and these checks green: `Analyze (csharp) (csharp)` (CodeQL's real check name — the doubled suffix
+is not a typo, and a required name that never reports blocks every merge), `Validate PR title`,
+`Build and test (ubuntu-latest, net10.0)`, `nuget-vuln`, `image-cve`. Stale reviews are dismissed on
+push. Read it with `gh api repos/fiscaltec/zendesk-mcp/rulesets/26057156` rather than inferring from
 `mergeStateStatus`, which reports `BLOCKED` for unresolved threads and pending checks too.
 
 **That ruleset is not the whole gate.** It says nothing about Copilot, and reading "0 approvals
