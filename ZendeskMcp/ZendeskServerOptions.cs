@@ -32,6 +32,13 @@ public class ZendeskServerOptions
     /// </summary>
     public string? KeyVaultUri { get; set; }
 
+    /// <summary>
+    /// Prefix of each person's token secret (<c>{prefix}{objectId}</c>). Staging sets its own, so a
+    /// person connected through staging is never acting through a token production stored, and a
+    /// staging defect cannot corrupt production's tokens even though the two share a vault.
+    /// </summary>
+    public string TokenSecretPrefix { get; set; } = "zendesk-user-";
+
     /// <summary>The Zendesk OAuth client's unique identifier (Admin Centre → Apps and integrations → APIs → OAuth clients).</summary>
     public string? OAuthClientId { get; set; }
 
@@ -111,6 +118,16 @@ public class ZendeskServerOptions
         DevelopmentEmail = DevelopmentEmail?.Trim();
         DevelopmentApiToken = DevelopmentApiToken?.Trim();
         OAuthScopes = string.IsNullOrWhiteSpace(OAuthScopes) ? "read write" : OAuthScopes.Trim();
+        TokenSecretPrefix = TokenSecretPrefix?.Trim() ?? string.Empty;
+
+        // Key Vault secret names allow only letters, digits and hyphens, and the object id appended
+        // is a GUID, so the prefix must keep to that alphabet and stay well inside the 127 limit.
+        if (TokenSecretPrefix.Length is 0 or > 64
+            || !TokenSecretPrefix.All(c => char.IsAsciiLetterOrDigit(c) || c == '-'))
+        {
+            throw new InvalidOperationException(
+                $"Zendesk:TokenSecretPrefix must be 1-64 letters, digits or hyphens (got '{TokenSecretPrefix}').");
+        }
 
         if (!string.IsNullOrWhiteSpace(KeyVaultUri)
             && (!Uri.TryCreate(KeyVaultUri, UriKind.Absolute, out var vaultUri) || vaultUri.Scheme != Uri.UriSchemeHttps))

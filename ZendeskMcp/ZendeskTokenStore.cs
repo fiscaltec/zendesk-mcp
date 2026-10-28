@@ -21,7 +21,8 @@ public interface IZendeskTokenStore
 }
 
 /// <summary>
-/// Stores one Key Vault secret per person, named <c>zendesk-user-{objectId}</c>.
+/// Stores one Key Vault secret per person, named <c>{TokenSecretPrefix}{objectId}</c>
+/// (<c>zendesk-user-{objectId}</c> in production).
 /// </summary>
 /// <remarks>
 /// <para>
@@ -48,7 +49,7 @@ public sealed class KeyVaultZendeskTokenStore(
     private const string TombstoneValue = "{\"revoked\":true}";
     private readonly ZendeskServerOptions _options = options.Value;
 
-    public static string SecretName(string objectId) => $"zendesk-user-{objectId}";
+    public string SecretName(string objectId) => $"{_options.TokenSecretPrefix}{objectId}";
 
     private static string CacheKey(string objectId) => $"zendesk-token::{objectId}";
 
