@@ -10,7 +10,7 @@ It is built to the same standard as FISCAL's [Vitally MCP server](https://github
 
 ## Features
 
-- **About 45 tools** — tickets (search, count, read, create, update, conversation, attachments), KPI and SLA reporting (metrics summary, SLA summary, SLA queue, CSAT), macros (search, preview, apply, create, update, activate), users and organisations, ticket fields/forms/triggers/brands, and the Help Center (articles, translations, categories, sections, segments, permission groups, images, export). See [Tool catalogue](#tool-catalogue).
+- **44 tools** — tickets (search, count, read, create, update, conversation, attachments), KPI and SLA reporting (metrics summary, SLA summary, SLA queue, CSAT), macros (search, preview, apply, create, update, activate), users and organisations, ticket fields/forms/triggers/brands, and the Help Center (articles, translations, categories, sections, segments, permission groups, images, export). See [Tool catalogue](#tool-catalogue).
 - **Every call is made as you.** Each person connects their own Zendesk account once (per-user Zendesk OAuth). Ticket updates, comments and macro use are attributed to the agent who asked for them, and Zendesk's own role, group and brand restrictions apply on top of this server's permissions. There is no shared Zendesk service account.
 - **Two layers of permission.** Your Entra group decides which tools you see and may call (`zendesk:read` / `zendesk:write`); your Zendesk role decides what Zendesk lets that agent do. Account-wide switches (public replies, article publishing, macro changes, user and organisation changes) are off by default.
 - **Per-user audit trail** in Application Insights, keyed on your Entra object id — including reads, which Zendesk does not log.
@@ -125,6 +125,7 @@ Compared with Swifteq's server: the same tools and parameters (snake_case, so pr
 - Tool names use the Vitally capitalisation (`Search_tickets`).
 - Two Help Center tools are renamed for clarity: `create_article` → `Create_help_center_article` and `get_help_center_article_content` → `Get_help_center_article`.
 - Swifteq's "MCP Server settings" toggles are the `Zendesk:Features:*` switches.
+- One known gap: `![description](file:<name>)` inline images in a ticket comment work for files copied with `attachment_ids`, but not yet for files uploaded through `Request_ticket_attachment_upload`. An upload token carries no URL to place in the comment, so the line is left as text and the tool returns a warning.
 
 ## Security
 
