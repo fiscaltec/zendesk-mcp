@@ -40,6 +40,12 @@ Zendesk OAuth client `fiscal_zendesk_mcp`, and the subscription's `NetworkWatche
   harness, `eval "…" && …`) silently turns every block into one that carries on past a failure.
   Found running this from a Claude Code cloud session (2026-10-28, #3); there each block is saved to
   a file and run with `bash`.
+- **From WSL, `az` must be the Linux build** (`command -v az` → `/usr/bin/az`). By default WSL also
+  searches the Windows PATH, so `az` can be the Windows `az.cmd` (`/mnt/c/…/wbin/az`). Its `-o tsv`
+  output ends in `\r`, which makes every comparison fail with identical-looking values
+  (`]AIL subscription …`, where the `\r` returns the cursor and `]` overwrites the `F`). Install the
+  Linux build with `curl -sL https://aka.ms/InstallAzureCLIDeb | sudo bash`; it keeps its own login
+  and extensions. Found running Phases 7–9 from WSL (2026-10-28, #3).
 - **Every block starts by sourcing `~/zendesk-estate.env`** (written by *Set these first*) and
   checking the subscription and tenant, so a block can be run after a Cloud Shell timeout (20 idle
   minutes) without re-pasting anything earlier. `~` is persisted by Cloud Shell; that file holds no
@@ -272,6 +278,11 @@ az config set extension.use_dynamic_install=yes_without_prompt -o none
 # `az monitor app-insights` (Phases 2, 4, 9) is an extension, not core: install it here, so a missing
 # one fails pre-flight rather than half-way through Phase 2. Every other group used here is core.
 az extension show --name application-insights -o none 2>/dev/null || az extension add --name application-insights -o none
+# The containerapp *extension* replaces the core `az containerapp` commands Phase 9 was tested with
+# (a stale preview one was found installed during the first build, #3). Remove it before building.
+if az extension show --name containerapp -o none 2>/dev/null; then
+  echo "The containerapp extension is installed: run 'az extension remove --name containerapp', then re-run this block"; exit 1
+fi
 # Resource providers the estate uses (Terraform's azurerm registers these itself).
 for ns in Microsoft.App Microsoft.Network Microsoft.KeyVault Microsoft.ManagedIdentity \
           Microsoft.OperationalInsights Microsoft.Insights Microsoft.Storage; do
@@ -345,6 +356,7 @@ else
   echo "NOTE $RG exists: this is a re-run, so the greenfield checks are skipped"
 fi
 nonempty "application-insights extension version" "$(az extension show --name application-insights --query version -o tsv 2>/dev/null || true)"
+expect "containerapp extension absent (core commands only)" 0 "$(az extension list --query "length([?name=='containerapp'])" -o tsv)"
 # Terraform's preconditions on the OAuth origins (entra.tf), so a mistyped env file fails here.
 expect "audience = production origin, no slash" "$PROD_ORIGIN" "$OAUTH_AUDIENCE"
 expect "production resource = origin + /" "$PROD_ORIGIN/" "$OAUTH_RESOURCE"
@@ -961,6 +973,13 @@ so the scanner warns 30 days ahead:
 > never becomes reachable (the block gives up after 5 minutes), the vault may see Cloud Shell's
 > traffic from a different address than `api.ipify.org` reports; run this phase from a workstation
 > instead.
+>
+> ⚠️ **Not on the corporate VPN.** Its DNS answers `privatelink.vaultcore.azure.net` from a private
+> zone that has no record for this vault, so the vault's name returns NXDOMAIN and the window never
+> becomes reachable (`Failed to resolve 'zendesk-prod-kv-uksouth.vault.azure.net'`). WSL resolves
+> through Windows, so a VPN connected in Windows affects WSL too. Check before running 7.2:
+> `nslookup zendesk-prod-kv-uksouth.vault.azure.net` must reach public addresses. Found during the
+> first build (2026-10-28, #3); off the VPN it worked first time.
 
 ### 7.1 Regenerate the Zendesk client secret and capture it
 
@@ -1015,12 +1034,13 @@ case "$KVW_IP" in *.*.*.*) ;; *) fail "egress address '$KVW_IP' is not IPv4"; ex
 az keyvault update -g "$RG" -n "$KV" --default-action Deny -o none          # BEFORE public access
 az keyvault network-rule add -g "$RG" -n "$KV" --ip-address "$KVW_IP/32" -o none
 az keyvault update -g "$RG" -n "$KV" --public-network-access Enabled -o none
-ok=""
+ok=""; last=""
 for i in $(seq 1 20); do
-  az keyvault secret list --vault-name "$KV" -o none 2>/dev/null && { ok=1; break; }
+  last=$(az keyvault secret list --vault-name "$KV" -o none 2>&1) && { ok=1; break; }
   echo "  vault not reachable yet from $KVW_IP (attempt $i)"; sleep 15
 done
-[ -n "$ok" ] || { fail "vault unreachable after 5 minutes — nothing stored"; exit 1; }
+# The last error tells a DNS failure, a network refusal and a role still propagating apart.
+[ -n "$ok" ] || { fail "vault unreachable after 5 minutes — nothing stored. Last error: ${last:0:400}"; exit 1; }
 
 for name in entra-mcp-client-secret:entra-oauth-client-secret zendesk-oauth-client-secret:zendesk-oauth-client-secret; do
   vault_name=${name%%:*}; file="$SECRET_DIR/${name#*:}"
@@ -1061,12 +1081,13 @@ case "$KVW_IP" in *.*.*.*) ;; *) fail "egress address '$KVW_IP' is not IPv4"; ex
 az keyvault update -g "$RG" -n "$KV" --default-action Deny -o none          # BEFORE public access
 az keyvault network-rule add -g "$RG" -n "$KV" --ip-address "$KVW_IP/32" -o none
 az keyvault update -g "$RG" -n "$KV" --public-network-access Enabled -o none
-ok=""
+ok=""; last=""
 for i in $(seq 1 20); do
-  az keyvault secret list --vault-name "$KV" -o none 2>/dev/null && { ok=1; break; }
+  last=$(az keyvault secret list --vault-name "$KV" -o none 2>&1) && { ok=1; break; }
   echo "  vault not reachable yet from $KVW_IP (attempt $i)"; sleep 15
 done
-[ -n "$ok" ] || { fail "vault unreachable after 5 minutes — nothing stored"; exit 1; }
+# The last error tells a DNS failure, a network refusal and a role still propagating apart.
+[ -n "$ok" ] || { fail "vault unreachable after 5 minutes — nothing stored. Last error: ${last:0:400}"; exit 1; }
 az keyvault secret show --vault-name "$KV" --name entra-mcp-client-secret --query value -o tsv \
   | tr -d '\n' > "$SECRET_DIR/entra-oauth-client-secret"
 [ -s "$SECRET_DIR/entra-oauth-client-secret" ] && echo "OK   recovered entra-oauth-client-secret" || { fail "nothing read back"; exit 1; }
@@ -1109,10 +1130,10 @@ Cloud Shell has no Docker, so **build on a workstation** with Docker Desktop (Po
 a clean `main`:
 
 ```powershell
-cd <your clone of fiscaltec/zendesk-mcp>
+cd YOUR_CLONE_OF_ZENDESK_MCP                     # replace; `<…>` placeholders do not parse in PowerShell
 git checkout main; git pull --ff-only; git status --porcelain   # must print nothing
 $tag = "sha-$(git rev-parse --short HEAD)"
-docker login ghcr.io -u <github user>          # password: a PAT with write:packages
+docker login ghcr.io -u YOUR_GITHUB_USER        # replace; password: a PAT with write:packages
 docker build -t "ghcr.io/fiscaltec/zendesk-mcp:$tag" .
 docker push "ghcr.io/fiscaltec/zendesk-mcp:$tag"
 $tag                                            # note it for the next step
@@ -1134,6 +1155,18 @@ read -r -p 'GitHub user owning the read:packages PAT: ' GH_USER && export GH_USE
 
 ```bash
 source ~/zendesk-estate.env; capture_secret ghcr-read-pat
+```
+
+A classic PAT is required (fine-grained tokens cannot read GHCR); if `fiscaltec` enforces SAML SSO,
+authorise it for the organisation or the import fails with 403. **Alternatively, use the `gh` CLI's
+own token** in place of the two lines above — no copy-paste, but its scope is wider (`repo`,
+`read:org`, `gist` plus `read:packages`) and it does not expire, so revoke it afterwards (GitHub
+Settings → Applications → Authorized OAuth Apps → GitHub CLI → Revoke; `gh auth logout` only deletes
+the local copy). Used for the first build (2026-10-28, #3). After
+`gh auth login --hostname github.com --git-protocol https --web --scopes read:packages`:
+
+```bash
+export GH_USER=$(gh api user --jq .login) && source ~/zendesk-estate.env && gh auth token | capture_secret ghcr-read-pat
 ```
 
 Import server-side into the shared registry (public access is off; `az acr import` works regardless).
