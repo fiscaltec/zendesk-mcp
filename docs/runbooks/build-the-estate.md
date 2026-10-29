@@ -1305,6 +1305,7 @@ properties:
       external: true
       targetPort: 8080
       transport: auto
+      allowInsecure: false   # omitted, az sends null, which the 2025-07-01 API rejects (#3)
       traffic:
       - latestRevision: true
         weight: 100
@@ -1459,6 +1460,7 @@ for t in prod:$APP_PROD:1:$IMAGE_TAG staging:$APP_STG:0:$STAGING_IMAGE_TAG; do
   expect "$app ingress external" true "$(c properties.configuration.ingress.external)"
   expect "$app ingress port" 8080 "$(c properties.configuration.ingress.targetPort)"
   expect_ci "$app ingress transport" auto "$(c properties.configuration.ingress.transport)"
+  expect "$app ingress allowInsecure" false "$(c properties.configuration.ingress.allowInsecure)"
   expect "$app traffic" "true 100" "$(c "properties.configuration.ingress.traffic[0].join(' ', [to_string(latestRevision), to_string(weight)])")"
   expect "$app min replicas" "$min" "$(c properties.template.scale.minReplicas)"
   expect "$app max replicas" 1 "$(c properties.template.scale.maxReplicas)"
@@ -1782,10 +1784,9 @@ a step work, update `infra/terraform/` (and this file) to match in the same PR.
 Checked offline against `az` 2.91 help and source where possible; **these could not be**, and are
 the first suspects if a block fails:
 
-- `az containerapp create --yaml` / `job create --yaml` with this exact shape (user-assigned identity
-  keyed by resource id, `registries[].identity`, `secretRef` env, `workloadProfileName` under
-  `properties`). The core module's YAML loader accepts these keys; Cloud Shell may load the
-  `containerapp` *extension* instead, whose loader was not exercised.
+- `az containerapp job create --yaml` with this exact shape (user-assigned identity keyed by resource
+  id, `secretRef` env, `workloadProfileName` under `properties`). Cloud Shell may load the
+  `containerapp` *extension* instead of the core module; neither loader has run this shape.
 - `az role definition create` with `AssignableScopes` set to a single **registry**, as Terraform
   declares it. Microsoft documents a resource-level assignable scope as possible from the command
   line but *not recommended*, so expect it to be accepted; if it is refused, stop and decide —
@@ -1802,6 +1803,14 @@ Found by running it (2026-10-28, #3): `az network private-endpoint dns-zone-grou
 with exit 0 for a group that does not exist, so a `show … || create …` guard never creates it.
 The three zone-group steps guard with `list` instead. Every other `show` used as a guard here was
 checked against a missing name and fails as it should (exit 1 or 3).
+
+Also found by running it (2026-10-29, #3): `az containerapp create --yaml` fills every field the YAML
+leaves out with `null`, and the `2025-07-01` API that `az` 2.91 uses rejects `ingress.allowInsecure:
+null` with `The JSON value could not be converted to System.Boolean` (preflight:
+`ContainerAppInvalidSchema … Path: $`). Each of the other `null`s in the body was tested on its own
+and is accepted. Phase 9.3 therefore sets `allowInsecure: false`, the azurerm default Terraform
+relies on; the rest of the app YAML shape (user-assigned identity keyed by resource id,
+`registries[].identity`, `secretRef` env) passed preflight.
 
 Settled from the `az` 2.91 source, so no longer in doubt: `flow-log create` resolves the watcher from
 `--location` and puts the flow log in its resource group (`NetworkWatcherRG`), and `--retention 30`
