@@ -1767,8 +1767,9 @@ echo "Phase 12 verified"
 ## Phase 13 — GitHub
 
 Repository variables and secrets for `deploy.yml`, `release.yml` and `staging-gate.yml`, and the two
-environments whose names the federated credentials (Phase 4) match. **Not from a Claude Code cloud
-session** — its GitHub proxy refuses these APIs (*How to run it*). `gh` in Cloud Shell, logged in as
+environments whose names the federated credentials (Phase 4) match, each restricted to deploys from
+`main` (the same on both; see `CLAUDE.md`, *GitHub environments and the one deploy identity*). **Not
+from a Claude Code cloud session** — its GitHub proxy refuses these APIs (*How to run it*). `gh` in Cloud Shell, logged in as
 a repository admin (`gh auth login`). All of it is re-runnable.
 
 ```bash
@@ -1784,6 +1785,14 @@ for t in "production:$APP_PROD:$PROD_ORIGIN" "staging:$APP_STG:$STG_ORIGIN"; do
   # Create the environment only if it is missing: a PUT on an existing one can reset its protection
   # rules (required reviewers, wait timer).
   gh api "repos/$GH_REPO/environments/$env" --silent 2>/dev/null || gh api -X PUT "repos/$GH_REPO/environments/$env" --silent
+  # Deploys from `main` only, on BOTH environments. Symmetric on purpose: one identity serves both
+  # targets, so a rule on production that staging lacks is bypassable (CLAUDE.md, "GitHub environments
+  # and the one deploy identity"). Set only while no branch policy exists, so a re-run resets nothing.
+  if [ "$(gh api "repos/$GH_REPO/environments/$env" --jq '.deployment_branch_policy // "none"')" = none ]; then
+    gh api -X PUT "repos/$GH_REPO/environments/$env" --input - --silent <<<'{"deployment_branch_policy":{"protected_branches":false,"custom_branch_policies":true}}'
+  fi
+  [ "$(gh api "repos/$GH_REPO/environments/$env/deployment-branch-policies" --jq '[.branch_policies[] | select(.type == "branch" and .name == "main")] | length')" = 1 ] \
+    || gh api -X POST "repos/$GH_REPO/environments/$env/deployment-branch-policies" -f name=main -f type=branch --silent
   gh variable set CONTAINER_APP --repo "$GH_REPO" --env "$env" --body "$app"
   gh variable set PUBLIC_ORIGIN --repo "$GH_REPO" --env "$env" --body "$origin"   # origin only: no path, no slash
 done
@@ -1803,6 +1812,14 @@ expect "production CONTAINER_APP" "$APP_PROD"    "$(gh variable get CONTAINER_AP
 expect "production PUBLIC_ORIGIN" "$PROD_ORIGIN" "$(gh variable get PUBLIC_ORIGIN --repo "$GH_REPO" --env production)"
 expect "staging CONTAINER_APP"    "$APP_STG"     "$(gh variable get CONTAINER_APP --repo "$GH_REPO" --env staging)"
 expect "staging PUBLIC_ORIGIN"    "$STG_ORIGIN"  "$(gh variable get PUBLIC_ORIGIN --repo "$GH_REPO" --env staging)"
+# The same protection on both, and nothing else: a reviewer or wait timer on one only is the shared-
+# identity bypass (CLAUDE.md), so it fails here rather than passing unnoticed.
+for env in production staging; do
+  expect "$env protection rules (exactly)" branch_policy \
+    "$(gh api "repos/$GH_REPO/environments/$env" --jq '[.protection_rules[].type] | sort | join(",")')"
+  expect "$env deploys allowed from" "branch:main" \
+    "$(gh api "repos/$GH_REPO/environments/$env/deployment-branch-policies" --jq '[.branch_policies[] | "\(.type):\(.name)"] | sort | join(",")')"
+done
 echo "Phase 13 verified"
 )
 ```
