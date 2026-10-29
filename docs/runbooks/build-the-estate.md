@@ -1626,16 +1626,72 @@ done
 
 ⚠️ **The CNAME must be DNS-only (grey cloud).** Proxying it breaks managed-certificate issuance.
 
-**11.2 Bind** once both records resolve. `hostname add` is guarded; `bind` is re-runnable.
+**Or create them through the Cloudflare API**, from any shell (Cloud Shell, WSL, a Claude Code cloud
+session) instead of the dashboard. It needs an API token scoped to **Zone → DNS → Edit** on
+`fiscaltec.com` only — create one under Cloudflare → My Profile → API Tokens, short-lived, and delete
+it afterwards. Existing records of the same name and type are left alone and reported, never
+overwritten. The token is read from a header file, so it never appears in a process list. Capture it
+on its own line:
+
+```bash
+source ~/zendesk-estate.env; capture_secret cf-dns-token
+```
 
 ```bash
 ( set -euo pipefail; source ~/zendesk-estate.env; assert_context
+[ -s "$SECRET_DIR/cf-dns-token" ] || { fail "capture the Cloudflare token first"; exit 1; }
+umask 077
+trap 'rm -f "$SECRET_DIR/cf-dns-token" "$SECRET_DIR/cf-auth-header"' EXIT   # removed on failure too
+printf 'Authorization: Bearer %s\n' "$(cat "$SECRET_DIR/cf-dns-token")" > "$SECRET_DIR/cf-auth-header"
+API=https://api.cloudflare.com/client/v4
+cf() { curl -sS --fail-with-body -H @"$SECRET_DIR/cf-auth-header" -H 'Content-Type: application/json' "$@"; }
+count() { python3 -c 'import json,sys; print(len(json.load(sys.stdin)["result"]))'; }
+ZONE_NAME=${PROD_HOST#*.}
+ZONE=$(cf "$API/zones?name=$ZONE_NAME" | python3 -c 'import json,sys; r=json.load(sys.stdin)["result"]; print(r[0]["id"] if len(r) == 1 else "")')
+nonempty "Cloudflare zone id for $ZONE_NAME" "$ZONE"
+VID=$(az containerapp env show -g "$RG" -n "$CAE" --query properties.customDomainConfiguration.customDomainVerificationId -o tsv)
+nonempty "verification id" "$VID"
+for p in "$PROD_HOST:$APP_PROD" "$STG_HOST:$APP_STG"; do
+  host=${p%%:*}; app=${p#*:}
+  fqdn=$(az containerapp show -g "$RG" -n "$app" --query properties.configuration.ingress.fqdn -o tsv)
+  nonempty "$app default FQDN" "$fqdn"
+  for rec in "CNAME|$host|$fqdn" "TXT|asuid.$host|\"$VID\""; do
+    IFS='|' read -r type name content <<< "$rec"
+    if [ "$(cf "$API/zones/$ZONE/dns_records?type=$type&name=$name" | count)" != 0 ]; then
+      echo "exists  $type $name — left as is; 11.2 checks what it resolves to"; continue
+    fi
+    body=$(python3 -c 'import json,sys
+t, n, c = sys.argv[1:4]
+b = {"type": t, "name": n, "content": c, "ttl": 1, "comment": "Zendesk MCP custom domain (fiscaltec/zendesk-mcp#3)"}
+if t == "CNAME": b["proxied"] = False   # DNS only: proxying breaks managed-certificate issuance
+print(json.dumps(b))' "$type" "$name" "$content")
+    cf -X POST "$API/zones/$ZONE/dns_records" -d "$body" -o /dev/null
+    echo "created $type $name"
+  done
+done
+)
+```
+
+Delete the token in Cloudflare once the records exist; the block has already removed its local copy.
+
+**11.2 Bind** once both records resolve. `hostname add` is guarded; `bind` is re-runnable. The records
+are read over DNS-over-HTTPS from Cloudflare's public resolver, not with `dig`, so the check works
+wherever only HTTPS gets out (a Claude Code cloud session has neither `dig` nor outbound port 53).
+From a cloud session, allow `cloudflare-dns.com` — and `api.cloudflare.com` for the API block above —
+under the environment's *Allowed domains*; a refused lookup prints `curl: (22) … 403` and a `FAIL`.
+
+```bash
+( set -euo pipefail; source ~/zendesk-estate.env; assert_context
+doh() {  # doh <name> <CNAME|TXT> — first answer of that type from 1.1.1.1 over HTTPS, quotes stripped
+  curl -fsS --max-time 20 -H 'accept: application/dns-json' "https://cloudflare-dns.com/dns-query?name=$1&type=$2" \
+    | python3 -c 'import json,sys; a=[x["data"] for x in json.loads(sys.stdin.read() or "{}").get("Answer", []) if x["type"] == {"CNAME": 5, "TXT": 16}[sys.argv[1]]]; print(a[0].strip(chr(34)) if a else "")' "$2"
+}
 VID=$(az containerapp env show -g "$RG" -n "$CAE" --query properties.customDomainConfiguration.customDomainVerificationId -o tsv)
 for p in "$PROD_HOST:$APP_PROD" "$STG_HOST:$APP_STG"; do
   host=${p%%:*}; app=${p#*:}
   fqdn=$(az containerapp show -g "$RG" -n "$app" --query properties.configuration.ingress.fqdn -o tsv)
-  expect "$host CNAME" "$fqdn." "$(dig +short CNAME "$host" @1.1.1.1 | head -1)"
-  expect "asuid.$host TXT" "$VID" "$(dig +short TXT "asuid.$host" @1.1.1.1 | tr -d '"' | head -1)"
+  expect "$host CNAME" "$fqdn." "$(doh "$host" CNAME)"
+  expect "asuid.$host TXT" "$VID" "$(doh "asuid.$host" TXT)"
   [ "$(az containerapp hostname list -g "$RG" -n "$app" --query "length([?name=='$host'])" -o tsv)" = 1 ] \
     || az containerapp hostname add -g "$RG" -n "$app" --hostname "$host" -o none
   az containerapp hostname bind -g "$RG" -n "$app" --hostname "$host" --environment "$CAE" --validation-method CNAME -o none
