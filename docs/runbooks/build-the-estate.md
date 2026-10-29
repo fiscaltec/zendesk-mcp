@@ -1863,12 +1863,17 @@ Then, by hand, for each origin (staging stays read-only, so use read tools):
 2. Call `Get_zendesk_connection`, follow the connect link, connect your own Zendesk agent account.
 3. Call a read tool (`List_brands`) and confirm it runs as you.
 4. Confirm the audit record arrived — query the **workspace**, not `az monitor app-insights query`,
-   which cannot resolve `AppEvents`:
+   which cannot resolve `AppEvents`. Through ARM (`az rest` to the workspace's `/api/query`), not
+   `az monitor log-analytics query`: that needs the preview-only `log-analytics` extension, which
+   dynamic install will not always add (#3). This route needs nothing beyond core `az`. Note the
+   response's capitalised `Tables`/`Rows`.
 
 ```bash
 ( set -euo pipefail; source ~/zendesk-estate.env; assert_context
-WS=$(az monitor log-analytics workspace show -g "$RG" -n "$LAW" --query customerId -o tsv)
-n=$(az monitor log-analytics query -w "$WS" --analytics-query "AppEvents | where TimeGenerated > ago(1h) and Name == 'ZendeskToolCall' | summarize count() by AppRoleName" -o tsv)
+LAW_ID=$(az monitor log-analytics workspace show -g "$RG" -n "$LAW" --query id -o tsv)
+body=$(python3 -c 'import json; print(json.dumps({"query": "AppEvents | where TimeGenerated > ago(1h) and Name == \"ZendeskToolCall\" | summarize count() by AppRoleName", "timespan": "PT1H"}))')
+n=$(az rest --method post --url "https://management.azure.com$LAW_ID/api/query?api-version=2020-08-01" \
+      --body "$body" --query "Tables[0].Rows" -o tsv)
 nonempty "ZendeskToolCall records in the last hour, by target" "$n"
 echo "$n"
 )
