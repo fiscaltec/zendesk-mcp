@@ -5,10 +5,11 @@ network, monitoring, vault, identity, Entra app and groups, both Container Apps 
 then the out-of-band steps that were always manual (secrets, the first image, the Graph grant, admin
 consent, custom domains, tier membership, GitHub).
 
-> ⚠️ **Written 2026-10-28 from `infra/terraform/*.tf` and NOT yet executed against Azure.** No command
-> here has been run: the authoring session had no Azure access. Flags were checked against the
-> `az` 2.91 help text and source where that was possible offline; the ones that could not be are
-> listed under [Unverified `az` behaviour](#unverified-az-behaviour). **Stop at the first `FAIL`, the
+> ⚠️ **Written 2026-10-28 from `infra/terraform/*.tf`, then run end to end on 2026-10-28/29 (#3)** —
+> from a Claude Code cloud session, with Phases 7, 8, 9.3 and 13 run from WSL — except 9.4 (the
+> scanner Job), which waits on the Teams webhook. Every fix that run needed is in this file (PR #16).
+> What is still unproven is listed under [Unverified `az` behaviour](#unverified-az-behaviour).
+> **Stop at the first `FAIL`, the
 > first error, or the first output you did not expect**, fix the cause (here *and* in this file),
 > and re-run that block. Do not push on past a failure to "see what happens".
 
@@ -1904,23 +1905,21 @@ a step work, update `infra/terraform/` (and this file) to match in the same PR.
 
 ## Unverified `az` behaviour
 
-Checked offline against `az` 2.91 help and source where possible; **these could not be**, and are
-the first suspects if a block fails:
+**Still unproven** after the first build — the first suspects if one of these blocks fails:
 
-- `az containerapp job create --yaml` with this exact shape (user-assigned identity keyed by resource
-  id, `secretRef` env, `workloadProfileName` under `properties`). Cloud Shell may load the
-  `containerapp` *extension* instead of the core module; neither loader has run this shape.
-- `az role definition create` with `AssignableScopes` set to a single **registry**, as Terraform
-  declares it. Microsoft documents a resource-level assignable scope as possible from the command
-  line but *not recommended*, so expect it to be accepted; if it is refused, stop and decide —
-  widening it to the Vitally RG changes the record.
-- Graph `PATCH /applications` with the whole `api` object on each write — written so it works whether
-  Graph merges or replaces, but not run.
-- The Key Vault window from Cloud Shell: whether the vault sees Cloud Shell's traffic from the address
-  `api.ipify.org` reports.
-- `az containerapp env certificate list --managed-certificates-only` reporting
-  `properties.subjectName`/`provisioningState` as queried.
-- `gh variable get` (needs a recent `gh`; Cloud Shell's should have it).
+- `az containerapp job create --yaml` (9.4, not yet run). The app YAML's lesson applies: an omitted
+  field is sent as `null` (below), so preflight-validate the Job body before creating it.
+- The Key Vault window **from Cloud Shell** — whether the vault sees Cloud Shell's traffic from the
+  address `api.ipify.org` reports. Phase 7 ran from WSL instead, where it worked off the VPN.
+- The optional Cloudflare API block in 11.1 — tested against a stub; the live records were created
+  through the Cloudflare connector.
+
+**Settled by the first build (2026-10-28/29, #3):** `az role definition create` accepted
+`AssignableScopes` on the single registry, as `acr.tf` declares (Phase 4); Graph accepted
+`PATCH /applications` carrying the whole `api` object on each write, and both ordering constraints
+held (Phase 6); `az containerapp env certificate list --managed-certificates-only` reports
+`properties.subjectName`/`provisioningState` as queried (Phase 11); `gh variable get` works (Phase 13,
+from WSL).
 
 Found by running it (2026-10-28, #3): `az network private-endpoint dns-zone-group show` answers `{}`
 with exit 0 for a group that does not exist, so a `show … || create …` guard never creates it.
