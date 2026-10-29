@@ -32,8 +32,9 @@ Zendesk OAuth client `fiscal_zendesk_mcp`, and the subscription's `NetworkWatche
 - **Shell: Azure Cloud Shell (Bash).** The owner works on Windows; Cloud Shell gives a Linux `bash`
   with `az`, `gh`, `git`, `curl`, `python3` and `dig` already installed, so nothing needs installing
   locally and no Terraform is needed. Open it from the portal (`>_`) and choose **Bash**, not
-  PowerShell. The one exception is building the first image (Phase 8), which needs Docker — Cloud
-  Shell has none, so that one block runs on a workstation.
+  PowerShell. Building the first image (Phase 8) needs Docker, which Cloud Shell lacks, so that runs
+  on a workstation. The first build (#3) ran from a Claude Code cloud session instead, with Phases 7,
+  8, 9.3 and 13 run from WSL on a workstation — see the bullets below for what each needed.
 - **Every block is a `( … )` subshell with `set -euo pipefail`.** A failing command ends the block
   without closing Cloud Shell. Paste one block at a time and read its output before the next.
   ⚠️ **Only at an interactive prompt or through `bash <file>`.** Bash ignores `set -e` inside any
@@ -46,7 +47,7 @@ Zendesk OAuth client `fiscal_zendesk_mcp`, and the subscription's `NetworkWatche
   output ends in `\r`, which makes every comparison fail with identical-looking values
   (`]AIL subscription …`, where the `\r` returns the cursor and `]` overwrites the `F`). Install the
   Linux build with `curl -sL https://aka.ms/InstallAzureCLIDeb | sudo bash`; it keeps its own login
-  and extensions. Found running Phases 7–9 from WSL (2026-10-28, #3).
+  and extensions. Found running Phases 7, 8 and 9.3 from WSL (2026-10-28/29, #3).
 - **From a Claude Code cloud session, Phase 13 cannot run.** Its GitHub proxy refuses the Actions
   variables, secrets and environments APIs (`HTTP 403: Access to this GitHub Actions path is not
   permitted through this proxy`) for every client, `gh api` included; other Actions paths, such as
@@ -297,8 +298,9 @@ for ns in Microsoft.App Microsoft.Network Microsoft.KeyVault Microsoft.ManagedId
     || az provider register --namespace "$ns" --wait -o none
 done
 # A clone of the repo, for scan/run.py (Phase 9) and the verification scripts (Phase 14).
-# Proves gh can reach THIS repo, not just that a login exists. Not `gh auth status`: in a Claude Code
-# cloud session the proxy-injected token serves REST but fails that check (2026-10-28, #3).
+# gh is needed later (Phase 13); this proves it can reach THIS repo. It does not prove admin rights,
+# which Phase 13 needs. Not `gh auth status`: in a Claude Code cloud session the proxy-injected token
+# serves REST but fails that check (2026-10-28, #3).
 gh api "repos/$GH_REPO" --silent || { echo "gh cannot reach $GH_REPO — run 'gh auth login' first, then re-run this block"; exit 1; }
 # git, not `gh repo clone`: that is GraphQL underneath, which cloud sessions refuse. The repo is public.
 [ -d "$REPO_DIR/.git" ] || git clone -q "https://github.com/$GH_REPO.git" "$REPO_DIR"
@@ -1093,7 +1095,7 @@ for i in $(seq 1 20); do
   echo "  vault not reachable yet from $KVW_IP (attempt $i)"; sleep 15
 done
 # The last error tells a DNS failure, a network refusal and a role still propagating apart.
-[ -n "$ok" ] || { fail "vault unreachable after 5 minutes — nothing stored. Last error: ${last:0:400}"; exit 1; }
+[ -n "$ok" ] || { fail "vault unreachable after 5 minutes — nothing read back. Last error: ${last:0:400}"; exit 1; }
 az keyvault secret show --vault-name "$KV" --name entra-mcp-client-secret --query value -o tsv \
   | tr -d '\n' > "$SECRET_DIR/entra-oauth-client-secret"
 [ -s "$SECRET_DIR/entra-oauth-client-secret" ] && echo "OK   recovered entra-oauth-client-secret" || { fail "nothing read back"; exit 1; }
@@ -1644,14 +1646,16 @@ source ~/zendesk-estate.env; capture_secret cf-dns-token
 ```
 
 ```bash
-( set -euo pipefail; source ~/zendesk-estate.env; assert_context
+( set -euo pipefail; source ~/zendesk-estate.env
+trap 'rm -f "$SECRET_DIR/cf-dns-token" "$SECRET_DIR/cf-auth-header"' EXIT   # set first: removed on any failure
+assert_context
 [ -s "$SECRET_DIR/cf-dns-token" ] || { fail "capture the Cloudflare token first"; exit 1; }
 umask 077
-trap 'rm -f "$SECRET_DIR/cf-dns-token" "$SECRET_DIR/cf-auth-header"' EXIT   # removed on failure too
 printf 'Authorization: Bearer %s\n' "$(cat "$SECRET_DIR/cf-dns-token")" > "$SECRET_DIR/cf-auth-header"
 API=https://api.cloudflare.com/client/v4
 cf() { curl -sS --fail-with-body -H @"$SECRET_DIR/cf-auth-header" -H 'Content-Type: application/json' "$@"; }
-count() { python3 -c 'import json,sys; print(len(json.load(sys.stdin)["result"]))'; }
+# Exits non-zero unless Cloudflare reports success with a list, so a refused lookup never reads as "0" or "exists".
+count() { python3 -c 'import json,sys; d=json.load(sys.stdin); r=d.get("result"); sys.exit(1) if not (d.get("success") and isinstance(r, list)) else print(len(r))'; }
 ZONE_NAME=${PROD_HOST#*.}
 ZONE=$(cf "$API/zones?name=$ZONE_NAME" | python3 -c 'import json,sys; r=json.load(sys.stdin)["result"]; print(r[0]["id"] if len(r) == 1 else "")')
 nonempty "Cloudflare zone id for $ZONE_NAME" "$ZONE"
@@ -1663,15 +1667,19 @@ for p in "$PROD_HOST:$APP_PROD" "$STG_HOST:$APP_STG"; do
   nonempty "$app default FQDN" "$fqdn"
   for rec in "CNAME|$host|$fqdn" "TXT|asuid.$host|\"$VID\""; do
     IFS='|' read -r type name content <<< "$rec"
-    if [ "$(cf "$API/zones/$ZONE/dns_records?type=$type&name=$name" | count)" != 0 ]; then
-      echo "exists  $type $name — left as is; 11.2 checks what it resolves to"; continue
-    fi
+    n=$(cf "$API/zones/$ZONE/dns_records?type=$type&name=$name" | count) \
+      || { fail "could not read $type $name from Cloudflare (token scope, rate limit or network)"; exit 1; }
+    case "$n" in
+      0) ;;
+      [1-9]*) echo "exists  $type $name — left as is; 11.2 checks what it resolves to"; continue ;;
+      *) fail "could not read $type $name from Cloudflare"; exit 1 ;;
+    esac
     body=$(python3 -c 'import json,sys
 t, n, c = sys.argv[1:4]
 b = {"type": t, "name": n, "content": c, "ttl": 1, "comment": "Zendesk MCP custom domain (fiscaltec/zendesk-mcp#3)"}
 if t == "CNAME": b["proxied"] = False   # DNS only: proxying breaks managed-certificate issuance
 print(json.dumps(b))' "$type" "$name" "$content")
-    cf -X POST "$API/zones/$ZONE/dns_records" -d "$body" -o /dev/null
+    out=$(cf -X POST "$API/zones/$ZONE/dns_records" -d "$body") || { fail "create $type $name refused: ${out:0:400}"; exit 1; }
     echo "created $type $name"
   done
 done
@@ -1699,6 +1707,7 @@ doh() {  # doh <name> <CNAME|TXT> — first answer of that type from 1.1.1.1 ove
     | python3 -c 'import json,sys; a=[x["data"] for x in json.loads(sys.stdin.read() or "{}").get("Answer", []) if x["type"] == {"CNAME": 5, "TXT": 16}[sys.argv[1]]]; print(a[0].strip(chr(34)) if a else "")' "$2"
 }
 VID=$(az containerapp env show -g "$RG" -n "$CAE" --query properties.customDomainConfiguration.customDomainVerificationId -o tsv)
+nonempty "verification id" "$VID"
 for p in "$PROD_HOST:$APP_PROD" "$STG_HOST:$APP_STG"; do
   host=${p%%:*}; app=${p#*:}
   fqdn=$(az containerapp show -g "$RG" -n "$app" --query properties.configuration.ingress.fqdn -o tsv)
@@ -1789,7 +1798,10 @@ for t in "production:$APP_PROD:$PROD_ORIGIN" "staging:$APP_STG:$STG_ORIGIN"; do
   # Deploys from `main` only, on BOTH environments. Symmetric on purpose: one identity serves both
   # targets, so a rule on production that staging lacks is bypassable (CLAUDE.md, "GitHub environments
   # and the one deploy identity"). Set only while no branch policy exists, so a re-run resets nothing.
-  if [ "$(gh api "repos/$GH_REPO/environments/$env" --jq '.deployment_branch_policy // "none"')" = none ]; then
+  # That PUT deliberately replaces any other rule (a reviewer, a wait timer): the Verify allows
+  # `branch_policy` and nothing else, on both.
+  policy=$(gh api "repos/$GH_REPO/environments/$env" --jq '.deployment_branch_policy // "none"')
+  if [ "$policy" = none ]; then
     gh api -X PUT "repos/$GH_REPO/environments/$env" --input - --silent <<<'{"deployment_branch_policy":{"protected_branches":false,"custom_branch_policies":true}}'
   fi
   [ "$(gh api "repos/$GH_REPO/environments/$env/deployment-branch-policies" --jq '[.branch_policies[] | select(.type == "branch" and .name == "main")] | length')" = 1 ] \
@@ -1877,6 +1889,9 @@ n=$(az rest --method post --url "https://management.azure.com$LAW_ID/api/query?a
       --body "$body" --query "Tables[0].Rows" -o tsv)
 nonempty "ZendeskToolCall records in the last hour, by target" "$n"
 echo "$n"
+for app in "$APP_PROD" "$APP_STG"; do   # each origin was signed in to and called, so each must have records
+  expect "$app has ZendeskToolCall records" 1 "$(printf '%s\n' "$n" | awk -v a="$app" '$1 == a && $2 > 0' | wc -l | tr -d ' ')"
+done
 )
 ```
 
@@ -1913,6 +1928,8 @@ a step work, update `infra/terraform/` (and this file) to match in the same PR.
   address `api.ipify.org` reports. Phase 7 ran from WSL instead, where it worked off the VPN.
 - The optional Cloudflare API block in 11.1 — tested against a stub; the live records were created
   through the Cloudflare connector.
+- Phase 13's branch-policy **set** step — the owner applied the policy with the same `gh api` calls
+  run by hand, so the block itself has not run; its Verify has, live, and passed.
 
 **Settled by the first build (2026-10-28/29, #3):** `az role definition create` accepted
 `AssignableScopes` on the single registry, as `acr.tf` declares (Phase 4); Graph accepted

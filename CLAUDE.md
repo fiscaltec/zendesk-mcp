@@ -85,7 +85,7 @@ A successful response carries `ttlMs: 300000` and `cacheScope: "private"` alongs
 
 ## Installing for End Users
 
-FISCAL staff point their MCP client at `https://zendesk-mcp.fiscaltec.com/mcp` (decided 2026-10-28; live once #3 lands). They sign in with Microsoft, then connect their own Zendesk account through the one-time link the first Zendesk tool returns. [ACCESS.md](ACCESS.md) is the user-facing guide; keep it in step with any change to either sign-in.
+FISCAL staff point their MCP client at `https://zendesk-mcp.fiscaltec.com/mcp` (decided 2026-10-28; live since 2026-10-29, #3). They sign in with Microsoft, then connect their own Zendesk account through the one-time link the first Zendesk tool returns. [ACCESS.md](ACCESS.md) is the user-facing guide; keep it in step with any change to either sign-in.
 
 ## GitHub issues (issue-driven work)
 
@@ -608,7 +608,7 @@ xUnit v3 on **Microsoft.Testing.Platform** (not VSTest): `global.json` selects t
 
 ## Deployment
 
-The same shape as vitally-mcp — Azure Container Apps (production warm, staging scale-to-zero) in a VNet, private Key Vault, the Vitally estate's private ACR **shared** (`vitallyproducruksouth`, repository `zendesk-mcp`; `infra/terraform/acr.tf` sets out the cross-estate write access that costs), Application Insights behind AMPLS, GitHub Actions deploying through OIDC federated credentials, a staging gate and a release train — built with `az` CLI by `docs/runbooks/build-the-estate.md`, and described in `infra/terraform/`, which is a record kept in step by hand and **never applied**, exactly as vitally-mcp keeps its own (decided 2026-10-28; its README holds the recorded decisions and what is still open). `.github/workflows/` deploys onto the built estate and never invokes Terraform. Built on 2026-10-28/29 (#3) — the runbook fixes that took are in PR #16; Phase 14 (whole-estate verification) and the scanner Job (9.4, waiting on the Teams webhook) were still open when this line was written.
+The same shape as vitally-mcp — Azure Container Apps (production warm, staging scale-to-zero) in a VNet, private Key Vault, the Vitally estate's private ACR **shared** (`vitallyproducruksouth`, repository `zendesk-mcp`; `infra/terraform/acr.tf` sets out the cross-estate write access that costs), Application Insights behind AMPLS, GitHub Actions deploying through OIDC federated credentials, a staging gate and a release train — built with `az` CLI by `docs/runbooks/build-the-estate.md`, and described in `infra/terraform/`, which is a record kept in step by hand and **never applied**, exactly as vitally-mcp keeps its own (decided 2026-10-28; its README holds the recorded decisions and what is still open). `.github/workflows/` deploys onto the built estate and never invokes Terraform. Built on 2026-10-28/29 (#3), Phase 14 included — the runbook fixes that took are in PR #16; the scanner Job (9.4) waits on the Teams webhook.
 
 ⚠️ **Change the live estate with `az`, then update the Terraform to match** — in the same PR. Do not run `terraform apply` against it: with no state, a plan reads every resource as a create, and applying would collide with what exists.
 
@@ -618,7 +618,7 @@ The same shape as vitally-mcp — Azure Container Apps (production warm, staging
 
 **One managed identity serves both targets — an accepted risk, carried over from vitally-mcp.** `zendesk-prod-id-uksouth` has a federated credential for each environment and `Contributor` on **both** Container Apps, so a token minted for `environment:staging` **can roll production**. The per-app role assignments are not a boundary: one identity holds both. vitally-mcp accepted this on 2026-08-28 (its `CLAUDE.md`, *One managed identity serves both targets*), and it holds here on the same basis: **both environments carry exactly the same protection**, so anyone who can deploy to staging could already deploy to production, and the shared identity grants nothing extra. Don't "fix" it on sight.
 
-**What would change the answer:** a protection rule on `production` that `staging` lacks — required reviewers, a wait timer, a narrower branch policy. The shared identity is then a way round that gate. That happened briefly on 2026-10-29: a production-only reviewer was added and removed the same day for this reason. If production needs a human gate, first split the identity — a `zendesk-staging-id-uksouth` with its own `AcrPull`, `Key Vault Secrets Officer` on the vault, Graph `GroupMember.Read.All` (admin consent) and `Contributor` on the staging app only, with the staging federated credential moved to it — then add the reviewer. Record that in `identity.tf` and the runbook (Phases 4, 9, 10).
+**What would change the answer:** a protection rule on `production` that `staging` lacks — required reviewers, a wait timer, a narrower branch policy. The shared identity is then a way round that gate. That happened briefly on 2026-10-29: a production-only reviewer was added and removed the same day for this reason. If production needs a human gate, first split the identity — a `zendesk-staging-id-uksouth` holding every role `identity.tf` gives the shared one, scoped to staging where the scope allows: `Key Vault Secrets Officer`, `AcrPull`, the custom *Zendesk MCP ACR importer* role (deploy.yml's `az acr import`), `Monitoring Metrics Publisher` (without it staging's audit records are dropped silently), `ContainerApp Reader` on the resource group (the staging gate), Graph `GroupMember.Read.All` (admin consent) and `Contributor` on the staging app only — with the staging federated credential and the staging app's identity moved to it; then add the reviewer. Record that in `identity.tf` and the runbook (Phases 4, 9, 10).
 
 These settings cannot be read or changed from a Claude Code cloud session: its GitHub proxy refuses the environments, variables and secrets APIs. Use `gh` from Cloud Shell or WSL. #17 tracks which of the build's findings vitally-mcp should take.
 
@@ -656,7 +656,7 @@ Before production, on staging against the real Zendesk account, with `Authorizat
 5. Confirm the audit records in `AppEvents` (`AppRoleName` separates staging) carry the expected ids.
 6. Disconnect, and confirm the token is revoked in Zendesk and the secret reads as a tombstone.
 
-Where each step stands, mapped to its issue (2026-10-28):
+Where each step stands, mapped to its issue (updated 2026-10-29):
 
 | Step | State | Issue |
 |---|---|---|
