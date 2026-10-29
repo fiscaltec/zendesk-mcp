@@ -1674,7 +1674,13 @@ done
 
 Delete the token in Cloudflare once the records exist; the block has already removed its local copy.
 
-**11.2 Bind** once both records resolve. `hostname add` is guarded; `bind` is re-runnable. The records
+**11.2 Bind** once both records resolve. `hostname add` is guarded; `bind` is re-runnable **once the
+host's managed certificate has succeeded**: `bind` requests the certificate and waits for it, but on a
+re-run it finds the certificate already exists and binds straight away, so a re-run while it is still
+issuing fails with `CertificateProvisioningError … not in succeeded provisioning state`. Then wait
+until `az containerapp env certificate list -g "$RG" -n "$CAE" --managed-certificates-only --query
+"[].[properties.subjectName, properties.provisioningState]" -o tsv` shows `Succeeded` for that host
+(up to 20 minutes), and re-run. Found when a dropped connection interrupted the first wait (#3). The records
 are read over DNS-over-HTTPS from Cloudflare's public resolver, not with `dig`, so the check works
 wherever only HTTPS gets out (a Claude Code cloud session has neither `dig` nor outbound port 53).
 From a cloud session, allow `cloudflare-dns.com` — and `api.cloudflare.com` for the API block above —
