@@ -1922,8 +1922,10 @@ a step work, update `infra/terraform/` (and this file) to match in the same PR.
 
 **Still unproven** after the first build — the first suspects if one of these blocks fails:
 
-- `az containerapp job create --yaml` (9.4, not yet run). The app YAML's lesson applies: an omitted
-  field is sent as `null` (below), so preflight-validate the Job body before creating it.
+- `az containerapp job create --yaml` (9.4, not yet run). Its body as `az` 2.91 builds it — 9.4's own
+  YAML with a dummy webhook, through `az`'s Job conversion — **passed ARM preflight** on 2026-10-29
+  (17 `null` fields, all accepted on `2025-07-01`), so the `allowInsecure` failure has no Job
+  counterpart. The create itself has not run.
 - The Key Vault window **from Cloud Shell** — whether the vault sees Cloud Shell's traffic from the
   address `api.ipify.org` reports. Phase 7 ran from WSL instead, where it worked off the VPN.
 - The optional Cloudflare API block in 11.1 — tested against a stub; the live records were created

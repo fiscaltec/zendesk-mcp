@@ -68,9 +68,9 @@ card = {
             "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
             "version": "1.5",
             "body": [
-                {"type": "TextBlock", "size": "Medium", "weight": "Bolder", "text": "Key Vault secrets nearing expiry (<=30 days)"},
+                {"type": "TextBlock", "size": "Medium", "weight": "Bolder", "text": "Zendesk MCP: Key Vault secrets nearing expiry (<=30 days)"},
                 {"type": "TextBlock", "wrap": True, "text": lines},
-                {"type": "TextBlock", "wrap": True, "isSubtle": True, "text": "Vault: %s - rotate per the 180-day standard (docs/runbooks/entra-and-zendesk-oauth.md)." % vault},
+                {"type": "TextBlock", "wrap": True, "isSubtle": True, "text": "Zendesk MCP (fiscaltec/zendesk-mcp), vault %s - rotate per the 180-day standard: docs/runbooks/entra-and-zendesk-oauth.md." % vault},
             ],
         },
     }],
