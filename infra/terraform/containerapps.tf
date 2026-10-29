@@ -112,6 +112,8 @@ resource "azurerm_container_app" "app" {
     external_enabled = true
     target_port      = 8080 # Dockerfile: ASPNETCORE_URLS=http://+:8080
     transport        = "auto"
+    # Explicit, not left to the provider default: the az build (runbook 9.3) must send it (#3).
+    allow_insecure_connections = false
 
     traffic_weight {
       latest_revision = true

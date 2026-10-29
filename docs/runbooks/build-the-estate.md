@@ -5,10 +5,11 @@ network, monitoring, vault, identity, Entra app and groups, both Container Apps 
 then the out-of-band steps that were always manual (secrets, the first image, the Graph grant, admin
 consent, custom domains, tier membership, GitHub).
 
-> ⚠️ **Written 2026-10-28 from `infra/terraform/*.tf` and NOT yet executed against Azure.** No command
-> here has been run: the authoring session had no Azure access. Flags were checked against the
-> `az` 2.91 help text and source where that was possible offline; the ones that could not be are
-> listed under [Unverified `az` behaviour](#unverified-az-behaviour). **Stop at the first `FAIL`, the
+> ⚠️ **Written 2026-10-28 from `infra/terraform/*.tf`, then run end to end on 2026-10-28/29 (#3)** —
+> from a Claude Code cloud session, with Phases 7, 8, 9.3 and 13 run from WSL — except 9.4 (the
+> scanner Job), which waits on the Teams webhook. Every fix that run needed is in this file (PR #16).
+> What is still unproven is listed under [Unverified `az` behaviour](#unverified-az-behaviour).
+> **Stop at the first `FAIL`, the
 > first error, or the first output you did not expect**, fix the cause (here *and* in this file),
 > and re-run that block. Do not push on past a failure to "see what happens".
 
@@ -31,10 +32,27 @@ Zendesk OAuth client `fiscal_zendesk_mcp`, and the subscription's `NetworkWatche
 - **Shell: Azure Cloud Shell (Bash).** The owner works on Windows; Cloud Shell gives a Linux `bash`
   with `az`, `gh`, `git`, `curl`, `python3` and `dig` already installed, so nothing needs installing
   locally and no Terraform is needed. Open it from the portal (`>_`) and choose **Bash**, not
-  PowerShell. The one exception is building the first image (Phase 8), which needs Docker — Cloud
-  Shell has none, so that one block runs on a workstation.
+  PowerShell. Building the first image (Phase 8) needs Docker, which Cloud Shell lacks, so that runs
+  on a workstation. The first build (#3) ran from a Claude Code cloud session instead, with Phases 7,
+  8, 9.3 and 13 run from WSL on a workstation — see the bullets below for what each needed.
 - **Every block is a `( … )` subshell with `set -euo pipefail`.** A failing command ends the block
   without closing Cloud Shell. Paste one block at a time and read its output before the next.
+  ⚠️ **Only at an interactive prompt or through `bash <file>`.** Bash ignores `set -e` inside any
+  command that is itself part of an `&&`/`||` list, so a tool that wraps what it runs (an agent
+  harness, `eval "…" && …`) silently turns every block into one that carries on past a failure.
+  Found running this from a Claude Code cloud session (2026-10-28, #3); there each block is saved to
+  a file and run with `bash`.
+- **From WSL, `az` must be the Linux build** (`command -v az` → `/usr/bin/az`). By default WSL also
+  searches the Windows PATH, so `az` can be the Windows `az.cmd` (`/mnt/c/…/wbin/az`). Its `-o tsv`
+  output ends in `\r`, which makes every comparison fail with identical-looking values
+  (`]AIL subscription …`, where the `\r` returns the cursor and `]` overwrites the `F`). Install the
+  Linux build with `curl -sL https://aka.ms/InstallAzureCLIDeb | sudo bash`; it keeps its own login
+  and extensions. Found running Phases 7, 8 and 9.3 from WSL (2026-10-28/29, #3).
+- **From a Claude Code cloud session, Phase 13 cannot run.** Its GitHub proxy refuses the Actions
+  variables, secrets and environments APIs (`HTTP 403: Access to this GitHub Actions path is not
+  permitted through this proxy`) for every client, `gh api` included; other Actions paths, such as
+  workflows, are allowed. Run Phase 13 from Cloud Shell or WSL, where `gh` talks to GitHub directly.
+  Checked 2026-10-29 (#3).
 - **Every block starts by sourcing `~/zendesk-estate.env`** (written by *Set these first*) and
   checking the subscription and tenant, so a block can be run after a Cloud Shell timeout (20 idle
   minutes) without re-pasting anything earlier. `~` is persisted by Cloud Shell; that file holds no
@@ -264,15 +282,47 @@ Admin Centre → Apps and integrations → APIs → OAuth clients →
 ```bash
 ( set -euo pipefail; source ~/zendesk-estate.env; assert_context
 az config set extension.use_dynamic_install=yes_without_prompt -o none
+# `az monitor app-insights` (Phases 2, 4, 9) is an extension, not core: install it here, so a missing
+# one fails pre-flight rather than half-way through Phase 2. Every other group used here is core.
+az extension show --name application-insights -o none 2>/dev/null || az extension add --name application-insights -o none
+# The containerapp *extension* replaces the core `az containerapp` commands Phase 9 was tested with
+# (a stale preview one was found installed during the first build, #3). Remove it before building.
+if az extension show --name containerapp -o none 2>/dev/null; then
+  echo "The containerapp extension is installed: run 'az extension remove --name containerapp', then re-run this block"; exit 1
+fi
 # Resource providers the estate uses (Terraform's azurerm registers these itself).
 for ns in Microsoft.App Microsoft.Network Microsoft.KeyVault Microsoft.ManagedIdentity \
           Microsoft.OperationalInsights Microsoft.Insights Microsoft.Storage; do
-  az provider register --namespace "$ns" --wait -o none
+  # Only when needed: on a set-up subscription this is reads only, with no writes to fail part-way.
+  [ "$(az provider show -n "$ns" --query registrationState -o tsv)" = Registered ] \
+    || az provider register --namespace "$ns" --wait -o none
 done
 # A clone of the repo, for scan/run.py (Phase 9) and the verification scripts (Phase 14).
-gh auth status >/dev/null 2>&1 || { echo "Run 'gh auth login' first, then re-run this block"; exit 1; }
-[ -d "$REPO_DIR/.git" ] || gh repo clone "$GH_REPO" "$REPO_DIR"
+# gh is needed later (Phase 13); this proves it can reach THIS repo. It does not prove admin rights,
+# which Phase 13 needs. Not `gh auth status`: in a Claude Code cloud session the proxy-injected token
+# serves REST but fails that check (2026-10-28, #3).
+gh api "repos/$GH_REPO" --silent || { echo "gh cannot reach $GH_REPO — run 'gh auth login' first, then re-run this block"; exit 1; }
+# git, not `gh repo clone`: that is GraphQL underneath, which cloud sessions refuse. The repo is public.
+[ -d "$REPO_DIR/.git" ] || git clone -q "https://github.com/$GH_REPO.git" "$REPO_DIR"
 git -C "$REPO_DIR" fetch -q origin main && git -C "$REPO_DIR" checkout -q main && git -C "$REPO_DIR" pull -q --ff-only
+)
+```
+
+**If `az extension add` cannot reach the extension index** (`aka.ms` refused, as from a Claude Code
+cloud session on 2026-10-28, #3): the wheels host `azcliprod.blob.core.windows.net` may still be
+reachable. Take the latest *stable* `application-insights` entry's `downloadUrl` and `sha256Digest`
+from Microsoft's index on GitHub (`Azure/azure-cli-extensions`, `src/index.json`), download the
+wheel, and install it only if the digest matches — `--source` skips the check `az` would otherwise
+make:
+
+```bash
+( set -euo pipefail
+v=1.2.3   # latest stable on 2026-10-28; read the index rather than trusting this
+want=c941c232d04366636e1354cfe00708521013f88a5b1e74740d8047ec46d90599
+w=/tmp/application_insights-$v-py2.py3-none-any.whl
+curl -fsS -o "$w" "https://azcliprod.blob.core.windows.net/cli-extensions/application_insights-$v-py2.py3-none-any.whl"
+[ "$(sha256sum "$w" | awk '{print $1}')" = "$want" ] || { echo "FAIL digest mismatch — not installed"; rm -f "$w"; exit 1; }
+az extension add --source "$w" --yes -o none && rm -f "$w" && echo "OK   application-insights $v installed"
 )
 ```
 
@@ -313,6 +363,8 @@ PY
 else
   echo "NOTE $RG exists: this is a re-run, so the greenfield checks are skipped"
 fi
+nonempty "application-insights extension version" "$(az extension show --name application-insights --query version -o tsv 2>/dev/null || true)"
+expect "containerapp extension absent (core commands only)" 0 "$(az extension list --query "length([?name=='containerapp'])" -o tsv)"
 # Terraform's preconditions on the OAuth origins (entra.tf), so a mistyped env file fails here.
 expect "audience = production origin, no slash" "$PROD_ORIGIN" "$OAUTH_AUDIENCE"
 expect "production resource = origin + /" "$PROD_ORIGIN/" "$OAUTH_RESOURCE"
@@ -490,7 +542,8 @@ az network private-endpoint show -g "$RG" -n "$PE_AMPLS" -o none 2>/dev/null \
   || az network private-endpoint create -g "$RG" -n "$PE_AMPLS" -l "$LOC" --vnet-name "$VNET" --subnet "$SNET_PE_MON" \
        --private-connection-resource-id "$AMPLS_ID" --group-id azuremonitor --connection-name "$PE_AMPLS-conn" -o none
 set -- $DNS_MONITOR
-az network private-endpoint dns-zone-group show -g "$RG" --endpoint-name "$PE_AMPLS" -n ampls-dns-group -o none 2>/dev/null \
+# list, not show: `dns-zone-group show` answers {} with exit 0 for a group that does not exist.
+[ "$(az network private-endpoint dns-zone-group list -g "$RG" --endpoint-name "$PE_AMPLS" --query "length([?name=='ampls-dns-group'])" -o tsv)" = 1 ] \
   || az network private-endpoint dns-zone-group create -g "$RG" --endpoint-name "$PE_AMPLS" -n ampls-dns-group \
        --zone-name "$1" --private-dns-zone "$(az network private-dns zone show -g "$RG" -n "$1" --query id -o tsv)" -o none
 for z in $DNS_MONITOR; do
@@ -558,7 +611,8 @@ KV_ID=$(az keyvault show -g "$RG" -n "$KV" --query id -o tsv)
 az network private-endpoint show -g "$RG" -n "$PE_KV" -o none 2>/dev/null \
   || az network private-endpoint create -g "$RG" -n "$PE_KV" -l "$LOC" --vnet-name "$VNET" --subnet "$SNET_PE" \
        --private-connection-resource-id "$KV_ID" --group-id vault --connection-name kv-conn -o none
-az network private-endpoint dns-zone-group show -g "$RG" --endpoint-name "$PE_KV" -n kv-zg -o none 2>/dev/null \
+# list, not show: `dns-zone-group show` answers {} with exit 0 for a group that does not exist.
+[ "$(az network private-endpoint dns-zone-group list -g "$RG" --endpoint-name "$PE_KV" --query "length([?name=='kv-zg'])" -o tsv)" = 1 ] \
   || az network private-endpoint dns-zone-group create -g "$RG" --endpoint-name "$PE_KV" -n kv-zg \
        --zone-name "$DNS_VAULT" --private-dns-zone "$(az network private-dns zone show -g "$RG" -n "$DNS_VAULT" --query id -o tsv)" -o none
 
@@ -705,7 +759,8 @@ ACR_ID=$(az acr show -g "$ACR_RG" -n "$ACR" --query id -o tsv)
 az network private-endpoint show -g "$RG" -n "$PE_ACR" -o none 2>/dev/null \
   || az network private-endpoint create -g "$RG" -n "$PE_ACR" -l "$LOC" --vnet-name "$VNET" --subnet "$SNET_PE" \
        --private-connection-resource-id "$ACR_ID" --group-id registry --connection-name acr-conn -o none
-az network private-endpoint dns-zone-group show -g "$RG" --endpoint-name "$PE_ACR" -n acr-zg -o none 2>/dev/null \
+# list, not show: `dns-zone-group show` answers {} with exit 0 for a group that does not exist.
+[ "$(az network private-endpoint dns-zone-group list -g "$RG" --endpoint-name "$PE_ACR" --query "length([?name=='acr-zg'])" -o tsv)" = 1 ] \
   || az network private-endpoint dns-zone-group create -g "$RG" --endpoint-name "$PE_ACR" -n acr-zg \
        --zone-name "$DNS_ACR" --private-dns-zone "$(az network private-dns zone show -g "$RG" -n "$DNS_ACR" --query id -o tsv)" -o none
 )
@@ -926,6 +981,13 @@ so the scanner warns 30 days ahead:
 > never becomes reachable (the block gives up after 5 minutes), the vault may see Cloud Shell's
 > traffic from a different address than `api.ipify.org` reports; run this phase from a workstation
 > instead.
+>
+> ⚠️ **Not on the corporate VPN.** Its DNS answers `privatelink.vaultcore.azure.net` from a private
+> zone that has no record for this vault, so the vault's name returns NXDOMAIN and the window never
+> becomes reachable (`Failed to resolve 'zendesk-prod-kv-uksouth.vault.azure.net'`). WSL resolves
+> through Windows, so a VPN connected in Windows affects WSL too. Check before running 7.2:
+> `nslookup zendesk-prod-kv-uksouth.vault.azure.net` must reach public addresses. Found during the
+> first build (2026-10-28, #3); off the VPN it worked first time.
 
 ### 7.1 Regenerate the Zendesk client secret and capture it
 
@@ -980,12 +1042,13 @@ case "$KVW_IP" in *.*.*.*) ;; *) fail "egress address '$KVW_IP' is not IPv4"; ex
 az keyvault update -g "$RG" -n "$KV" --default-action Deny -o none          # BEFORE public access
 az keyvault network-rule add -g "$RG" -n "$KV" --ip-address "$KVW_IP/32" -o none
 az keyvault update -g "$RG" -n "$KV" --public-network-access Enabled -o none
-ok=""
+ok=""; last=""
 for i in $(seq 1 20); do
-  az keyvault secret list --vault-name "$KV" -o none 2>/dev/null && { ok=1; break; }
+  last=$(az keyvault secret list --vault-name "$KV" -o none 2>&1) && { ok=1; break; }
   echo "  vault not reachable yet from $KVW_IP (attempt $i)"; sleep 15
 done
-[ -n "$ok" ] || { fail "vault unreachable after 5 minutes — nothing stored"; exit 1; }
+# The last error tells a DNS failure, a network refusal and a role still propagating apart.
+[ -n "$ok" ] || { fail "vault unreachable after 5 minutes — nothing stored. Last error: ${last:0:400}"; exit 1; }
 
 for name in entra-mcp-client-secret:entra-oauth-client-secret zendesk-oauth-client-secret:zendesk-oauth-client-secret; do
   vault_name=${name%%:*}; file="$SECRET_DIR/${name#*:}"
@@ -1026,12 +1089,13 @@ case "$KVW_IP" in *.*.*.*) ;; *) fail "egress address '$KVW_IP' is not IPv4"; ex
 az keyvault update -g "$RG" -n "$KV" --default-action Deny -o none          # BEFORE public access
 az keyvault network-rule add -g "$RG" -n "$KV" --ip-address "$KVW_IP/32" -o none
 az keyvault update -g "$RG" -n "$KV" --public-network-access Enabled -o none
-ok=""
+ok=""; last=""
 for i in $(seq 1 20); do
-  az keyvault secret list --vault-name "$KV" -o none 2>/dev/null && { ok=1; break; }
+  last=$(az keyvault secret list --vault-name "$KV" -o none 2>&1) && { ok=1; break; }
   echo "  vault not reachable yet from $KVW_IP (attempt $i)"; sleep 15
 done
-[ -n "$ok" ] || { fail "vault unreachable after 5 minutes — nothing stored"; exit 1; }
+# The last error tells a DNS failure, a network refusal and a role still propagating apart.
+[ -n "$ok" ] || { fail "vault unreachable after 5 minutes — nothing read back. Last error: ${last:0:400}"; exit 1; }
 az keyvault secret show --vault-name "$KV" --name entra-mcp-client-secret --query value -o tsv \
   | tr -d '\n' > "$SECRET_DIR/entra-oauth-client-secret"
 [ -s "$SECRET_DIR/entra-oauth-client-secret" ] && echo "OK   recovered entra-oauth-client-secret" || { fail "nothing read back"; exit 1; }
@@ -1074,10 +1138,10 @@ Cloud Shell has no Docker, so **build on a workstation** with Docker Desktop (Po
 a clean `main`:
 
 ```powershell
-cd <your clone of fiscaltec/zendesk-mcp>
+cd YOUR_CLONE_OF_ZENDESK_MCP                     # replace; `<…>` placeholders do not parse in PowerShell
 git checkout main; git pull --ff-only; git status --porcelain   # must print nothing
 $tag = "sha-$(git rev-parse --short HEAD)"
-docker login ghcr.io -u <github user>          # password: a PAT with write:packages
+docker login ghcr.io -u YOUR_GITHUB_USER        # replace; password: a PAT with write:packages
 docker build -t "ghcr.io/fiscaltec/zendesk-mcp:$tag" .
 docker push "ghcr.io/fiscaltec/zendesk-mcp:$tag"
 $tag                                            # note it for the next step
@@ -1099,6 +1163,18 @@ read -r -p 'GitHub user owning the read:packages PAT: ' GH_USER && export GH_USE
 
 ```bash
 source ~/zendesk-estate.env; capture_secret ghcr-read-pat
+```
+
+A classic PAT is required (fine-grained tokens cannot read GHCR); if `fiscaltec` enforces SAML SSO,
+authorise it for the organisation or the import fails with 403. **Alternatively, use the `gh` CLI's
+own token** in place of the two lines above — no copy-paste, but its scope is wider (`repo`,
+`read:org`, `gist` plus `read:packages`) and it does not expire, so revoke it afterwards (GitHub
+Settings → Applications → Authorized OAuth Apps → GitHub CLI → Revoke; `gh auth logout` only deletes
+the local copy). Used for the first build (2026-10-28, #3). After
+`gh auth login --hostname github.com --git-protocol https --web --scopes read:packages`:
+
+```bash
+export GH_USER=$(gh api user --jq .login) && source ~/zendesk-estate.env && gh auth token | capture_secret ghcr-read-pat
 ```
 
 Import server-side into the shared registry (public access is off; `az acr import` works regardless).
@@ -1270,6 +1346,7 @@ properties:
       external: true
       targetPort: 8080
       transport: auto
+      allowInsecure: false   # omitted, az sends null, which the 2025-07-01 API rejects (#3)
       traffic:
       - latestRevision: true
         weight: 100
@@ -1424,6 +1501,7 @@ for t in prod:$APP_PROD:1:$IMAGE_TAG staging:$APP_STG:0:$STAGING_IMAGE_TAG; do
   expect "$app ingress external" true "$(c properties.configuration.ingress.external)"
   expect "$app ingress port" 8080 "$(c properties.configuration.ingress.targetPort)"
   expect_ci "$app ingress transport" auto "$(c properties.configuration.ingress.transport)"
+  expect "$app ingress allowInsecure" false "$(c properties.configuration.ingress.allowInsecure)"
   expect "$app traffic" "true 100" "$(c "properties.configuration.ingress.traffic[0].join(' ', [to_string(latestRevision), to_string(weight)])")"
   expect "$app min replicas" "$min" "$(c properties.template.scale.minReplicas)"
   expect "$app max replicas" 1 "$(c properties.template.scale.maxReplicas)"
@@ -1556,16 +1634,85 @@ done
 
 ⚠️ **The CNAME must be DNS-only (grey cloud).** Proxying it breaks managed-certificate issuance.
 
-**11.2 Bind** once both records resolve. `hostname add` is guarded; `bind` is re-runnable.
+**Or create them through the Cloudflare API**, from any shell (Cloud Shell, WSL, a Claude Code cloud
+session) instead of the dashboard. It needs an API token scoped to **Zone → DNS → Edit** on
+`fiscaltec.com` only — create one under Cloudflare → My Profile → API Tokens, short-lived, and delete
+it afterwards. Existing records of the same name and type are left alone and reported, never
+overwritten. The token is read from a header file, so it never appears in a process list. Capture it
+on its own line:
 
 ```bash
-( set -euo pipefail; source ~/zendesk-estate.env; assert_context
+source ~/zendesk-estate.env; capture_secret cf-dns-token
+```
+
+```bash
+( set -euo pipefail; source ~/zendesk-estate.env
+trap 'rm -f "$SECRET_DIR/cf-dns-token" "$SECRET_DIR/cf-auth-header"' EXIT   # set first: removed on any failure
+assert_context
+[ -s "$SECRET_DIR/cf-dns-token" ] || { fail "capture the Cloudflare token first"; exit 1; }
+umask 077
+printf 'Authorization: Bearer %s\n' "$(cat "$SECRET_DIR/cf-dns-token")" > "$SECRET_DIR/cf-auth-header"
+API=https://api.cloudflare.com/client/v4
+cf() { curl -sS --fail-with-body -H @"$SECRET_DIR/cf-auth-header" -H 'Content-Type: application/json' "$@"; }
+# Exits non-zero unless Cloudflare reports success with a list, so a refused lookup never reads as "0" or "exists".
+count() { python3 -c 'import json,sys; d=json.load(sys.stdin); r=d.get("result"); sys.exit(1) if not (d.get("success") and isinstance(r, list)) else print(len(r))'; }
+ZONE_NAME=${PROD_HOST#*.}
+ZONE=$(cf "$API/zones?name=$ZONE_NAME" | python3 -c 'import json,sys; r=json.load(sys.stdin)["result"]; print(r[0]["id"] if len(r) == 1 else "")')
+nonempty "Cloudflare zone id for $ZONE_NAME" "$ZONE"
 VID=$(az containerapp env show -g "$RG" -n "$CAE" --query properties.customDomainConfiguration.customDomainVerificationId -o tsv)
+nonempty "verification id" "$VID"
 for p in "$PROD_HOST:$APP_PROD" "$STG_HOST:$APP_STG"; do
   host=${p%%:*}; app=${p#*:}
   fqdn=$(az containerapp show -g "$RG" -n "$app" --query properties.configuration.ingress.fqdn -o tsv)
-  expect "$host CNAME" "$fqdn." "$(dig +short CNAME "$host" @1.1.1.1 | head -1)"
-  expect "asuid.$host TXT" "$VID" "$(dig +short TXT "asuid.$host" @1.1.1.1 | tr -d '"' | head -1)"
+  nonempty "$app default FQDN" "$fqdn"
+  for rec in "CNAME|$host|$fqdn" "TXT|asuid.$host|\"$VID\""; do
+    IFS='|' read -r type name content <<< "$rec"
+    n=$(cf "$API/zones/$ZONE/dns_records?type=$type&name=$name" | count) \
+      || { fail "could not read $type $name from Cloudflare (token scope, rate limit or network)"; exit 1; }
+    case "$n" in
+      0) ;;
+      [1-9]*) echo "exists  $type $name — left as is; 11.2 checks what it resolves to"; continue ;;
+      *) fail "could not read $type $name from Cloudflare"; exit 1 ;;
+    esac
+    body=$(python3 -c 'import json,sys
+t, n, c = sys.argv[1:4]
+b = {"type": t, "name": n, "content": c, "ttl": 1, "comment": "Zendesk MCP custom domain (fiscaltec/zendesk-mcp#3)"}
+if t == "CNAME": b["proxied"] = False   # DNS only: proxying breaks managed-certificate issuance
+print(json.dumps(b))' "$type" "$name" "$content")
+    out=$(cf -X POST "$API/zones/$ZONE/dns_records" -d "$body") || { fail "create $type $name refused: ${out:0:400}"; exit 1; }
+    echo "created $type $name"
+  done
+done
+)
+```
+
+Delete the token in Cloudflare once the records exist; the block has already removed its local copy.
+
+**11.2 Bind** once both records resolve. `hostname add` is guarded; `bind` is re-runnable **once the
+host's managed certificate has succeeded**: `bind` requests the certificate and waits for it, but on a
+re-run it finds the certificate already exists and binds straight away, so a re-run while it is still
+issuing fails with `CertificateProvisioningError … not in succeeded provisioning state`. Then wait
+until `az containerapp env certificate list -g "$RG" -n "$CAE" --managed-certificates-only --query
+"[].[properties.subjectName, properties.provisioningState]" -o tsv` shows `Succeeded` for that host
+(up to 20 minutes), and re-run. Found when a dropped connection interrupted the first wait (#3). The records
+are read over DNS-over-HTTPS from Cloudflare's public resolver, not with `dig`, so the check works
+wherever only HTTPS gets out (a Claude Code cloud session has neither `dig` nor outbound port 53).
+From a cloud session, allow `cloudflare-dns.com` — and `api.cloudflare.com` for the API block above —
+under the environment's *Allowed domains*; a refused lookup prints `curl: (22) … 403` and a `FAIL`.
+
+```bash
+( set -euo pipefail; source ~/zendesk-estate.env; assert_context
+doh() {  # doh <name> <CNAME|TXT> — first answer of that type from 1.1.1.1 over HTTPS, quotes stripped
+  curl -fsS --max-time 20 -H 'accept: application/dns-json' "https://cloudflare-dns.com/dns-query?name=$1&type=$2" \
+    | python3 -c 'import json,sys; a=[x["data"] for x in json.loads(sys.stdin.read() or "{}").get("Answer", []) if x["type"] == {"CNAME": 5, "TXT": 16}[sys.argv[1]]]; print(a[0].strip(chr(34)) if a else "")' "$2"
+}
+VID=$(az containerapp env show -g "$RG" -n "$CAE" --query properties.customDomainConfiguration.customDomainVerificationId -o tsv)
+nonempty "verification id" "$VID"
+for p in "$PROD_HOST:$APP_PROD" "$STG_HOST:$APP_STG"; do
+  host=${p%%:*}; app=${p#*:}
+  fqdn=$(az containerapp show -g "$RG" -n "$app" --query properties.configuration.ingress.fqdn -o tsv)
+  expect "$host CNAME" "$fqdn." "$(doh "$host" CNAME)"
+  expect "asuid.$host TXT" "$VID" "$(doh "asuid.$host" TXT)"
   [ "$(az containerapp hostname list -g "$RG" -n "$app" --query "length([?name=='$host'])" -o tsv)" = 1 ] \
     || az containerapp hostname add -g "$RG" -n "$app" --hostname "$host" -o none
   az containerapp hostname bind -g "$RG" -n "$app" --hostname "$host" --environment "$CAE" --validation-method CNAME -o none
@@ -1630,7 +1777,9 @@ echo "Phase 12 verified"
 ## Phase 13 — GitHub
 
 Repository variables and secrets for `deploy.yml`, `release.yml` and `staging-gate.yml`, and the two
-environments whose names the federated credentials (Phase 4) match. `gh` in Cloud Shell, logged in as
+environments whose names the federated credentials (Phase 4) match, each restricted to deploys from
+`main` (the same on both; see `CLAUDE.md`, *GitHub environments and the one deploy identity*). **Not
+from a Claude Code cloud session** — its GitHub proxy refuses these APIs (*How to run it*). `gh` in Cloud Shell, logged in as
 a repository admin (`gh auth login`). All of it is re-runnable.
 
 ```bash
@@ -1646,6 +1795,17 @@ for t in "production:$APP_PROD:$PROD_ORIGIN" "staging:$APP_STG:$STG_ORIGIN"; do
   # Create the environment only if it is missing: a PUT on an existing one can reset its protection
   # rules (required reviewers, wait timer).
   gh api "repos/$GH_REPO/environments/$env" --silent 2>/dev/null || gh api -X PUT "repos/$GH_REPO/environments/$env" --silent
+  # Deploys from `main` only, on BOTH environments. Symmetric on purpose: one identity serves both
+  # targets, so a rule on production that staging lacks is bypassable (CLAUDE.md, "GitHub environments
+  # and the one deploy identity"). Set only while no branch policy exists, so a re-run resets nothing.
+  # That PUT deliberately replaces any other rule (a reviewer, a wait timer): the Verify allows
+  # `branch_policy` and nothing else, on both.
+  policy=$(gh api "repos/$GH_REPO/environments/$env" --jq '.deployment_branch_policy // "none"')
+  if [ "$policy" = none ]; then
+    gh api -X PUT "repos/$GH_REPO/environments/$env" --input - --silent <<<'{"deployment_branch_policy":{"protected_branches":false,"custom_branch_policies":true}}'
+  fi
+  [ "$(gh api "repos/$GH_REPO/environments/$env/deployment-branch-policies" --jq '[.branch_policies[] | select(.type == "branch" and .name == "main")] | length')" = 1 ] \
+    || gh api -X POST "repos/$GH_REPO/environments/$env/deployment-branch-policies" -f name=main -f type=branch --silent
   gh variable set CONTAINER_APP --repo "$GH_REPO" --env "$env" --body "$app"
   gh variable set PUBLIC_ORIGIN --repo "$GH_REPO" --env "$env" --body "$origin"   # origin only: no path, no slash
 done
@@ -1665,6 +1825,14 @@ expect "production CONTAINER_APP" "$APP_PROD"    "$(gh variable get CONTAINER_AP
 expect "production PUBLIC_ORIGIN" "$PROD_ORIGIN" "$(gh variable get PUBLIC_ORIGIN --repo "$GH_REPO" --env production)"
 expect "staging CONTAINER_APP"    "$APP_STG"     "$(gh variable get CONTAINER_APP --repo "$GH_REPO" --env staging)"
 expect "staging PUBLIC_ORIGIN"    "$STG_ORIGIN"  "$(gh variable get PUBLIC_ORIGIN --repo "$GH_REPO" --env staging)"
+# The same protection on both, and nothing else: a reviewer or wait timer on one only is the shared-
+# identity bypass (CLAUDE.md), so it fails here rather than passing unnoticed.
+for env in production staging; do
+  expect "$env protection rules (exactly)" branch_policy \
+    "$(gh api "repos/$GH_REPO/environments/$env" --jq '[.protection_rules[].type] | sort | join(",")')"
+  expect "$env deploys allowed from" "branch:main" \
+    "$(gh api "repos/$GH_REPO/environments/$env/deployment-branch-policies" --jq '[.branch_policies[] | "\(.type):\(.name)"] | sort | join(",")')"
+done
 echo "Phase 13 verified"
 )
 ```
@@ -1708,14 +1876,22 @@ Then, by hand, for each origin (staging stays read-only, so use read tools):
 2. Call `Get_zendesk_connection`, follow the connect link, connect your own Zendesk agent account.
 3. Call a read tool (`List_brands`) and confirm it runs as you.
 4. Confirm the audit record arrived — query the **workspace**, not `az monitor app-insights query`,
-   which cannot resolve `AppEvents`:
+   which cannot resolve `AppEvents`. Through ARM (`az rest` to the workspace's `/api/query`), not
+   `az monitor log-analytics query`: that needs the preview-only `log-analytics` extension, which
+   dynamic install will not always add (#3). This route needs nothing beyond core `az`. Note the
+   response's capitalised `Tables`/`Rows`.
 
 ```bash
 ( set -euo pipefail; source ~/zendesk-estate.env; assert_context
-WS=$(az monitor log-analytics workspace show -g "$RG" -n "$LAW" --query customerId -o tsv)
-n=$(az monitor log-analytics query -w "$WS" --analytics-query "AppEvents | where TimeGenerated > ago(1h) and Name == 'ZendeskToolCall' | summarize count() by AppRoleName" -o tsv)
+LAW_ID=$(az monitor log-analytics workspace show -g "$RG" -n "$LAW" --query id -o tsv)
+body=$(python3 -c 'import json; print(json.dumps({"query": "AppEvents | where TimeGenerated > ago(1h) and Name == \"ZendeskToolCall\" | summarize count() by AppRoleName", "timespan": "PT1H"}))')
+n=$(az rest --method post --url "https://management.azure.com$LAW_ID/api/query?api-version=2020-08-01" \
+      --body "$body" --query "Tables[0].Rows" -o tsv)
 nonempty "ZendeskToolCall records in the last hour, by target" "$n"
 echo "$n"
+for app in "$APP_PROD" "$APP_STG"; do   # each origin was signed in to and called, so each must have records
+  expect "$app has ZendeskToolCall records" 1 "$(printf '%s\n' "$n" | awk -v a="$app" '$1 == a && $2 > 0' | wc -l | tr -d ' ')"
+done
 )
 ```
 
@@ -1744,24 +1920,38 @@ a step work, update `infra/terraform/` (and this file) to match in the same PR.
 
 ## Unverified `az` behaviour
 
-Checked offline against `az` 2.91 help and source where possible; **these could not be**, and are
-the first suspects if a block fails:
+**Still unproven** after the first build — the first suspects if one of these blocks fails:
 
-- `az containerapp create --yaml` / `job create --yaml` with this exact shape (user-assigned identity
-  keyed by resource id, `registries[].identity`, `secretRef` env, `workloadProfileName` under
-  `properties`). The core module's YAML loader accepts these keys; Cloud Shell may load the
-  `containerapp` *extension* instead, whose loader was not exercised.
-- `az role definition create` with `AssignableScopes` set to a single **registry**, as Terraform
-  declares it. Microsoft documents a resource-level assignable scope as possible from the command
-  line but *not recommended*, so expect it to be accepted; if it is refused, stop and decide —
-  widening it to the Vitally RG changes the record.
-- Graph `PATCH /applications` with the whole `api` object on each write — written so it works whether
-  Graph merges or replaces, but not run.
-- The Key Vault window from Cloud Shell: whether the vault sees Cloud Shell's traffic from the address
-  `api.ipify.org` reports.
-- `az containerapp env certificate list --managed-certificates-only` reporting
-  `properties.subjectName`/`provisioningState` as queried.
-- `gh variable get` (needs a recent `gh`; Cloud Shell's should have it).
+- `az containerapp job create --yaml` (9.4, not yet run). Its body as `az` 2.91 builds it — 9.4's own
+  YAML with a dummy webhook, through `az`'s Job conversion — **passed ARM preflight** on 2026-10-29
+  (17 `null` fields, all accepted on `2025-07-01`), so the `allowInsecure` failure has no Job
+  counterpart. The create itself has not run.
+- The Key Vault window **from Cloud Shell** — whether the vault sees Cloud Shell's traffic from the
+  address `api.ipify.org` reports. Phase 7 ran from WSL instead, where it worked off the VPN.
+- The optional Cloudflare API block in 11.1 — tested against a stub; the live records were created
+  through the Cloudflare connector.
+- Phase 13's branch-policy **set** step — the owner applied the policy with the same `gh api` calls
+  run by hand, so the block itself has not run; its Verify has, live, and passed.
+
+**Settled by the first build (2026-10-28/29, #3):** `az role definition create` accepted
+`AssignableScopes` on the single registry, as `acr.tf` declares (Phase 4); Graph accepted
+`PATCH /applications` carrying the whole `api` object on each write, and both ordering constraints
+held (Phase 6); `az containerapp env certificate list --managed-certificates-only` reports
+`properties.subjectName`/`provisioningState` as queried (Phase 11); `gh variable get` works (Phase 13,
+from WSL).
+
+Found by running it (2026-10-28, #3): `az network private-endpoint dns-zone-group show` answers `{}`
+with exit 0 for a group that does not exist, so a `show … || create …` guard never creates it.
+The three zone-group steps guard with `list` instead. Every other `show` used as a guard here was
+checked against a missing name and fails as it should (exit 1 or 3).
+
+Also found by running it (2026-10-29, #3): `az containerapp create --yaml` fills every field the YAML
+leaves out with `null`, and the `2025-07-01` API that `az` 2.91 uses rejects `ingress.allowInsecure:
+null` with `The JSON value could not be converted to System.Boolean` (preflight:
+`ContainerAppInvalidSchema … Path: $`). Each of the other `null`s in the body was tested on its own
+and is accepted. Phase 9.3 therefore sets `allowInsecure: false`, the azurerm default Terraform
+relies on; the rest of the app YAML shape (user-assigned identity keyed by resource id,
+`registries[].identity`, `secretRef` env) passed preflight.
 
 Settled from the `az` 2.91 source, so no longer in doubt: `flow-log create` resolves the watcher from
 `--location` and puts the flow log in its resource group (`NetworkWatcherRG`), and `--retention 30`

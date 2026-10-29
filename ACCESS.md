@@ -2,9 +2,7 @@
 
 How to connect to the Zendesk MCP server, and how access is granted.
 
-> **Not yet live.** The hostname below is decided but not yet serving (it goes live with staging,
-> issue #3). The group object ids are filled in once the Entra objects exist (`infra/terraform/entra.tf`
-> outputs them).
+> **Live since 2026-10-29** (built under issue #3). The group object ids below are the live ones.
 
 ## Connecting
 
@@ -89,13 +87,13 @@ All five are **on** in FISCAL's deployment (decided 2026-10-28), so what limits 
 tier and your Zendesk role. The Infrastructure team can turn any of them off again
 (`Zendesk__Features__*`; the `zendesk_allow_*` Terraform variables).
 
-Group object ids (filled in once the build creates the groups — `docs/runbooks/build-the-estate.md`, Phase 6):
+Group object ids (created by `docs/runbooks/build-the-estate.md`, Phase 6, on 2026-10-28):
 
 | Group | Object ID |
 |---|---|
-| `sg-zendesk-readers` | *pending* |
-| `sg-zendesk-editors` | *pending* |
-| `sg-zendesk-admins`  | *pending* |
+| `sg-zendesk-readers` | `fe17236e-eb44-4fd2-9450-7f1c2c21f6ba` |
+| `sg-zendesk-editors` | `46dbd15e-7e3d-4b1c-aa46-776b37d91a2f` |
+| `sg-zendesk-admins`  | `a7855df2-e841-49a4-a024-bcecbfde4a48` |
 
 ### Signing in is gated too (department group)
 
