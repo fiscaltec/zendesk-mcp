@@ -46,6 +46,11 @@ Zendesk OAuth client `fiscal_zendesk_mcp`, and the subscription's `NetworkWatche
   (`]AIL subscription …`, where the `\r` returns the cursor and `]` overwrites the `F`). Install the
   Linux build with `curl -sL https://aka.ms/InstallAzureCLIDeb | sudo bash`; it keeps its own login
   and extensions. Found running Phases 7–9 from WSL (2026-10-28, #3).
+- **From a Claude Code cloud session, Phase 13 cannot run.** Its GitHub proxy refuses the Actions
+  variables, secrets and environments APIs (`HTTP 403: Access to this GitHub Actions path is not
+  permitted through this proxy`) for every client, `gh api` included; other Actions paths, such as
+  workflows, are allowed. Run Phase 13 from Cloud Shell or WSL, where `gh` talks to GitHub directly.
+  Checked 2026-10-29 (#3).
 - **Every block starts by sourcing `~/zendesk-estate.env`** (written by *Set these first*) and
   checking the subscription and tenant, so a block can be run after a Cloud Shell timeout (20 idle
   minutes) without re-pasting anything earlier. `~` is persisted by Cloud Shell; that file holds no
@@ -1762,7 +1767,8 @@ echo "Phase 12 verified"
 ## Phase 13 — GitHub
 
 Repository variables and secrets for `deploy.yml`, `release.yml` and `staging-gate.yml`, and the two
-environments whose names the federated credentials (Phase 4) match. `gh` in Cloud Shell, logged in as
+environments whose names the federated credentials (Phase 4) match. **Not from a Claude Code cloud
+session** — its GitHub proxy refuses these APIs (*How to run it*). `gh` in Cloud Shell, logged in as
 a repository admin (`gh auth login`). All of it is re-runnable.
 
 ```bash
