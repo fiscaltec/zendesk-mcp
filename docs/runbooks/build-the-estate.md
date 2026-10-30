@@ -6,8 +6,8 @@ then the out-of-band steps that were always manual (secrets, the first image, th
 consent, custom domains, tier membership, GitHub).
 
 > ⚠️ **Written 2026-10-28 from `infra/terraform/*.tf`, then run end to end on 2026-10-28/29 (#3)** —
-> from a Claude Code cloud session, with Phases 7, 8, 9.3 and 13 run from WSL — except 9.4 (the
-> scanner Job), which waits on the Teams webhook. Every fix that run needed is in this file (PR #16).
+> from a Claude Code cloud session, with Phases 7, 8, 9.3 and 13 run from WSL — 9.4 (the
+> scanner Job) included, the next day. Every fix that run needed is in this file (PR #16 and after).
 > What is still unproven is listed under [Unverified `az` behaviour](#unverified-az-behaviour).
 > **Stop at the first `FAIL`, the
 > first error, or the first output you did not expect**, fix the cause (here *and* in this file),
@@ -1408,12 +1408,33 @@ done
 ### 9.4 Secret-expiry scanner Job
 
 The Terraform passes `scan/run.py` to a stock `python:3-slim` image as base64 inside the command
-(`locals.scanner_command`); this builds the identical string from the repo clone. **It needs the Teams
-webhook, which is still an open decision** (`infra/terraform/README.md`, "Still open" 3). Until it
-exists, skip 9.4 and its checks and come back to it; nothing else depends on the Job.
+(`locals.scanner_command`); this builds the identical string from the repo clone. It needs the Teams
+webhook. **FISCAL's posts to the channel Vitally's scanner uses** (decided 2026-10-29,
+`infra/terraform/README.md`), so copy it from that Job's secret rather than typing it: the value goes
+from Azure to the file through a pipe and is never printed or put on a command line. It prints only the
+length — a Teams Workflows URL is a couple of hundred characters (290 on 2026-10-29). Nothing else
+depends on the Job, so 9.4 can wait if the webhook is not ready.
+
+```bash
+source ~/zendesk-estate.env; ( umask 077; mkdir -p "$SECRET_DIR"; az containerapp job secret show -g vitally-prod-rg-uksouth -n vitally-prod-secscan-uksouth --secret-name teams-webhook --query value -o tsv | tr -d '\n' > "$SECRET_DIR/teams-webhook" ); wc -c < "$SECRET_DIR/teams-webhook"
+```
+
+For a **different** channel, create a Workflows webhook in Teams and capture it instead, on its own line:
 
 ```bash
 source ~/zendesk-estate.env; capture_secret teams-webhook
+```
+
+Neither scanner posts unless a secret is within 30 days of expiry (Vitally's logged `none within 30
+days` on every run for 90 days before this build), so a run of the Job does not prove the webhook.
+This does — one test card to the channel, the URL again piped and never printed; expect `HTTP 202`
+**and** the card in the channel (Power Automate accepts with 202 even when the flow cannot post):
+
+```bash
+az containerapp job secret show -g vitally-prod-rg-uksouth -n vitally-prod-secscan-uksouth --secret-name teams-webhook --query value -o tsv | python3 -c 'import json,sys,urllib.request
+u = sys.stdin.read().strip()
+card = {"type": "message", "attachments": [{"contentType": "application/vnd.microsoft.card.adaptive", "content": {"type": "AdaptiveCard", "$schema": "http://adaptivecards.io/schemas/adaptive-card.json", "version": "1.4", "body": [{"type": "TextBlock", "weight": "Bolder", "text": "Test: Key Vault secret-expiry webhook"}, {"type": "TextBlock", "wrap": True, "text": "Sent by hand to check the secret-expiry webhook still posts. Please ignore."}]}}]}
+print("HTTP", urllib.request.urlopen(urllib.request.Request(u, json.dumps(card).encode(), {"Content-Type": "application/json"}), timeout=30).status)'
 ```
 
 ```bash
@@ -1922,10 +1943,6 @@ a step work, update `infra/terraform/` (and this file) to match in the same PR.
 
 **Still unproven** after the first build — the first suspects if one of these blocks fails:
 
-- `az containerapp job create --yaml` (9.4, not yet run). Its body as `az` 2.91 builds it — 9.4's own
-  YAML with a dummy webhook, through `az`'s Job conversion — **passed ARM preflight** on 2026-10-29
-  (17 `null` fields, all accepted on `2025-07-01`), so the `allowInsecure` failure has no Job
-  counterpart. The create itself has not run.
 - The Key Vault window **from Cloud Shell** — whether the vault sees Cloud Shell's traffic from the
   address `api.ipify.org` reports. Phase 7 ran from WSL instead, where it worked off the VPN.
 - The optional Cloudflare API block in 11.1 — tested against a stub; the live records were created
@@ -1938,7 +1955,9 @@ a step work, update `infra/terraform/` (and this file) to match in the same PR.
 `PATCH /applications` carrying the whole `api` object on each write, and both ordering constraints
 held (Phase 6); `az containerapp env certificate list --managed-certificates-only` reports
 `properties.subjectName`/`provisioningState` as queried (Phase 11); `gh variable get` works (Phase 13,
-from WSL).
+from WSL); `az containerapp job create --yaml` with 9.4's shape (preflight first — 17 `null`
+fields, all accepted on `2025-07-01` — then created from WSL, and the Phase 9 Verify's Job checks
+passed).
 
 Found by running it (2026-10-28, #3): `az network private-endpoint dns-zone-group show` answers `{}`
 with exit 0 for a group that does not exist, so a `show … || create …` guard never creates it.
@@ -2007,7 +2026,7 @@ Every `resource` in `infra/terraform/*.tf` (data sources and outputs excluded).
 | `azurerm_container_app.app` | 9.3 |
 | `azurerm_container_app.staging` | 9.3 |
 | `azurerm_role_assignment.mi_ca_contributor`, `.mi_ca_staging_contributor` | 9.3 |
-| `azurerm_container_app_job.scanner` | 9.4 (waits on the Teams webhook) |
+| `azurerm_container_app_job.scanner` | 9.4 |
 
 Out-of-band in the Terraform as well, and built here: Entra client secret and both vault secrets (7),
 first image (8), Graph `GroupMember.Read.All` and admin consent (10), custom domains and managed

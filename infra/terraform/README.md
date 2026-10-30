@@ -4,8 +4,7 @@ The whole Azure and Entra estate for the Zendesk MCP server, in **IT-Production 
 `zendesk-prod-rg-uksouth`** (UK South), described as Terraform. It is a **record, never applied**:
 the estate is built and changed with `az` CLI (`docs/runbooks/build-the-estate.md`), and these files
 are kept in step by hand — the Vitally estate's practice. Built on 2026-10-28/29 (#3) to match this
-record, except the secret-expiry scanner Job (`containerapps.tf`), which is described here but not
-built yet: it waits on the Teams webhook.
+record, the secret-expiry scanner Job (`containerapps.tf`) included.
 
 The design is the Vitally MCP estate's (fiscaltec/vitally-mcp), rebuilt for this server. Comments
 cite `vitally-mcp#NNN` where a lesson was learned there.
@@ -74,6 +73,7 @@ Settled on 2026-10-28 and committed as defaults, so the record and the build run
 | Container registry | **shared** with the Vitally estate (`vitallyproducruksouth`), accepting the cross-estate write access `acr.tf` describes | `acr_name`, `acr_resource_group_name` |
 | Build method | `az` CLI (`docs/runbooks/build-the-estate.md`); this Terraform is a record, never applied — as Vitally's | — |
 | VNet range | `10.81.0.0/23`, confirmed free | `vnet_address_space` |
+| Scanner Teams webhook (2026-10-29) | the channel Vitally's scanner posts to — copied from `vitally-prod-secscan-uksouth`'s `teams-webhook` secret, never typed; the card's title says "Zendesk MCP:" so the two can't be confused | `teams_webhook_url` |
 
 Still open:
 
@@ -83,7 +83,6 @@ Still open:
    up widely.
 2. **Audit retention** — how long `AppEvents` keeps tool arguments, which can name customers
    (`monitoring.tf` sets the workspace retention).
-3. **The Teams webhook** for the expiry scanner (`TF_VAR_teams_webhook_url`).
 
 ## Building and changing the estate
 
