@@ -618,10 +618,14 @@ public static class TicketsBulkTools
         return entry;
     }
 
+    private static string WasNew(long id) => $"Ticket {id} was New; a ticket cannot return to New, so undo leaves its status.";
+
     /// <summary>
     /// The value to send for a custom field: a multi-select (a field that holds a list) gets its option
     /// tags as a list, everything else the text as given. Unverified against the live API: the list
-    /// form for a multi-select through update_many.
+    /// form for a multi-select through update_many. A multi-select is recognised by its current value
+    /// being a list, so one that has never been set (if Zendesk reads it back as null) is sent as text;
+    /// the re-read then reports it not_confirmed rather than changed.
     /// </summary>
     private static JsonNode? FieldValue(JsonNode? from, JsonNode? to) =>
         from is JsonArray && ToolJson.String(to) is { } text
@@ -770,13 +774,18 @@ public static class TicketsBulkTools
                     var fields = new JsonArray();
                     foreach (var f in value!.AsArray())
                     {
-                        if (f!["from"] is JsonArray or JsonObject)
+                        if (f!["from"] is JsonObject)
                         {
-                            warnings.Add($"Ticket {planned.Id}: custom field {f["id"]} held a list, which undo cannot express; restore it with Update_ticket.");
+                            warnings.Add($"Ticket {planned.Id}: custom field {f["id"]} held a value undo cannot express; restore it with Update_ticket.");
                             continue;
                         }
 
-                        fields.Add(new JsonObject { ["id"] = f["id"]!.DeepClone(), ["value"] = ScalarText(f["from"]) });
+                        // A multi-select's list goes back as its option tags separated by spaces, the
+                        // text form this tool accepts for one (an empty list clears the field).
+                        var previous = f["from"] is JsonArray list
+                            ? string.Join(" ", list.Select(ScalarText).OfType<string>())
+                            : ScalarText(f["from"]);
+                        fields.Add(new JsonObject { ["id"] = f["id"]!.DeepClone(), ["value"] = previous });
                     }
 
                     if (fields.Count > 0)
@@ -789,15 +798,16 @@ public static class TicketsBulkTools
                     warnings.Add($"Ticket {planned.Id} had no priority before; Zendesk cannot clear one, so undo leaves it.");
                     break;
                 case "status":
-                    // A status change also resets the custom status to its category's default, so the
-                    // custom status the ticket had is what puts it back exactly.
-                    if (!planned.Diff.ContainsKey("custom_status_id") && ToolJson.Long(planned.Ticket["custom_status_id"]) is { } previousCustom)
+                    // A ticket cannot return to New, by status or by a New-category custom status, so
+                    // that is checked first. Otherwise a status change also resets the custom status to
+                    // its category's default, so the custom status the ticket had puts it back exactly.
+                    if (ToolJson.String(value!["from"]) == "new")
+                    {
+                        warnings.Add(WasNew(planned.Id));
+                    }
+                    else if (!planned.Diff.ContainsKey("custom_status_id") && ToolJson.Long(planned.Ticket["custom_status_id"]) is { } previousCustom)
                     {
                         entry["custom_status_id"] = previousCustom;
-                    }
-                    else if (ToolJson.String(value!["from"]) == "new")
-                    {
-                        warnings.Add($"Ticket {planned.Id} was New; a ticket cannot return to New, so undo leaves its status.");
                     }
                     else
                     {
@@ -809,6 +819,9 @@ public static class TicketsBulkTools
                         warnings.Add($"Undoing problem ticket {planned.Id} does not reopen the incidents solving it solved.");
                     }
 
+                    break;
+                case "custom_status_id" when ToolJson.String(planned.Ticket["status"]) == "new":
+                    warnings.Add(WasNew(planned.Id));
                     break;
                 case "custom_status_id" when value!["from"] is null:
                     entry["status"] = planned.Ticket["status"]?.DeepClone();
@@ -879,9 +892,13 @@ public static class TicketsBulkTools
             return have.SetEquals(want);
         }
 
+        // A cleared checkbox reads back as the boolean false; only that, not the text "false" in a
+        // text field, counts as no value.
+        var clearedCheckbox = current is JsonValue v && v.TryGetValue<bool>(out var flag) && !flag;
         var currentText = ScalarText(current);
-        static bool None(string? text) => string.IsNullOrEmpty(text) || text == "false";
-        return (None(currentText) && None(requested)) || string.Equals(currentText, requested, StringComparison.Ordinal);
+        var currentEmpty = clearedCheckbox || string.IsNullOrEmpty(currentText);
+        var requestedEmpty = string.IsNullOrEmpty(requested) || (clearedCheckbox && requested == "false");
+        return (currentEmpty && requestedEmpty) || string.Equals(currentText, requested, StringComparison.Ordinal);
     }
 
     /// <summary>A scalar's text: a string's own value, a number or boolean as JSON writes it.</summary>

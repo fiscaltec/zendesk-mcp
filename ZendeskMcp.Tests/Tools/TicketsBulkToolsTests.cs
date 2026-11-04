@@ -403,7 +403,8 @@ public class TicketsBulkToolsTests
     {
         // Once the PUT has gone, a cancelled call would read as failed and invite a retry.
         using var cancel = new CancellationTokenSource();
-        using var fake = BulkFake(extra: r =>
+        const string applied = """{"tickets":[{"id":101,"status":"open","priority":"high","updated_at":"later"}]}""";
+        using var fake = BulkFake(after: applied, extra: r =>
         {
             if (r.Method == HttpMethod.Put)
             {
@@ -419,6 +420,51 @@ public class TicketsBulkToolsTests
 
         cancel.IsCancellationRequested.Should().BeTrue();
         result["job"]!["status"]!.GetValue<string>().Should().Be("completed");
+
+        // The re-read ran too (it would be skipped, leaving 101 not confirmed, under the caller's token).
+        result["changed"]!.AsArray().Select(i => i!.GetValue<long>()).Should().Equal(101);
+        result["not_confirmed"]!.AsArray().Should().BeEmpty();
+    }
+
+    [Theory]
+    [InlineData("""{"id":101,"status":"new","custom_status_id":1,"tags":[],"updated_at":"x"}""", """{"id":101,"status":"open","custom_status_id":2,"tags":[],"updated_at":"y"}""", "open", null)]
+    [InlineData("""{"id":101,"status":"new","custom_status_id":1,"tags":[],"updated_at":"x"}""", """{"id":101,"status":"open","custom_status_id":2,"tags":[],"updated_at":"y"}""", null, 2L)]
+    public async Task UndoNeverReturnsATicketToNew_EvenWithCustomStatuses(string before, string after, string? status, long? customStatus)
+    {
+        using var fake = BulkFake($$"""{"tickets":[{{before}}]}""", $$"""{"tickets":[{{after}}]}""",
+            extra: r => r.Path == "/api/v2/custom_statuses/2" ? Json("""{"custom_status":{"id":2,"status_category":"open"}}""") : null);
+
+        var result = await PreviewThenConfirm(c => TicketsBulkTools.BulkUpdateTickets(Service(fake), [101],
+            status is not null ? new BulkTicketChange { Status = status } : new BulkTicketChange { CustomStatusId = customStatus }, confirmation: c));
+
+        result["changed"]!.AsArray().Select(i => i!.GetValue<long>()).Should().Equal(101);
+        result["undo"]!.AsArray().Should().BeEmpty("nothing else changed, and a return to New is left out");
+        result["warnings"]!.AsArray().Should().Contain(w => w!.GetValue<string>().Contains("cannot return to New"));
+    }
+
+    [Fact]
+    public async Task UndoGivesAMultiSelectBackAsItsOptionTags()
+    {
+        const string before = """{"tickets":[{"id":101,"status":"open","custom_fields":[{"id":2,"value":["a","b"]}],"updated_at":"x"}]}""";
+        const string after = """{"tickets":[{"id":101,"status":"open","custom_fields":[{"id":2,"value":["c"]}],"updated_at":"y"}]}""";
+        using var fake = BulkFake(before, after);
+
+        var result = await PreviewThenConfirm(c => TicketsBulkTools.BulkUpdateTickets(Service(fake), [101],
+            new BulkTicketChange { CustomFields = [new TicketCustomFieldInput(2, "c")] }, confirmation: c));
+
+        result["undo"]![0]!["custom_fields"]!.ToJsonString().Should().Be("""[{"id":2,"value":"a b"}]""");
+    }
+
+    [Fact]
+    public async Task TheTextFalseInATextFieldIsAValue_NotAClearedCheckbox()
+    {
+        const string text = """{"tickets":[{"id":101,"status":"open","custom_fields":[{"id":3,"value":"false"},{"id":4,"value":null}],"updated_at":"x"}]}""";
+        using var fake = BulkFake(text);
+
+        var result = JsonNode.Parse(await TicketsBulkTools.BulkUpdateTickets(Service(fake), [101],
+            new BulkTicketChange { CustomFields = [new TicketCustomFieldInput(3, ""), new TicketCustomFieldInput(4, "false")] }))!;
+
+        result["will_change"]![0]!["changes"]!["custom_fields"]!.AsArray().Select(f => f!["id"]!.GetValue<long>()).Should().Equal(3, 4);
     }
 
     [Theory]
