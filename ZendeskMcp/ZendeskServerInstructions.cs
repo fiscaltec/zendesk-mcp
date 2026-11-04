@@ -24,10 +24,12 @@ public static class ZendeskServerInstructions
         - Bulk_update_tickets previews first (leave out confirmation): show the person how many
           tickets will change and what changes, and call again with the same arguments and the
           confirmation only once they say yes. For one ticket, or for comments, use Update_ticket.
+        - Before Merge_tickets, show the person the tickets (subject, requester, status) and get their
+          agreement: a merge closes the source tickets for good and cannot be undone.
         - Public replies, article publishing, Help Center category and section changes, macro changes and
           user/organisation changes can each be switched off for the whole account; a refusal naming one
           of these is a setting, not a fault.
-        - Read-only deployments deny all writes and hide the create/update tools; a permission error
+        - Read-only deployments deny all writes and hide the tools that change Zendesk; a permission error
           means your Entra tier lacks the required permission, or Zendesk refused it for this agent.
         """;
 }
