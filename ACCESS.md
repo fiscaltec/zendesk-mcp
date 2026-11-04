@@ -155,7 +155,7 @@ Do all of these, in this order:
 An Entra access token they already hold stays valid until it expires (about 60–90 minutes). Step 2
 is what makes that harmless for Zendesk. If you need to stop all writes for everyone at once, set
 `Authorization__ReadOnly=true` on the Container App. If Graph is down as well, disable ingress
-instead — vitally-mcp's ACCESS.md explains why `ReadOnly` misbehaves during a Graph outage.
+instead — `docs/runbooks/read-only-and-rbac.md` (*What it is not for*) explains why `ReadOnly` misbehaves during a Graph outage.
 
 ## How it's set up (in brief)
 

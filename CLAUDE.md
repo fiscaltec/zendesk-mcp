@@ -10,6 +10,15 @@ A Model Context Protocol (MCP) server in C# giving FISCAL staff access to Zendes
 
 **Provenance.** Issue references written `vitally-mcp#NNN` point at fiscaltec/vitally-mcp, where the lesson was learnt; the design and the code that carries it came across together. vitally-mcp's own `CLAUDE.md` holds the full history — dates, measurements, incident write-ups — behind the rules stated here more briefly. When this file and that one disagree about a shared component, check the code here.
 
+**Keeping in step with vitally-mcp.** The port of everything outside the source and test folders (workflows, scripts, templates, runbooks, `CLAUDE.md` sections) is current to vitally-mcp **`0c6d4e1`** (2026-10-26), audited on 2026-11-04 in #10, whose decision table records what was ported, adapted or judged not applicable, and why. Findings that flow the other way go to #17. To check for drift, diff from that commit rather than re-auditing:
+
+```bash
+# One command: a failed or skipped fetch leaves a stale origin/main, which prints nothing with exit 0 — not "no drift".
+git -C <vitally-mcp clone> fetch origin main && git -C <vitally-mcp clone> log --oneline 0c6d4e1..origin/main -- . ':!VitallyMcp' ':!VitallyMcp.Tests'
+```
+
+That lists vitally-mcp's non-source changes since this audit; decide each as #10 did, then move the commit named here. Run on 2026-11-04, it listed nothing: the one later commit, `fdc6f5e` (#197), touches only the two `.csproj` files. ⚠️ The clone must hold history back to `0c6d4e1`: in a `--depth 1` clone the command fails with `fatal: bad revision` (exit 128), which is not "no drift". Check the exit status, not just the empty output. Source drift (a fix to a shared component such as the OAuth proxy, `ToolAuthorizer` or the Graph resolver) is out of this command's scope: list it with the same range over `-- VitallyMcp`, and read each commit, since the code here was ported and renamed rather than copied file for file.
+
 **Key characteristics:**
 - 46 tools over tickets, KPI/SLA/CSAT reporting, macros, users and organisations, configuration and the Help Center — see *Tools*.
 - **Per-user Zendesk OAuth.** Every Zendesk call is made with the signed-in person's own Zendesk token. There is no shared Zendesk credential in a deployed target, so Zendesk attributes every change to the agent and applies their role, group and brand restrictions. This is the main architectural difference from vitally-mcp, which calls Vitally with one shared key.
@@ -482,7 +491,7 @@ These components are ported without behavioural change, and their rules hold her
 - **Upstream endpoints come from OIDC discovery**, checked against `Authority` (§4.3), cached 12 h with last-known-good fallback; startup refuses to boot without them (vitally-mcp#104).
 - **`/oauth/token` services only `authorization_code` and `refresh_token`** — it injects the confidential secret, so any other grant would mint tokens without a sign-in.
 - **Entitlement comes from live Entra group membership via Graph** (`Authorization:LiveGroupCheck`, transitive, keyed on `oid` — never `sub`), fresh → stale (up to `LiveGroupStaleSeconds`) → deny. No claim authorises while the live check is on (vitally-mcp#106, vitally-mcp#108, vitally-mcp#156).
-- **`ZendeskService.SendAsync` is the enforcement point**; `[Authorize]` discovery filtering shares `HasEffectivePermissionAsync` with it so they cannot disagree. `Authorization:ReadOnly` denies every non-GET for everyone.
+- **`ZendeskService.SendAsync` is the enforcement point**; `[Authorize]` discovery filtering shares `HasEffectivePermissionAsync` with it so they cannot disagree. `Authorization:ReadOnly` denies every non-GET for everyone; `docs/runbooks/read-only-and-rbac.md` says what it is and is not for, and how to verify staging is serving it.
 - **Log levels are a security control and live in `Program.cs`**, not `appsettings.json` (excluded from the image) or environment variables (lost on a recreate). Failure records log the exception *type*, the status and the resource *type* — never a message, an attached exception, a body or the rest of the path (vitally-mcp#94).
 - **Four audit record shapes** — tool call (primary: caller `oid`, tool, arguments, record ids touched, tier, staleness, outcome, correlation id), action (per upstream call), service denial, tier denial. Tool arguments are recorded; upstream response bodies never are. Records route to `AppEvents` when `ApplicationInsights__ConnectionString` is set, and must not depend on trace sampling (vitally-mcp#147, vitally-mcp#178).
 
