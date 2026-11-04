@@ -28,7 +28,7 @@ public static class TicketFilterDescriptions
     public const string CustomFieldId = "Numeric id of a ticket field to filter on. Give custom_field_value with it. Use List_ticket_fields to find ids.";
     public const string CustomFieldValue = "Value the custom field must have (for a drop-down, the option's tag). Requires custom_field_id. 'none' does not find empty fields: use custom_fields with has_value false.";
     public const string CustomFields = "Custom field conditions, all of which must hold (at most 10, each field once, not the custom_field_id field): {id, value} for an exact value as text (a drop-down option's tag; 'checked' or 'unchecked' for a checkbox), {id, has_value: false} for an empty field, {id, has_value: true} for any value. has_value works on drop-down, multi-select, text, multi-line, number, decimal, date, regex, lookup and credit-card fields; a checkbox is never empty, so use value 'checked' or 'unchecked'. Built-in fields such as priority or group have their own filters. Use List_ticket_fields for ids.";
-    public const string Channel = "Channels the tickets came in on; a ticket on any of them matches: email, web, api, voice, native_messaging, chat, mobile, mobile_sdk, sms, facebook, twitter, whatsapp, web_widget, or messaging. Each value except messaging selects exactly the tickets of that channel's group in Count_tickets group_by channel; messaging is every messaging channel together (Web Widget and mobile SDK messaging, WhatsApp, LINE, WeChat, Instagram DM, Telegram, Viber, KakaoTalk, Apple Messages for Business, Google RCS and Business Messages, Facebook Messenger, X DM, messaging SMS and the Sunshine Conversations API). Use this, never 'via:' in text.";
+    public const string Channel = "Channels the tickets came in on; a ticket on any of them matches: email, web, api, voice, native_messaging, chat, mobile, mobile_sdk, sms, facebook, twitter, whatsapp, web_widget, or messaging. Each value except messaging selects exactly the tickets of that channel's group in Count_tickets group_by channel; messaging is every messaging channel together (native_messaging, i.e. Web Widget and mobile SDK messaging, then WhatsApp, LINE, WeChat, Instagram DM, Telegram, Viber, KakaoTalk, Apple Messages for Business, Google RCS and Business Messages, Facebook Messenger, X DM, messaging SMS and the Sunshine Conversations API). Use this, never 'via:' in text.";
     public const string CustomStatusId = "Numeric id of a custom ticket status.";
     public const string HasAttachments = "true for tickets with attachments, false for tickets without.";
     public const string StartDate = "Created on or after this date (YYYY-MM-DD, or an ISO date-time).";
@@ -610,7 +610,9 @@ public static class TicketSearchHelpers
         "subject", "description", "status", "custom_status", "tickettype", "priority", "group", "assignee", "brand",
     };
 
-    // The field types has_value applies to: every type a ticket can leave empty.
+    // The field types has_value applies to: every type a ticket can leave empty (Swifteq's list).
+    // Unverified against the live API: has_value (custom_field_<id>:* and its negation) on any type but a
+    // drop-down ("tagger"), where it was confirmed.
     private static readonly HashSet<string> EmptiableFieldTypes = new(StringComparer.Ordinal)
     {
         "tagger", "multiselect", "text", "textarea", "integer", "decimal", "date", "regexp", "lookup", "partialcreditcard",
@@ -690,7 +692,7 @@ public static class TicketSearchHelpers
 
         string NoneRefusal(long id, string parameter) =>
             definitions.TryGetValue(id, out var f) && ToolJson.String(f["type"]) == "checkbox"
-                ? $"{parameter} 'none' does not apply to field {Id(id)}, a checkbox: use 'checked' or 'unchecked'."
+                ? $"{parameter} 'none' does not apply to field {Id(id)}, a checkbox: use custom_fields [{{\"id\": {Id(id)}, \"value\": \"checked\"}}] or 'unchecked'."
                 : $"{parameter} 'none' does not find tickets with field {Id(id)} empty: Zendesk searches for the value 'none'. Use custom_fields [{{\"id\": {Id(id)}, \"has_value\": false}}].";
 
         if (noneValue)

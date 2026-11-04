@@ -154,6 +154,18 @@ public class TicketSearchQueryTests
         TicketSearchQuery.ChannelValues.Should().Contain("messaging");
     }
 
+    [Fact]
+    public void TheChannelDescription_ListsExactlyTheValuesTheFilterTakes()
+    {
+        // The description the model reads is written by hand; this keeps it in step with the table.
+        var listed = ZendeskMcp.Tools.TicketFilterDescriptions.Channel
+            .Split(':', 2)[1].Split('.', 2)[0]
+            .Replace(" or ", ", ", StringComparison.Ordinal)
+            .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+
+        listed.Should().BeEquivalentTo(TicketSearchQuery.ChannelValues);
+    }
+
     [Theory]
     [InlineData("instagram_dm")]
     [InlineData("via:mail")]
@@ -263,6 +275,20 @@ public class TicketSearchQueryTests
     [InlineData("plain", "plain")]
     public void ACustomFieldValue_IsExact_SoSearchSyntaxIsQuoted(string value, string expected)
     {
+        TicketSearchQuery.Build(new TicketSearchFilters { CustomFields = [new TicketCustomFieldCondition(5, Value: value)] })
+            .Should().Be($"type:ticket custom_field_5:{expected}");
+    }
+
+    [Theory]
+    [InlineData("*", "\"*\"")]
+    [InlineData("-x", "\"-x\"")]
+    [InlineData("<5", "\"<5\"")]
+    [InlineData("plain", "plain")]
+    public void CustomFieldValue_QuotesSearchSyntax_AsCustomFieldsDoes(string value, string expected)
+    {
+        // Both routes to one filter build the same term.
+        TicketSearchQuery.Build(new TicketSearchFilters { CustomFieldId = 5, CustomFieldValue = value })
+            .Should().Be($"type:ticket custom_field_5:{expected}");
         TicketSearchQuery.Build(new TicketSearchFilters { CustomFields = [new TicketCustomFieldCondition(5, Value: value)] })
             .Should().Be($"type:ticket custom_field_5:{expected}");
     }

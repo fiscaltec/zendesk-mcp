@@ -80,8 +80,9 @@ public static class TicketSearchQuery
     // Messages, Facebook Messenger and X DM through Sunshine Conversations, messaging SMS (Twilio,
     // MessageBird) and the Sunshine Conversations API. Swifteq's server sends this set, and on
     // 2026-11-04 Zendesk accepted it as one search (an unknown via: value makes it refuse the whole
-    // search), so every value is valid search syntax. Whether each matches its tickets is unverified
-    // against the live API: the account has no messaging tickets.
+    // search), so every value is valid search syntax.
+    // Unverified against the live API: whether each value matches its own tickets; the account has no
+    // messaging tickets.
     private static readonly string[] MessagingSearchValues =
     [
         "native_messaging", "whatsapp", "line", "wechat", "instagram_dm", "telegram", "viber", "kakaotalk",
@@ -148,7 +149,7 @@ public static class TicketSearchQuery
                 throw new ArgumentException("custom_field_id and custom_field_value must be given together, with a positive field id.");
             }
 
-            terms.Add($"custom_field_{fieldId.ToString(CultureInfo.InvariantCulture)}:{Quote(filters.CustomFieldValue)}");
+            terms.Add($"custom_field_{fieldId.ToString(CultureInfo.InvariantCulture)}:{ExactValue(filters.CustomFieldValue!)}");
         }
 
         AddCustomFields(terms, filters);
@@ -254,7 +255,9 @@ public static class TicketSearchQuery
     }
 
     // custom_fields: each condition one term, all ANDed (two different fields AND: confirmed against the
-    // live API through Swifteq's server). Zendesk ORs two terms on the same field, so a field may appear once, and not alongside custom_field_id. What a field's type allows (a checkbox is
+    // live API through Swifteq's server). Repeating a keyword ORs its values (confirmed for priority: and via:), so two terms on one field
+    // would match either; a field may appear once. Unverified against the live API: that custom_field_<id>
+    // terms OR like that — refusing a repeat is right either way, since 'both' is never what they mean. A field may appear once, and not alongside custom_field_id. What a field's type allows (a checkbox is
     // never empty, a built-in field has its own filter) needs the field definitions, which
     // TicketSearchHelpers.CheckCustomFieldsAsync reads; this checks only the shape.
     private static void AddCustomFields(List<string> terms, TicketSearchFilters filters)
@@ -280,7 +283,7 @@ public static class TicketSearchQuery
             var id = condition.Id.ToString(CultureInfo.InvariantCulture);
             if (!seen.Add(condition.Id))
             {
-                throw new ArgumentException($"custom_fields names field {id} more than once; Zendesk would match either condition rather than both. Give each field once.");
+                throw new ArgumentException($"custom_fields names field {id} more than once. Give each field once; to match any of several values, make separate calls.");
             }
 
             if (filters.CustomFieldId == condition.Id)

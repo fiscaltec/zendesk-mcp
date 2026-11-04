@@ -410,14 +410,29 @@ public class TicketsToolsTests
     }
 
     [Fact]
-    public async Task CountTickets_CustomFieldValueNone_OnACheckbox_PointsToTrueOrFalse()
+    public async Task CountTickets_CustomFieldValueNone_OnACheckbox_PointsToCustomFieldsChecked()
     {
-        // has_value false would itself be refused on a checkbox, so the message must not suggest it.
+        // has_value false would itself be refused on a checkbox, and only custom_fields turns 'checked'
+        // into the true the field is searched as, so the message points there and nowhere else.
         using var fake = SearchFake();
 
         var act = () => TicketsTools.CountTickets(TestHelpers.BuildZendeskService(fake.Client), custom_field_id: 12, custom_field_value: "none");
 
-        await act.Should().ThrowAsync<ArgumentException>().WithMessage("*'none' does not apply*checkbox*");
+        var thrown = await act.Should().ThrowAsync<ArgumentException>().WithMessage("*'none' does not apply*checkbox*custom_fields*\"checked\"*");
+        thrown.Which.Message.Should().NotContain("has_value");
+    }
+
+    [Fact]
+    public async Task CountTickets_FollowingTheCheckboxAdvice_SearchesTheFieldAsTrueOrFalse()
+    {
+        using var fake = SearchFake();
+        var zendesk = TestHelpers.BuildZendeskService(fake.Client);
+
+        var unchecked_ = JsonNode.Parse(await TicketsTools.CountTickets(zendesk, custom_fields: [new TicketCustomFieldCondition(12, Value: "unchecked")]))!;
+        var checked_ = JsonNode.Parse(await TicketsTools.CountTickets(zendesk, custom_fields: [new TicketCustomFieldCondition(12, Value: "checked")]))!;
+
+        unchecked_["query"]!.GetValue<string>().Should().Be("type:ticket custom_field_12:false");
+        checked_["query"]!.GetValue<string>().Should().Be("type:ticket custom_field_12:true");
     }
 
     [Fact]
