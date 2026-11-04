@@ -209,6 +209,32 @@ public class ZendeskConnectEndpointsTests
     }
 
     [Fact]
+    public async Task ABrowserThatGivesUpAfterTheStore_StillSpendsTheLink()
+    {
+        // Once the grant is stored, the link must be spent too, whatever the browser does: an unspent
+        // link would let a second attempt reconnect someone who has since disconnected (#13).
+        using var factory = new Factory(zendeskEmail: "agent@example.com");
+        using var client = factory.CreateClient(new WebApplicationFactoryClientOptions { AllowAutoRedirect = false });
+        var link = await factory.IssueLinkAsync(ObjectId, "agent@example.com");
+        var firstState = QueryValue((await client.GetAsync(link)).Headers.Location!.ToString(), "state");
+        var secondState = QueryValue((await client.GetAsync(link)).Headers.Location!.ToString(), "state");
+        using var browser = new CancellationTokenSource();
+        factory.AfterSave = browser.Cancel;
+
+        await FluentActions.Awaiting(() => GetWithCookieAsync(client, $"/zendesk/callback?code=c1&state={firstState}", firstState, browser.Token))
+            .Should().ThrowAsync<OperationCanceledException>();
+        factory.AfterSave = null;
+        (await factory.Store.GetAsync(ObjectId))!.AccessToken.Should().Be("issued-access", "the store finished before the browser gave up");
+        factory.Revocations.Should().NotContain("issued-access", "a grant that was stored and its link spent is kept, not revoked as abandoned");
+        await factory.Store.RemoveAsync(ObjectId);
+
+        var second = await GetWithCookieAsync(client, $"/zendesk/callback?code=c2&state={secondState}", secondState);
+
+        second.StatusCode.Should().Be(HttpStatusCode.BadRequest, "the first callback spent the link before the cancellation could stop it");
+        (await factory.Store.GetAsync(ObjectId)).Should().BeNull("a disconnect must stay a disconnect");
+    }
+
+    [Fact]
     public async Task AStateUsedOnce_CannotCompleteASecondTime()
     {
         using var factory = new Factory(zendeskEmail: "agent@example.com");
@@ -265,11 +291,11 @@ public class ZendeskConnectEndpointsTests
         return QueryValue(connect.Headers.Location!.ToString(), "state");
     }
 
-    private static Task<HttpResponseMessage> GetWithCookieAsync(HttpClient client, string url, string state)
+    private static async Task<HttpResponseMessage> GetWithCookieAsync(HttpClient client, string url, string state, CancellationToken cancellationToken = default)
     {
         using var request = new HttpRequestMessage(HttpMethod.Get, url);
         request.Headers.Add("Cookie", $"zendesk_connect_state={state}");
-        return client.SendAsync(request);
+        return await client.SendAsync(request, cancellationToken);
     }
 
     private static string QueryValue(string url, string name) =>
@@ -303,6 +329,9 @@ public class ZendeskConnectEndpointsTests
 
         public IZendeskTokenStore Store => Services.GetRequiredService<IZendeskTokenStore>();
 
+        /// <summary>Runs after each store save, before the save returns, as if the browser acted then.</summary>
+        public Action? AfterSave { get; set; }
+
         /// <summary>The access tokens revoked at Zendesk, in order.</summary>
         public IReadOnlyList<string> Revocations => ZendeskRequests
             .Where(r => r.Method == HttpMethod.Delete && r.Path == "/api/v2/oauth/tokens/current.json")
@@ -330,6 +359,7 @@ public class ZendeskConnectEndpointsTests
             });
             builder.ConfigureServices(services =>
             {
+                services.AddSingleton<IZendeskTokenStore>(new NotifyingStore(this));
                 var oauthClient = services.AddHttpClient(ZendeskOAuthClient.HttpClientName)
                     .ConfigurePrimaryHttpMessageHandler(() => new StubZendesk(this));
                 if (OAuthTimeout is { } timeout)
@@ -338,6 +368,27 @@ public class ZendeskConnectEndpointsTests
                 }
             });
             return base.CreateHost(builder);
+        }
+
+        // The in-memory store, with a hook after each save that honours the caller's token afterwards,
+        // as a real store's later awaits would: a cancelled token there throws.
+        private sealed class NotifyingStore(Factory owner) : IZendeskTokenStore
+        {
+            private readonly InMemoryZendeskTokenStore _inner = new();
+
+            public Task<ZendeskUserToken?> GetAsync(string objectId, CancellationToken cancellationToken = default) =>
+                _inner.GetAsync(objectId, cancellationToken);
+
+            public async Task SaveAsync(string objectId, ZendeskUserToken token, CancellationToken cancellationToken = default)
+            {
+                await _inner.SaveAsync(objectId, token, cancellationToken);
+                owner.AfterSave?.Invoke();
+                await Task.Delay(50, CancellationToken.None);
+                cancellationToken.ThrowIfCancellationRequested();
+            }
+
+            public Task RemoveAsync(string objectId, CancellationToken cancellationToken = default) =>
+                _inner.RemoveAsync(objectId, cancellationToken);
         }
 
         private sealed class StubZendesk(Factory owner) : HttpMessageHandler

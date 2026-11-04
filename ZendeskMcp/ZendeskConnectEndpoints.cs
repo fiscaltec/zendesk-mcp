@@ -25,6 +25,9 @@ public static class ZendeskConnectEndpoints
 {
     public const string ConnectPath = "/zendesk/connect";
     public const string CallbackPath = "/zendesk/callback";
+
+    /// <summary>How long the callback's check, store and spend of the link may take once begun, whatever the browser does.</summary>
+    internal static readonly TimeSpan StoreTimeout = TimeSpan.FromSeconds(30);
     internal const string StateCookie = "zendesk_connect_state";
 
     public static void MapZendeskConnect(this WebApplication app)
@@ -150,25 +153,31 @@ public static class ZendeskConnectEndpoints
             // The link is checked and spent under the same lock. One link opened in two browsers
             // starts two attempts; without this, the second would store a grant after the first had
             // spent the link, and would reconnect someone who had disconnected in between (#13).
+            //
+            // Once the lock is held the section runs to the end on a bounded token of its own, not the
+            // browser's: a browser that gave up after the store would otherwise leave the grant stored
+            // and the link unspent, open to exactly that second attempt.
             var gate = ZendeskCredentialProvider.LockFor(attempt.ObjectId);
             await gate.WaitAsync(ctx.RequestAborted);
+            using var commit = new CancellationTokenSource(StoreTimeout);
             ZendeskUserToken? replaced = null;
             var linkSpent = false;
             try
             {
-                if (await links.PeekAsync(attempt.Ticket, ctx.RequestAborted) is null)
+                if (await links.PeekAsync(attempt.Ticket, commit.Token) is null)
                 {
                     linkSpent = true;
                 }
                 else
                 {
-                    replaced = await store.GetAsync(attempt.ObjectId, ctx.RequestAborted);
-                    await store.SaveAsync(attempt.ObjectId, oauthClient.ToUserToken(token, identity), ctx.RequestAborted);
+                    replaced = await store.GetAsync(attempt.ObjectId, commit.Token);
+                    await store.SaveAsync(attempt.ObjectId, oauthClient.ToUserToken(token, identity), commit.Token);
+                    await links.RedeemAsync(attempt.Ticket, commit.Token);
+                    // Kept only once stored and the link spent; any exit before this revokes it.
                     unkept.Keep();
-                    await links.RedeemAsync(attempt.Ticket, ctx.RequestAborted);
                 }
             }
-            catch (Exception ex) when (ex is not OperationCanceledException || !ctx.RequestAborted.IsCancellationRequested)
+            catch (Exception ex) when (ex is not OperationCanceledException || commit.IsCancellationRequested)
             {
                 // Not persisted, so not kept: revoke it rather than leave a live grant nobody holds.
                 // (The store cached it before the write failed; revoked, a call with it meets a 401
