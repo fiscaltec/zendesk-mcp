@@ -30,7 +30,6 @@ public static class AnalyticsTools
     private const string IncludeTagsDescription = "Comma-separated tags that must be present, as a string (e.g., 'bug,urgent,needs-review'). Case does not matter.";
     private const string ExcludeTagsDescription = "Comma-separated tags that must NOT be present, as a string (e.g., 'spam,test_data'). Case does not matter.";
     private const string CustomFieldIdDescription = "The numeric ID of a custom ticket field to filter by. Must be used together with custom_field_value. You can get the field ID from the Ticket Fields admin page URL or via the List_ticket_fields tool.";
-    private const string CustomFieldValueDescription = "The value to search for in the custom field specified by custom_field_id. Must be used together with custom_field_id. Multi-word values are automatically quoted.";
     private const string CustomStatusIdDescription = "Filter by a specific custom ticket status ID. Only applies when custom ticket statuses are activated on the account. Use this to target one exact status (e.g. 'On Hold') rather than the whole status category. Find the ID with List_ticket_fields: the Status field carries a custom_statuses array listing each status with its id and agent_label.";
     private const string HasAttachmentsDescription = "Filter by attachment presence. true = with attachments, false = without attachments, omit = ignore filter.";
     private const string StartDateDescription = "Start date filter (inclusive). ISO format: YYYY-MM-DD, YYYY-MM-DDThh:mm:ss, or YYYY-MM-DDThh:mm:ssZ. Example: '2024-01-15' or '2024-01-15T09:30:00Z'.";
@@ -62,7 +61,7 @@ public static class AnalyticsTools
         [Description(IncludeTagsDescription)] string? include_tags = null,
         [Description(ExcludeTagsDescription)] string? exclude_tags = null,
         [Description(CustomFieldIdDescription)] long? custom_field_id = null,
-        [Description(CustomFieldValueDescription)] string? custom_field_value = null,
+        [Description(TicketFilterDescriptions.CustomFieldValue)] string? custom_field_value = null,
         [Description(TicketFilterDescriptions.CustomFields)] TicketCustomFieldCondition[]? custom_fields = null,
         [Description(TicketFilterDescriptions.Channel)] string[]? channel = null,
         [Description(CustomStatusIdDescription)] long? custom_status_id = null,
@@ -248,7 +247,7 @@ public static class AnalyticsTools
         [Description(IncludeTagsDescription)] string? include_tags = null,
         [Description(ExcludeTagsDescription)] string? exclude_tags = null,
         [Description(CustomFieldIdDescription)] long? custom_field_id = null,
-        [Description(CustomFieldValueDescription)] string? custom_field_value = null,
+        [Description(TicketFilterDescriptions.CustomFieldValue)] string? custom_field_value = null,
         [Description(TicketFilterDescriptions.CustomFields)] TicketCustomFieldCondition[]? custom_fields = null,
         [Description(TicketFilterDescriptions.Channel)] string[]? channel = null,
         [Description(CustomStatusIdDescription)] long? custom_status_id = null,
@@ -384,7 +383,7 @@ public static class AnalyticsTools
         [Description(IncludeTagsDescription)] string? include_tags = null,
         [Description(ExcludeTagsDescription)] string? exclude_tags = null,
         [Description(CustomFieldIdDescription)] long? custom_field_id = null,
-        [Description(CustomFieldValueDescription)] string? custom_field_value = null,
+        [Description(TicketFilterDescriptions.CustomFieldValue)] string? custom_field_value = null,
         [Description(TicketFilterDescriptions.CustomFields)] TicketCustomFieldCondition[]? custom_fields = null,
         [Description(TicketFilterDescriptions.Channel)] string[]? channel = null,
         [Description(CustomStatusIdDescription)] long? custom_status_id = null,

@@ -26,7 +26,7 @@ public static class TicketFilterDescriptions
     public const string IncludeTags = "Comma-separated tags the tickets must have.";
     public const string ExcludeTags = "Comma-separated tags the tickets must not have.";
     public const string CustomFieldId = "Numeric id of a ticket field to filter on. Give custom_field_value with it. Use List_ticket_fields to find ids.";
-    public const string CustomFieldValue = "Value the custom field must have (for a drop-down, the option's tag). Requires custom_field_id. 'none' does not find empty fields: use custom_fields with has_value false.";
+    public const string CustomFieldValue = "Value the custom field must have, matched exactly (for a drop-down, the option's tag; 'checked' or 'unchecked' for a checkbox). Requires custom_field_id. 'none' does not find empty fields: use custom_fields with has_value false.";
     public const string CustomFields = "Custom field conditions, all of which must hold (at most 10, each field once, not the custom_field_id field): {id, value} for an exact value as text (a drop-down option's tag; 'checked' or 'unchecked' for a checkbox), {id, has_value: false} for an empty field, {id, has_value: true} for any value. has_value works on drop-down, multi-select, text, multi-line, number, decimal, date, regex, lookup and credit-card fields; a checkbox is never empty, so use value 'checked' or 'unchecked'. Built-in fields such as priority or group have their own filters. Use List_ticket_fields for ids.";
     public const string Channel = "Channels the tickets came in on; a ticket on any of them matches: email, web, api, voice, native_messaging, chat, mobile, mobile_sdk, sms, facebook, twitter, whatsapp, web_widget, or messaging. Each value except messaging selects exactly the tickets of that channel's group in Count_tickets group_by channel; messaging is every messaging channel together (native_messaging, i.e. Web Widget and mobile SDK messaging, then WhatsApp, LINE, WeChat, Instagram DM, Telegram, Viber, KakaoTalk, Apple Messages for Business, Google RCS and Business Messages, Facebook Messenger, X DM, messaging SMS and the Sunshine Conversations API). Use this, never 'via:' in text.";
     public const string CustomStatusId = "Numeric id of a custom ticket status.";
@@ -647,7 +647,11 @@ public static class TicketSearchHelpers
             value is not null && string.Equals(TicketSearchQuery.Quote(value), "none", StringComparison.OrdinalIgnoreCase);
 
         var noneValue = filters.CustomFieldId is not null && IsNone(filters.CustomFieldValue);
-        if (conditions.Count == 0 && !noneValue)
+
+        // checked/unchecked as custom_field_value: if the field is a checkbox, searched as true/false, as in custom_fields.
+        var checkboxWord = filters.CustomFieldId is not null && filters.CustomFieldValue is not null
+            && TicketSearchQuery.Quote(filters.CustomFieldValue).ToLowerInvariant() is "checked" or "unchecked";
+        if (conditions.Count == 0 && !noneValue && !checkboxWord)
         {
             return filters;
         }
@@ -664,7 +668,7 @@ public static class TicketSearchHelpers
         if (listing.HasMore)
         {
             var wanted = conditions.Select(c => c.Id)
-                .Concat(noneValue ? [filters.CustomFieldId!.Value] : [])
+                .Concat(noneValue || checkboxWord ? [filters.CustomFieldId!.Value] : [])
                 .Distinct()
                 .Where(id => !definitions.ContainsKey(id));
             foreach (var id in wanted)
@@ -692,7 +696,7 @@ public static class TicketSearchHelpers
 
         string NoneRefusal(long id, string parameter) =>
             definitions.TryGetValue(id, out var f) && ToolJson.String(f["type"]) == "checkbox"
-                ? $"{parameter} 'none' does not apply to field {Id(id)}, a checkbox: use custom_fields [{{\"id\": {Id(id)}, \"value\": \"checked\"}}] or 'unchecked'."
+                ? $"{parameter} 'none' does not apply to field {Id(id)}, a checkbox, which is never empty: give the value 'checked' or 'unchecked'."
                 : $"{parameter} 'none' does not find tickets with field {Id(id)} empty: Zendesk searches for the value 'none'. Use custom_fields [{{\"id\": {Id(id)}, \"has_value\": false}}].";
 
         if (noneValue)
@@ -751,7 +755,13 @@ public static class TicketSearchHelpers
             normalised.Add(condition);
         }
 
-        return filters with { CustomFields = normalised };
+        var singleValue = filters.CustomFieldValue;
+        if (checkboxWord && definitions.TryGetValue(filters.CustomFieldId!.Value, out var singleField) && ToolJson.String(singleField["type"]) == "checkbox")
+        {
+            singleValue = TicketSearchQuery.Quote(singleValue!).ToLowerInvariant() == "checked" ? "true" : "false";
+        }
+
+        return filters with { CustomFields = normalised, CustomFieldValue = singleValue };
     }
 
     /// <summary>The number of tickets a search query matches.</summary>

@@ -255,9 +255,11 @@ public static class TicketSearchQuery
     }
 
     // custom_fields: each condition one term, all ANDed (two different fields AND: confirmed against the
-    // live API through Swifteq's server). Repeating a keyword ORs its values (confirmed for priority: and via:), so two terms on one field
-    // would match either; a field may appear once. Unverified against the live API: that custom_field_<id>
-    // terms OR like that — refusing a repeat is right either way, since 'both' is never what they mean. A field may appear once, and not alongside custom_field_id. What a field's type allows (a checkbox is
+    // live API through Swifteq's server). Repeating a keyword ORs its values (confirmed for priority: and
+    // via: on 2026-11-04), so two terms on one field would match either.
+    // Unverified against the live API: that custom_field_<id> terms OR like that. Refusing a repeat is right
+    // either way, since 'both' is never what is meant. So a field may appear once, and not alongside
+    // custom_field_id. What a field's type allows (a checkbox is
     // never empty, a built-in field has its own filter) needs the field definitions, which
     // TicketSearchHelpers.CheckCustomFieldsAsync reads; this checks only the shape.
     private static void AddCustomFields(List<string> terms, TicketSearchFilters filters)

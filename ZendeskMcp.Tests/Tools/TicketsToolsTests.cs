@@ -410,15 +410,14 @@ public class TicketsToolsTests
     }
 
     [Fact]
-    public async Task CountTickets_CustomFieldValueNone_OnACheckbox_PointsToCustomFieldsChecked()
+    public async Task CountTickets_CustomFieldValueNone_OnACheckbox_PointsToCheckedOrUnchecked()
     {
-        // has_value false would itself be refused on a checkbox, and only custom_fields turns 'checked'
-        // into the true the field is searched as, so the message points there and nowhere else.
+        // has_value false would itself be refused on a checkbox, so the message must not suggest it.
         using var fake = SearchFake();
 
         var act = () => TicketsTools.CountTickets(TestHelpers.BuildZendeskService(fake.Client), custom_field_id: 12, custom_field_value: "none");
 
-        var thrown = await act.Should().ThrowAsync<ArgumentException>().WithMessage("*'none' does not apply*checkbox*custom_fields*\"checked\"*");
+        var thrown = await act.Should().ThrowAsync<ArgumentException>().WithMessage("*'none' does not apply*checkbox*'checked' or 'unchecked'*");
         thrown.Which.Message.Should().NotContain("has_value");
     }
 
@@ -433,6 +432,21 @@ public class TicketsToolsTests
 
         unchecked_["query"]!.GetValue<string>().Should().Be("type:ticket custom_field_12:false");
         checked_["query"]!.GetValue<string>().Should().Be("type:ticket custom_field_12:true");
+
+        // The same advice followed through custom_field_value is searched the same way.
+        var single = JsonNode.Parse(await TicketsTools.CountTickets(zendesk, custom_field_id: 12, custom_field_value: "Unchecked"))!;
+        single["query"]!.GetValue<string>().Should().Be("type:ticket custom_field_12:false");
+    }
+
+    [Fact]
+    public async Task CountTickets_CheckedOnAFieldThatIsNotACheckbox_IsSearchedAsGiven()
+    {
+        // Negative control: only a checkbox is rewritten; on a text field 'checked' is a literal value.
+        using var fake = SearchFake();
+
+        var result = JsonNode.Parse(await TicketsTools.CountTickets(TestHelpers.BuildZendeskService(fake.Client), custom_field_id: 16, custom_field_value: "checked"))!;
+
+        result["query"]!.GetValue<string>().Should().Be("type:ticket custom_field_16:checked");
     }
 
     [Fact]
