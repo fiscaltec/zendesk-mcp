@@ -121,6 +121,132 @@ public class ZendeskUploadsTests
     }
 
     [Fact]
+    public async Task TwoConcurrentPuts_SpendTheSlotOnce()
+    {
+        // The cache holds each read until a second one arrives (or a second passes), so two takes
+        // racing for one slot overlap exactly where a read-then-remove would let both through.
+        var cache = new GatedCache();
+        var slots = new ZendeskUploadSlots(cache);
+        var slot = await slots.CreateAsync(TestHelpers.UserPrincipal(), "a.txt", 1, false, null);
+
+        var takes = await Task.WhenAll(
+            Task.Run(() => slots.TakeAsync(slot)),
+            Task.Run(() => slots.TakeAsync(slot)));
+
+        takes.Count(t => t is not null).Should().Be(1, "a slot is the credential for one upload, and each take can pin a buffer");
+    }
+
+    [Fact]
+    public async Task FinishedUploads_StopCountingAgainstTheQuota()
+    {
+        // Five completed uploads used to hold all five places until each slot's fifteen minutes ran
+        // out, so a sixth attachment was refused although nothing was open.
+        using var factory = new Factory();
+        using var client = factory.CreateClient();
+        for (var i = 0; i < ZendeskUploadSlots.MaxOpenSlotsPerPerson; i++)
+        {
+            var slot = await factory.IssueSlotAsync("a.txt", 5, inline: false);
+            (await client.PutAsync($"/uploads/{slot}", new ByteArrayContent(new byte[5]))).StatusCode.Should().Be(HttpStatusCode.OK);
+        }
+
+        var act = () => factory.IssueSlotAsync("a.txt", 5, inline: false);
+
+        await act.Should().NotThrowAsync();
+    }
+
+    [Fact]
+    public async Task RefusedUploads_StopCountingAgainstTheQuota()
+    {
+        using var factory = new Factory();
+        using var client = factory.CreateClient();
+        for (var i = 0; i < ZendeskUploadSlots.MaxOpenSlotsPerPerson; i++)
+        {
+            var slot = await factory.IssueSlotAsync("a.txt", 5, inline: false);
+            (await client.PutAsync($"/uploads/{slot}", new ByteArrayContent(new byte[4]))).StatusCode.Should().Be(HttpStatusCode.BadRequest);
+        }
+
+        var act = () => factory.IssueSlotAsync("a.txt", 5, inline: false);
+
+        await act.Should().NotThrowAsync();
+    }
+
+    [Fact]
+    public async Task AnUploadInFlight_StillCounts_UntilItIsReleased()
+    {
+        // What the quota bounds is buffers, and a taken slot whose bytes are still arriving holds one.
+        var slots = new ZendeskUploadSlots(new MemoryDistributedCache(Options.Create(new MemoryDistributedCacheOptions())));
+        var issued = new List<string>();
+        for (var i = 0; i < ZendeskUploadSlots.MaxOpenSlotsPerPerson; i++)
+        {
+            issued.Add(await slots.CreateAsync(TestHelpers.UserPrincipal(), "a.txt", 1, false, null));
+        }
+
+        foreach (var slot in issued)
+        {
+            (await slots.TakeAsync(slot)).Should().NotBeNull();
+        }
+
+        var act = () => slots.CreateAsync(TestHelpers.UserPrincipal(), "a.txt", 1, false, null);
+        await act.Should().ThrowAsync<ArgumentException>("five uploads are still in flight");
+
+        slots.Release(issued[0]);
+        slots.Release(issued[0]);
+        await act.Should().NotThrowAsync("one has finished, and releasing it twice frees one place, not two");
+        await act.Should().ThrowAsync<ArgumentException>();
+    }
+
+    [Fact]
+    public async Task ASlotThatFailedToStore_DoesNotHoldAPlace()
+    {
+        var cache = new GatedCache { FailWrites = true };
+        var slots = new ZendeskUploadSlots(cache);
+        for (var i = 0; i < ZendeskUploadSlots.MaxOpenSlotsPerPerson; i++)
+        {
+            var failed = () => slots.CreateAsync(TestHelpers.UserPrincipal(), "a.txt", 1, false, null);
+            await failed.Should().ThrowAsync<InvalidOperationException>();
+        }
+
+        cache.FailWrites = false;
+        var act = () => slots.CreateAsync(TestHelpers.UserPrincipal(), "a.txt", 1, false, null);
+
+        await act.Should().NotThrowAsync("no slot was ever handed out");
+    }
+
+    /// <summary>
+    /// A memory cache that can refuse writes, and whose reads wait for a second concurrent read (at most
+    /// a second) so a race between two takes is reproduced rather than left to scheduling.
+    /// </summary>
+    private sealed class GatedCache : IDistributedCache
+    {
+        private readonly MemoryDistributedCache _inner = new(Options.Create(new MemoryDistributedCacheOptions()));
+        private int _reads;
+        private readonly TaskCompletionSource _secondRead = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public bool FailWrites { get; set; }
+
+        public async Task<byte[]?> GetAsync(string key, CancellationToken token = default)
+        {
+            if (Interlocked.Increment(ref _reads) >= 2)
+            {
+                _secondRead.TrySetResult();
+            }
+
+            await Task.WhenAny(_secondRead.Task, Task.Delay(TimeSpan.FromSeconds(1), token));
+            return await _inner.GetAsync(key, token);
+        }
+
+        public Task SetAsync(string key, byte[] value, DistributedCacheEntryOptions options, CancellationToken token = default) =>
+            FailWrites ? throw new InvalidOperationException("cache unavailable") : _inner.SetAsync(key, value, options, token);
+
+        public Task RemoveAsync(string key, CancellationToken token = default) => _inner.RemoveAsync(key, token);
+        public Task RefreshAsync(string key, CancellationToken token = default) => _inner.RefreshAsync(key, token);
+        public byte[]? Get(string key) => throw new NotSupportedException();
+        public void Set(string key, byte[] value, DistributedCacheEntryOptions options) => throw new NotSupportedException();
+        public void Refresh(string key) => throw new NotSupportedException();
+        public void Remove(string key) => throw new NotSupportedException();
+    }
+
+    [Fact]
     public async Task TheSlotCarriesIdentityAndPermissionClaims_AndNothingElse()
     {
         var slots = new ZendeskUploadSlots(new MemoryDistributedCache(Options.Create(new MemoryDistributedCacheOptions())));
