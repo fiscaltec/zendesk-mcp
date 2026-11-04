@@ -16,7 +16,7 @@ public static class TicketMergeTools
 {
     [Authorize(Policy = "zendesk:write")]
     [McpServerTool(Name = "Merge_tickets", Title = "Merge tickets", ReadOnly = false, Destructive = true, Idempotent = false, OpenWorld = false),
-     Description("Merge one to five duplicate tickets (source_ticket_ids) into a target ticket. Zendesk closes each source ticket for good, tags it closed_by_merge and adds a comment to it and to the target; a merge cannot be undone. Before calling, show the person the tickets (subject, requester, status) and get their agreement: to find duplicates, use Search_tickets with exclude_tags ['closed_by_merge'] and read candidates with Get_ticket. Every source must have the same requester as the target. Closed tickets, solved sources, tickets merged into a different ticket, tickets the agent cannot see and sources with a different requester are refused, naming each, before anything changes. Safe to repeat: a source already merged into this target is reported as already_merged and not merged again. Comments are private notes unless target_comment_public or source_comment_public is true; a public merge comment emails that ticket's requester and CCs. Returns result ('merged', 'partially_merged', 'already_merged', or 'not_confirmed' when Zendesk had not finished or its answer was lost: do not merge again; check the sources with Get_ticket and, if any is still open, ask the person to check the tickets in Zendesk), the tickets as read before the merge, the job's final status and, once the job has completed, each source with its own result; a failed job is returned as an error that also says to check the tickets first, as some may have been merged. " + TicketWriteHelpers.UntrustedContentWarning)]
+     Description("Merge one to five duplicate tickets (source_ticket_ids) into a target ticket. Zendesk closes each source ticket for good, tags it closed_by_merge and adds a comment to it and to the target; a merge cannot be undone. Before calling, show the person the tickets (subject, requester, status) and get their agreement: to find duplicates, use Search_tickets with exclude_tags ['closed_by_merge'] and read candidates with Get_ticket. Every source must have the same requester as the target. Closed tickets, solved sources, shared tickets, tickets merged into a different ticket, tickets the agent cannot see and sources with a different requester are refused, naming each, before anything changes. Safe to repeat: a source already merged into this target is reported as already_merged and not merged again. Comments are private notes unless target_comment_public or source_comment_public is true (a public merge comment emails that ticket's requester and CCs, and is refused rather than downgraded when public replies are switched off). Leave source_comment out for a short default saying where the ticket went, and target_comment out for a default that names each merged ticket and quotes its latest public comment as plain text (cut at about 1,500 characters); a target_comment you write replaces that default, quotes included. Returns result ('merged', 'partially_merged', 'already_merged', or 'not_confirmed' when Zendesk had not finished or its answer was lost: do not merge again; check the sources with Get_ticket and, if any is still open, ask the person to check the tickets in Zendesk), the tickets as read before the merge, the job's final status and, once the job has completed, each source with its own result, the comments as Zendesk saved them, and warnings to relay (people Zendesk added as CCs on the target, sources Zendesk assigned when it closed them, a comment Zendesk made private); a failed job is returned as an error that also says to check the tickets first, as some may have been merged. " + TicketWriteHelpers.UntrustedContentWarning)]
     public static Task<string> MergeTickets(
         ZendeskService zendesk,
         [Description("Id of the ticket to keep; the sources are merged into it.")] long target_ticket_id,
@@ -139,6 +139,13 @@ public static class TicketMerge
                 continue;
             }
 
+            // A ticket shared with another Zendesk account through a sharing agreement cannot be merged, as
+            // Swifteq's merge_tickets says; Zendesk lists the agreements on the ticket.
+            if ((ticket["sharing_agreement_ids"] as JsonArray)?.Count > 0)
+            {
+                problems.Add($"Ticket {id} ({role}) is shared with another Zendesk account, and shared tickets cannot be merged.");
+            }
+
             var status = ToolJson.String(ticket["status"]);
             if (status == "closed")
             {
@@ -210,13 +217,16 @@ public static class TicketMerge
         }
 
         // Zendesk's own merge dialogue adds a note to each side; without one the merge leaves no trace
-        // in either conversation. These follow its wording in substance, naming tickets by id only, and
-        // are always sent, so Zendesk's behaviour when the comments are omitted does not arise.
+        // in either conversation. The defaults follow Swifteq's merge_tickets: the target's names each
+        // merged ticket and quotes its latest public comment as plain text, so the last public message
+        // stays visible on the target; the source's says where the ticket went. They are always sent,
+        // so Zendesk's behaviour when the comments are omitted does not arise.
+        var warnings = new JsonArray();
         var body = new JsonObject
         {
             ["ids"] = new JsonArray(toMerge.Select(s => (JsonNode)s).ToArray()),
-            ["target_comment"] = targetComment ?? DefaultTargetComment(toMerge),
-            ["source_comment"] = sourceComment ?? $"This request was closed and merged into request #{Id(targetTicketId)}.",
+            ["target_comment"] = targetComment ?? await DefaultTargetCommentAsync(zendesk, before, toMerge, warnings, cancellationToken),
+            ["source_comment"] = sourceComment ?? DefaultSourceComment(before, targetTicketId),
             ["target_comment_is_public"] = targetPublic,
             ["source_comment_is_public"] = sourcePublic,
         };
@@ -226,6 +236,7 @@ public static class TicketMerge
             ["target_ticket_id"] = targetTicketId,
             ["source_ticket_ids"] = new JsonArray(sources.Select(s => (JsonNode)s).ToArray()),
             ["already_merged"] = alreadyMergedJson,
+            ["warnings"] = warnings,
             ["tickets_before"] = new JsonArray(allIds.Select(id => (JsonNode)Describe(before, id, id == targetTicketId ? "target" : "source")).ToArray()),
         };
 
@@ -300,7 +311,7 @@ public static class TicketMerge
         TicketRead after;
         try
         {
-            after = await ReadTicketsAsync(zendesk, toMerge, cancellationToken);
+            after = await ReadTicketsAsync(zendesk, toMerge.Append(targetTicketId), cancellationToken);
         }
         catch (Exception ex) when (!cancellationToken.IsCancellationRequested)
         {
@@ -344,9 +355,15 @@ public static class TicketMerge
         result["target_agent_url"] = $"{zendesk.BaseUrl}/agent/tickets/{Id(targetTicketId)}";
         if (unconfirmed.Count > 0)
         {
-            result["warning"] = $"Zendesk reported the job completed, but ticket(s) {string.Join(", ", unconfirmed.Select(Id))} do not yet read as closed and tagged closed_by_merge.";
+            warnings.Add($"Zendesk reported the job completed, but ticket(s) {string.Join(", ", unconfirmed.Select(Id))} do not yet read as closed and tagged closed_by_merge.");
             result["next_step"] = "Check those tickets with Get_ticket in a few minutes. Do not call Merge_tickets again for them: the job completed, so they are most likely merged and only reading back late.";
         }
+
+        // What Zendesk did beyond the merge itself, for the model to relay, as Swifteq's merge_tickets
+        // does. Each is a read after the fact: a failure is reported as a warning and never changes the
+        // result, which the sources' own state has already decided.
+        AddSideEffectWarnings(before, after, targetTicketId, toMerge.Where(id => !unconfirmed.Contains(id)), warnings);
+        result["comments"] = await SavedCommentsAsync(zendesk, targetTicketId, toMerge, targetPublic, sourcePublic, warnings, cancellationToken);
 
         return result.ToJsonString();
     }
@@ -438,10 +455,150 @@ public static class TicketMerge
         ToolJson.Long(end?["ticket_id"]) == ticketId
         || (end?["ticket_ids"] as JsonArray ?? []).Any(t => ToolJson.Long(t) == ticketId);
 
-    private static string DefaultTargetComment(long[] sources) =>
-        sources.Length == 1
-            ? $"Request #{Id(sources[0])} was closed and merged into this request."
-            : $"Requests {string.Join(", ", sources.Select(s => "#" + Id(s)))} were closed and merged into this request.";
+    /// <summary>The longest quote of a source's latest public comment that a default note carries.</summary>
+    public const int MaxQuotedCommentLength = 1500;
+
+    private static string Subject(TicketRead read, long id) =>
+        read.Tickets.TryGetValue(id, out var ticket) ? ToolJson.String(ticket["subject"]) ?? string.Empty : string.Empty;
+
+    private static string DefaultSourceComment(TicketRead before, long targetId) =>
+        $"This request was closed and merged into request #{Id(targetId)} \"{Subject(before, targetId)}\".";
+
+    // A source whose comments cannot be read is still named; the warning says its quote is missing
+    // rather than letting the note look complete.
+    private static async Task<string> DefaultTargetCommentAsync(
+        ZendeskService zendesk, TicketRead before, long[] sources, JsonArray warnings, CancellationToken cancellationToken)
+    {
+        var parts = new List<string>();
+        foreach (var id in sources)
+        {
+            var part = $"Request #{Id(id)} \"{Subject(before, id)}\" was closed and merged into this request.";
+            var comments = await TryReadCommentsAsync(zendesk, id, 100, cancellationToken);
+            if (comments is null)
+            {
+                warnings.Add($"Could not read ticket {id}'s comments, so the default note on the target does not quote its latest public comment.");
+            }
+            else if (comments.FirstOrDefault(c => c["public"]?.GetValueKind() == System.Text.Json.JsonValueKind.True) is { } latest)
+            {
+                part += $" Last comment in request #{Id(id)}:\n\n{Clip(CommentText(latest), MaxQuotedCommentLength)}";
+            }
+
+            parts.Add(part);
+        }
+
+        return string.Join("\n\n", parts);
+    }
+
+    private static string CommentText(JsonNode comment) =>
+        (ToolJson.String(comment["plain_body"]) ?? ToolJson.String(comment["body"]) ?? string.Empty).Trim();
+
+    private static string Clip(string value, int max) => value.Length <= max ? value : value[..max] + "…";
+
+    /// <summary>
+    /// A ticket's comments, newest first, or null when they cannot be read.
+    /// Unverified against the live API: <c>sort_order=desc</c> with cursor paging on the comments list.
+    /// </summary>
+    private static async Task<List<JsonNode>?> TryReadCommentsAsync(ZendeskService zendesk, long ticketId, int pageSize, CancellationToken cancellationToken)
+    {
+        try
+        {
+            var page = await zendesk.GetAsync($"/api/v2/tickets/{Id(ticketId)}/comments",
+                ToolJson.Query(("sort_order", "desc"), ("page[size]", pageSize)), cancellationToken: cancellationToken);
+            return ((page as JsonObject)?["comments"] as JsonArray ?? []).OfType<JsonNode>().ToList();
+        }
+        // Any failure: these reads also run after the merge, where an escaping exception would read as
+        // "nothing changed". Only the caller's own cancellation escapes.
+        catch (Exception) when (!cancellationToken.IsCancellationRequested)
+        {
+            return null;
+        }
+    }
+
+    private static HashSet<long> Ids(JsonNode? array) =>
+        (array as JsonArray ?? []).Select(ToolJson.Long).OfType<long>().ToHashSet();
+
+    private static string Person(TicketRead read, long userId) =>
+        read.Users.TryGetValue(userId, out var user) && ToolJson.String(user["name"]) is { } name
+            ? $"{name} ({Id(userId)})"
+            : Id(userId);
+
+    /// <summary>
+    /// CCs Zendesk added to the target (it copies the sources' requesters and CCs across) and sources
+    /// Zendesk assigned when it closed them, by comparing the tickets before and after.
+    /// </summary>
+    private static void AddSideEffectWarnings(TicketRead before, TicketRead after, long targetId, IEnumerable<long> merged, JsonArray warnings)
+    {
+        if (!after.Tickets.TryGetValue(targetId, out var targetAfter))
+        {
+            warnings.Add($"Could not read ticket {targetId} back, so any CCs Zendesk added to it are not reported.");
+        }
+        else
+        {
+            var added = Ids(targetAfter["email_cc_ids"]);
+            added.ExceptWith(Ids(before.Tickets[targetId]["email_cc_ids"]));
+            if (added.Count > 0)
+            {
+                warnings.Add($"Zendesk added {string.Join(", ", added.Order().Select(u => Person(after, u)))} as CC(s) on ticket {targetId}; they will receive its public replies.");
+            }
+        }
+
+        foreach (var id in merged)
+        {
+            if (ToolJson.Long(before.Tickets[id]["assignee_id"]) is null
+                && after.Tickets.TryGetValue(id, out var sourceAfter)
+                && ToolJson.Long(sourceAfter["assignee_id"]) is { } assignee)
+            {
+                warnings.Add($"Zendesk assigned ticket {id} to {Person(after, assignee)} when it closed it.");
+            }
+        }
+    }
+
+    /// <summary>
+    /// The newest comment on the target and on each merged source — the merge comments, as Zendesk saved
+    /// them — and a warning where Zendesk made a requested public comment private.
+    /// Unverified against the live API: that the merge comment is the newest one when this reads it.
+    /// </summary>
+    private static async Task<JsonObject> SavedCommentsAsync(
+        ZendeskService zendesk, long targetId, long[] sources, bool targetPublic, bool sourcePublic, JsonArray warnings, CancellationToken cancellationToken)
+    {
+        async Task<JsonNode?> SavedAsync(long ticketId, bool wantedPublic, string role)
+        {
+            var comments = await TryReadCommentsAsync(zendesk, ticketId, 1, cancellationToken);
+            if (comments is null || comments.Count == 0)
+            {
+                warnings.Add($"Could not read the merge comment on ticket {ticketId} ({role}) back.");
+                return null;
+            }
+
+            var comment = comments[0];
+            var isPublic = comment["public"]?.GetValueKind() == System.Text.Json.JsonValueKind.True;
+            if (wantedPublic && !isPublic)
+            {
+                warnings.Add($"Zendesk saved the merge comment on ticket {ticketId} ({role}) as a private note, although a public comment was asked for.");
+            }
+
+            return new JsonObject
+            {
+                ["ticket_id"] = ticketId,
+                ["comment_id"] = comment["id"]?.DeepClone(),
+                ["public"] = isPublic,
+                ["created_at"] = comment["created_at"]?.DeepClone(),
+                ["body"] = Clip(CommentText(comment), MaxQuotedCommentLength),
+            };
+        }
+
+        var sourceComments = new JsonArray();
+        foreach (var id in sources)
+        {
+            sourceComments.Add(await SavedAsync(id, sourcePublic, "source"));
+        }
+
+        return new JsonObject
+        {
+            ["target"] = await SavedAsync(targetId, targetPublic, "target"),
+            ["sources"] = sourceComments,
+        };
+    }
 
     private static bool IsTerminal(JsonNode job) => TerminalJobStatuses.Contains(ToolJson.String(job["status"]));
 

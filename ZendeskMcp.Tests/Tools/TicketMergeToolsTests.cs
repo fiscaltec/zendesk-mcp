@@ -63,13 +63,15 @@ public class TicketMergeToolsTests
         merge.Method.Should().Be(HttpMethod.Post);
         var body = JsonNode.Parse(merge.Body!)!;
         body["ids"]!.ToJsonString().Should().Be("[102,103]");
-        body["target_comment"]!.GetValue<string>().Should().Be("Requests #102, #103 were closed and merged into this request.");
-        body["source_comment"]!.GetValue<string>().Should().Be("This request was closed and merged into request #101.");
+        // The fake has no comments endpoint, so the default note names the tickets without quotes and says so.
+        body["target_comment"]!.GetValue<string>().Should().Be(
+            "Request #102 \"Subject 102\" was closed and merged into this request.\n\nRequest #103 \"Subject 103\" was closed and merged into this request.");
+        body["source_comment"]!.GetValue<string>().Should().Be("This request was closed and merged into request #101 \"Subject 101\".");
         body["target_comment_is_public"]!.GetValue<bool>().Should().BeFalse();
         body["source_comment_is_public"]!.GetValue<bool>().Should().BeFalse();
 
         fake.Requests.Count(r => r.Path == JobPath).Should().Be(1);
-        fake.Requests.Last(r => r.Path == ShowManyPath).Query("ids").Should().Be("102,103");
+        fake.Requests.Last(r => r.Path == ShowManyPath).Query("ids").Should().Be("102,103,101");
         fake.Requests.Should().NotContain(r => r.Method == HttpMethod.Delete, "a write tool must never issue DELETE");
 
         result["merged"]!.GetValue<bool>().Should().BeTrue();
@@ -102,7 +104,7 @@ public class TicketMergeToolsTests
         var result = JsonNode.Parse(await Merge(TestHelpers.BuildZendeskService(clean.Client), [102]))!;
 
         JsonNode.Parse(clean.Requests.Single(r => r.Path == MergePath).Body!)!["target_comment"]!.GetValue<string>()
-            .Should().Be("Request #102 was closed and merged into this request.");
+            .Should().Be("Request #102 \"Subject 102\" was closed and merged into this request.");
 
         // Already completed in the POST response: no poll is made.
         clean.Requests.Should().NotContain(r => r.Path.StartsWith("/api/v2/job_statuses/", StringComparison.Ordinal));
@@ -349,8 +351,8 @@ public class TicketMergeToolsTests
 
         var body = JsonNode.Parse(fake.Requests.Single(r => r.Path == MergePath).Body!)!;
         body["ids"]!.ToJsonString().Should().Be("[103]");
-        body["target_comment"]!.GetValue<string>().Should().Be("Request #103 was closed and merged into this request.");
-        fake.Requests.Last(r => r.Path == ShowManyPath).Query("ids").Should().Be("103");
+        body["target_comment"]!.GetValue<string>().Should().Be("Request #103 \"Subject 103\" was closed and merged into this request.");
+        fake.Requests.Last(r => r.Path == ShowManyPath).Query("ids").Should().Be("103,101");
 
         result["result"]!.GetValue<string>().Should().Be("merged");
         result["merged"]!.GetValue<bool>().Should().BeTrue();
@@ -404,6 +406,164 @@ public class TicketMergeToolsTests
 
         await act.Should().ThrowAsync<ArgumentException>().WithMessage("*Ticket 102*history could not be read*");
         fake.Requests.Should().NotContain(r => r.Method == HttpMethod.Post);
+    }
+
+    // ---------- Swifteq parity: default note, side effects, comments as saved ----------
+
+    private static string RichTicket(long id, string status, string tags, string ccs, string assignee) =>
+        $$$"""{"id":{{{id}}},"subject":"Subject {{{id}}}","status":"{{{status}}}","requester_id":501,"assignee_id":{{{assignee}}},"email_cc_ids":[{{{ccs}}}],"tags":[{{{tags}}}]}""";
+
+    private static string RichShowMany(params string[] tickets) =>
+        $$"""{"tickets":[{{string.Join(",", tickets)}}],"users":[{"id":501,"name":"Alice"},{"id":601,"name":"Bob"},{"id":701,"name":"Agent Smith"}]}""";
+
+    private static string Comments(params (long Id, bool Public, string Body)[] comments) =>
+        "{\"comments\":[" + string.Join(",", comments.Select(c => new JsonObject
+        {
+            ["id"] = c.Id, ["public"] = c.Public, ["plain_body"] = c.Body, ["created_at"] = "2026-11-04T10:00:00Z",
+        }.ToJsonString())) + "],\"meta\":{\"has_more\":false}}";
+
+    /// <summary>
+    /// 101 (target, no CCs) and 102 (source, unassigned). After the merge 102 is closed and assigned to
+    /// 701, and 101 has 601 as a CC. Comments are answered per ticket by <paramref name="comments"/>.
+    /// </summary>
+    private static FakeZendesk SideEffectsFake(Func<RecordedRequest, FakeResponse> comments)
+    {
+        var reads = 0;
+        return TestHelpers.CreateFakeZendesk(r => (r.Method.Method, r.Path) switch
+        {
+            ("GET", ShowManyPath) => FakeResponse.Json(Interlocked.Increment(ref reads) == 1
+                ? RichShowMany(RichTicket(101, "open", "", "", "null"), RichTicket(102, "open", "", "", "null"))
+                : RichShowMany(RichTicket(102, "closed", Merged, "", "701"), RichTicket(101, "open", "", "601", "null"))),
+            ("GET", "/api/v2/tickets/101/comments") or ("GET", "/api/v2/tickets/102/comments") => comments(r),
+            ("POST", MergePath) => FakeResponse.Json(Job("completed")),
+            _ => FakeResponse.NotFound(),
+        });
+    }
+
+    [Fact]
+    public async Task MergeTickets_DefaultTargetNote_QuotesTheLatestPublicCommentClipped()
+    {
+        var longPublic = new string('a', TicketMerge.MaxQuotedCommentLength + 50);
+        var merged = false;
+        using var fake = SideEffectsFake(r =>
+        {
+            if (r.Path.EndsWith("/102/comments", StringComparison.Ordinal) && !merged)
+            {
+                // Newest first: a private note, then the latest public comment, then an older public one.
+                return FakeResponse.Json(Comments((3, false, "internal only"), (2, true, longPublic), (1, true, "older")));
+            }
+
+            return FakeResponse.Json(Comments((9, false, "saved")));
+        });
+
+        await Merge(TestHelpers.BuildZendeskService(fake.Client), [102]);
+        merged = true;
+
+        var read = fake.Requests.First(r => r.Path == "/api/v2/tickets/102/comments");
+        read.Query("sort_order").Should().Be("desc");
+        var note = JsonNode.Parse(fake.Requests.Single(r => r.Path == MergePath).Body!)!["target_comment"]!.GetValue<string>();
+        note.Should().StartWith("Request #102 \"Subject 102\" was closed and merged into this request. Last comment in request #102:\n\n");
+        note.Should().EndWith(new string('a', TicketMerge.MaxQuotedCommentLength) + "…");
+        note.Should().NotContain("internal only", "a private note is never quoted").And.NotContain("older");
+    }
+
+    [Fact]
+    public async Task MergeTickets_GivenTargetComment_ReplacesTheDefaultAndReadsNoQuotes()
+    {
+        using var fake = SideEffectsFake(_ => FakeResponse.Json(Comments((9, false, "saved"))));
+
+        await Merge(TestHelpers.BuildZendeskService(fake.Client), [102], targetComment: "Duplicates merged.");
+
+        JsonNode.Parse(fake.Requests.Single(r => r.Path == MergePath).Body!)!["target_comment"]!.GetValue<string>().Should().Be("Duplicates merged.");
+        fake.Requests.Should().NotContain(r => r.Path.EndsWith("/comments", StringComparison.Ordinal) && r.Query("page[size]") == "100",
+            "no comment is read for a default that is not used");
+    }
+
+    [Fact]
+    public async Task MergeTickets_UnreadableSourceComments_FallBackToANamingNoteWithAWarning()
+    {
+        using var fake = SideEffectsFake(_ => FakeResponse.WithStatus(HttpStatusCode.InternalServerError));
+
+        var result = JsonNode.Parse(await Merge(TestHelpers.BuildZendeskService(fake.Client), [102]))!;
+
+        JsonNode.Parse(fake.Requests.Single(r => r.Path == MergePath).Body!)!["target_comment"]!.GetValue<string>()
+            .Should().Be("Request #102 \"Subject 102\" was closed and merged into this request.");
+        var warnings = result["warnings"]!.AsArray().Select(w => w!.GetValue<string>()).ToList();
+        warnings.Should().Contain(w => w.Contains("Could not read ticket 102's comments"));
+        warnings.Should().Contain(w => w.Contains("Could not read the merge comment on ticket 101"));
+        result["result"]!.GetValue<string>().Should().Be("merged", "a failed read after the merge never changes its result");
+    }
+
+    [Fact]
+    public async Task MergeTickets_ReportsAddedCcsAssignedSourcesAndSavedComments()
+    {
+        using var fake = SideEffectsFake(_ => FakeResponse.Json(Comments((9, false, "Merged note"))));
+
+        var result = JsonNode.Parse(await Merge(TestHelpers.BuildZendeskService(fake.Client), [102]))!;
+
+        var warnings = result["warnings"]!.AsArray().Select(w => w!.GetValue<string>()).ToList();
+        warnings.Should().Contain("Zendesk added Bob (601) as CC(s) on ticket 101; they will receive its public replies.");
+        warnings.Should().Contain("Zendesk assigned ticket 102 to Agent Smith (701) when it closed it.");
+        warnings.Should().NotContain(w => w.Contains("private note"), "nothing public was asked for");
+
+        result["comments"]!["target"]!["comment_id"]!.GetValue<long>().Should().Be(9);
+        result["comments"]!["target"]!["public"]!.GetValue<bool>().Should().BeFalse();
+        result["comments"]!["target"]!["body"]!.GetValue<string>().Should().Be("Merged note");
+        result["comments"]!["sources"]![0]!["ticket_id"]!.GetValue<long>().Should().Be(102);
+        fake.Requests.Where(r => r.Path.EndsWith("/comments", StringComparison.Ordinal) && r.Query("page[size]") == "1")
+            .Should().HaveCount(2, "the target's and the source's newest comment are read after the merge");
+    }
+
+    [Fact]
+    public async Task MergeTickets_PublicCommentSavedAsPrivate_IsWarned()
+    {
+        using var fake = SideEffectsFake(_ => FakeResponse.Json(Comments((9, false, "Merged note"))));
+        var zendesk = TestHelpers.BuildZendeskService(fake.Client, configure: o => o.Features.AllowPublicReplies = true);
+
+        var result = JsonNode.Parse(await Merge(zendesk, [102], targetPublic: true))!;
+
+        var warnings = result["warnings"]!.AsArray().Select(w => w!.GetValue<string>()).ToList();
+        warnings.Should().Contain(w => w.Contains("ticket 101 (target) as a private note"));
+        warnings.Should().NotContain(w => w.Contains("ticket 102 (source) as a private note"), "the source comment was asked to be private");
+    }
+
+    [Fact]
+    public async Task MergeTickets_NoSideEffects_NoSideEffectWarnings()
+    {
+        // Negative control for the warnings test: the same tickets with nothing changed by Zendesk.
+        var reads = 0;
+        using var fake = TestHelpers.CreateFakeZendesk(r => (r.Method.Method, r.Path) switch
+        {
+            ("GET", ShowManyPath) => FakeResponse.Json(Interlocked.Increment(ref reads) == 1
+                ? RichShowMany(RichTicket(101, "open", "", "601", "null"), RichTicket(102, "open", "", "", "701"))
+                : RichShowMany(RichTicket(102, "closed", Merged, "", "701"), RichTicket(101, "open", "", "601", "null"))),
+            ("GET", _) when r.Path.EndsWith("/comments", StringComparison.Ordinal) => FakeResponse.Json(Comments((9, true, "Merged note"))),
+            ("POST", MergePath) => FakeResponse.Json(Job("completed")),
+            _ => FakeResponse.NotFound(),
+        });
+        var zendesk = TestHelpers.BuildZendeskService(fake.Client, configure: o => o.Features.AllowPublicReplies = true);
+
+        var result = JsonNode.Parse(await Merge(zendesk, [102], targetPublic: true, sourcePublic: true))!;
+
+        result["warnings"]!.AsArray().Should().BeEmpty();
+    }
+
+    [Theory]
+    [InlineData(101, "target")]
+    [InlineData(102, "source")]
+    public async Task MergeTickets_SharedTicket_IsRefused(long shared, string role)
+    {
+        string T(long id) => $$$"""{"id":{{{id}}},"subject":"S","status":"open","requester_id":501,"tags":[],"sharing_agreement_ids":[{{{(id == shared ? "77" : "")}}}]}""";
+        using var fake = TestHelpers.CreateFakeZendesk(r => r.Path switch
+        {
+            ShowManyPath => FakeResponse.Json(ShowMany(T(101), T(102))),
+            _ => FakeResponse.NotFound(),
+        });
+
+        var act = () => Merge(TestHelpers.BuildZendeskService(fake.Client), [102]);
+
+        await act.Should().ThrowAsync<ArgumentException>().WithMessage($"*Ticket {shared} ({role}) is shared*");
+        fake.Requests.Should().NotContain(r => r.Path == MergePath);
     }
 
     [Fact]
@@ -497,7 +657,7 @@ public class TicketMergeToolsTests
 
         result["merged"]!.GetValue<bool>().Should().BeFalse();
         result["result"]!.GetValue<string>().Should().Be("not_confirmed");
-        result["warning"]!.GetValue<string>().Should().Contain("102, 103");
+        result["warnings"]!.AsArray().Select(w => w!.GetValue<string>()).Should().Contain(w => w.Contains("102, 103") && w.Contains("closed_by_merge"));
         result["next_step"]!.GetValue<string>().Should().Contain("Do not call Merge_tickets again");
     }
 
