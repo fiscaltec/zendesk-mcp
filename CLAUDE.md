@@ -394,8 +394,8 @@ timeline events can also name it `Copilot`. The commands above and the hook acce
 `--auto` is for Dependabot only, which carries no human review.
 
 **This is enforced mechanically, not just documented.** `.claude/hooks/pre-merge-copilot-gate.sh` is a
-`PreToolUse` hook, registered in `.claude/settings.json` under the `Bash` matcher twice — with
-`if: "Bash(gh pr merge*)"` and with `if: "Bash(gh api*)"` — that **denies** a merge (`gh pr merge`, or
+`PreToolUse` hook, registered in `.claude/settings.json` under the `Bash` matcher with
+`if: "Bash(*gh*)"`, that **denies** a merge (`gh pr merge`, or
 `gh api` reaching `pulls/<n>/merge` with any method but GET) unless Copilot is not pending, its
 latest review's `commit_id` equals the head, and unresolved threads are zero. A GraphQL merge
 mutation is refused outright. It exempts Dependabot and **fails closed** — including if
@@ -404,6 +404,10 @@ from `searledan/dansearle.co.uk`, then moved to REST on 2026-10-28 (#2) after `s
 #484: it resolves the repo from the `origin` remote, reads the PR, its timeline and its reviews over
 REST, and reads review threads from the cloud session's `ccr/review_threads` route when
 `CLAUDE_CODE_REMOTE` is set and through GraphQL locally (REST has no thread-resolution state).
+The `ccr` route takes no paging parameters and sends no `Link` header (`per_page=1`, `page=2`,
+`first=2` and `limit=2` each returned all eight threads on PR #1, 2026-11-04, #12), so nothing says
+whether a long PR's list is complete; the hook therefore requires every review comment REST returns
+(paginated) to appear in some thread's `comment_ids`, and denies when one does not.
 `.github/scripts/tests/pre-merge-copilot-gate.test.sh` runs it against stub `gh` and `git` in CI,
 the allow path included; deleting either the head-review or the pin check makes it fail.
 
@@ -425,13 +429,32 @@ Caveats worth knowing before trusting it:
   <sha>` (seven characters or more) on `gh pr merge` — and denies a merge without one, given twice,
   or naming a different commit. That is not belt-and-braces: every other check here describes the
   moment the hook ran, and the merge happens afterwards.
-- **Run the merge as a standalone command — no pipes, no `;`, no `&&`, no quotes.** The hook refuses
-  anything with quotes or shell metacharacters, because it cannot read those with certainty.
-- The `if` filters match the command text, so *any* Bash call starting `gh api` or containing
-  `gh pr merge` runs the hook — including a heredoc that merely mentions one, which it then denies.
-  For a `gh api` call that is not a merge it allows at once, without a network call. Testing the hook
-  or editing text that quotes a merge command means doing it from a script file rather than inline.
-  Over-matching is the safe direction; don't loosen it.
+- **Run the merge as a standalone command, starting with `gh`, on one line — no pipes, no `;`, no
+  `&&`, no quotes, no `#`, no braces other than `{owner}`/`{repo}`.** The hook refuses any command
+  naming `gh` and `merge` that contains those, because it cannot read it with certainty.
+- **The filter is `Bash(*gh*)` because `if` matches a prefix.** Claude Code compares `if` with the
+  start of each subcommand, after stripping leading `VAR=value` assignments and splitting `&&`/`;`/`|`
+  chains. Reproduced on 2026-11-04 (#12) with harmless `gh pr merge --help` calls: under the old
+  `Bash(gh pr merge*)` and `Bash(gh api*)` filters, `GH_HOST=github.com gh …` and `cd . && gh …`
+  reached the hook, but `command gh …`, `env gh …` and `/usr/local/bin/gh …` ran without it. Under
+  `Bash(*gh*)` all three reached it — the change to `if` took effect without a restart. The hook's
+  own step 1 then decides, coarsely on purpose: a command is a **candidate** when `gh` and `merge`
+  both appear as words anywhere in it, in any case, after quotes and backslashes are removed. A
+  candidate must be written plainly — no quotes, `#`, line breaks or tabs, braces other than
+  `{owner}`/`{repo}`, commas or shell metacharacters — and be `gh pr merge …` or
+  `gh api … pulls/<n>/merge …` from its first word; anything else is denied, not parsed. Spotting
+  bypass spellings one at a time lost repeatedly on #46 (`/usr/local/bin/gh`, `merge>log`, a `#`
+  comment carrying another PR's pin, a newline joining two commands, `${IFS}` and brace expansion,
+  `gh pr -R x merge`), which is why. So a path to gh, `env gh`, `command gh` or `GH_HOST=… gh` is
+  refused for a merge, and any Bash call whose text names `gh` and `merge` as words — a heredoc, a
+  commit message, `grep -n gh.*merge` — is denied. For anything that is not a
+  merge it allows at once, without a network call; but because every such call now runs `jq`,
+  `sed` and `awk`, a broken one of those denies every Bash call mentioning `gh`, not only merges.
+  Testing the hook or editing text that quotes a merge command means doing it from a script file
+  rather than inline. Over-matching is the safe direction; don't loosen it. The `if` filter itself
+  is covered only by the live check above, not by the CI test, which calls the hook directly. It
+  guards against a mistaken merge, not a determined one: a command that never spells both words (a
+  shell variable, `xargs gh <file`, a `gh` alias, `curl` to the API) is invisible to it.
 - **The REST reviews list can lag** (above). The lag only makes the gate deny a merge it would allow;
   wait and re-check.
 
