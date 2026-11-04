@@ -102,6 +102,17 @@ push deny 'git -c remote.origin.push=HEAD:main push origin'
 push deny 'git checkout main && git push origin'
 push deny 'git switch main; git push'
 push deny 'git checkout main && git push -u origin HEAD'
+# Refused: the bypasses Copilot found in its second pass on PR #47.
+push deny $'git push origin ma\\\nin'
+push deny '(git push origin main)'
+push deny '{ git push origin main; }'
+push deny "git --git-dir $ON_MAIN/.git push origin"
+push deny "git --git-dir=$ON_MAIN/.git push origin"
+push deny "git --work-tree $ON_MAIN push"
+push deny "git -C$ON_MAIN push origin"
+push allow "git -C$ON_FEATURE push origin"
+push allow '(cd /tmp && git push origin fix/thing)'
+push allow "git --git-dir $ON_MAIN/.git push origin fix/thing"
 # Refused: implicit destinations the configuration sends to main, or that cannot be read.
 push deny 'git push' "$CONFIGURED_PUSH"
 push deny 'git push' "$MATCHING"

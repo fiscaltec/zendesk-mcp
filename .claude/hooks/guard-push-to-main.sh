@@ -55,8 +55,9 @@ is_main() { [[ "$1" == main || "$1" == master || "$1" == refs/heads/main || "$1"
 # The branch checked out in $1.
 current_branch() { git -C "$1" symbolic-ref --quiet --short HEAD 2>/dev/null; }
 
-# Join backslash-newline continuations, as the shell does, before anything is split.
-cmd=${cmd//$'\\\n'/ }
+# Remove backslash-newline continuations, as the shell does (the pair goes, with no space in its
+# place, so `ma\<newline>in` is `main`), before anything is split.
+cmd=${cmd//$'\\\n'/}
 # Drop redirections (`2>&1`, `>/tmp/x`, `> /tmp/x`, `<in`) so they are not read as arguments, and
 # so the `&` in `2>&1` does not split a command in two.
 cmd=$(printf '%s\n' "$cmd" | sed -E 's/[0-9]*>>?&[0-9-]+//g; s/[0-9]*(>>?|<)[[:space:]]*[^[:space:];&|]+//g')
@@ -82,7 +83,11 @@ dir=$cwd
 branch_changed=""
 while IFS= read -r segment; do
 	raw=$segment
+	# Subshell and group brackets are not words of the command: `(git push origin main)`.
+	segment=${segment//[()]/ }
 	read -ra words <<<"$segment"
+	for k in "${!words[@]}"; do [[ "${words[$k]}" == [{}] ]] && unset 'words[k]'; done
+	words=("${words[@]}")
 	[ "${#words[@]}" -gt 0 ] || continue
 
 	# Track `cd <dir>` so a later implicit push is checked in the right repository.
@@ -101,6 +106,7 @@ while IFS= read -r segment; do
 	i=$((i + 1))
 	gitdir=$dir
 	configured=""
+	selector=""
 	while [ "$i" -lt "${#words[@]}" ]; do
 		case "${words[$i]}" in
 		-C)
@@ -110,9 +116,18 @@ while IFS= read -r segment; do
 			*) gitdir=$gitdir/${words[$i]:-} ;;
 			esac
 			;;
+		-C?*)
+			case "${words[$i]#-C}" in
+			/*) gitdir=${words[$i]#-C} ;;
+			*) gitdir=$gitdir/${words[$i]#-C} ;;
+			esac
+			;;
 		-c) configured=1; i=$((i + 1)) ;;
 		-c* | --config-env*) configured=1 ;;
-		--git-dir | --work-tree | --namespace) i=$((i + 1)) ;;
+		# These pick another repository in ways this hook does not follow.
+		--git-dir | --work-tree) selector=${words[$i]}; i=$((i + 1)) ;;
+		--git-dir=* | --work-tree=*) selector=${words[$i]%%=*} ;;
+		--namespace) i=$((i + 1)) ;;
 		-*) ;;
 		*) break ;;
 		esac
@@ -167,6 +182,7 @@ while IFS= read -r segment; do
 	# The destination comes from the checkout and configuration: resolve it, or refuse.
 	[ -n "$branch_changed" ] \
 		&& deny "An earlier \`git $branch_changed\` in this command can change the branch this push sends; name the destination branch explicitly."
+	[ -n "$selector" ] && deny "\`$selector\` points this push at another repository, whose branch this hook cannot check; name the destination branch explicitly."
 	[ -n "$configured" ] && deny "A \`-c\` option can change where a push without an explicit destination goes."
 	git -C "$gitdir" config --get-regexp '^remote\..*\.push$' >/dev/null 2>&1 \
 		&& deny "This repository sets remote.*.push, so a push without an explicit destination may update main."
