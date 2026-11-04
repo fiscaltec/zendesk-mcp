@@ -19,7 +19,7 @@ public static class ZendeskServerInstructions
         - Find tickets with Search_tickets (filters, not a query language) and count them with
           Count_tickets (group_by for breakdowns). For KPI figures use Get_ticket_metrics_summary,
           Get_sla_summary and Get_sla_queue rather than fetching tickets one by one. To read several
-          tickets' conversations, use Bulk_get_ticket_conversations (up to 20 a call).
+          tickets' conversations, use Bulk_get_ticket_conversations (up to 10 a call, one call at a time).
         - Before applying a macro, run Preview_macro and show the person what will change.
         - Public replies, article publishing, Help Center category and section changes, macro changes and
           user/organisation changes can each be switched off for the whole account; a refusal naming one

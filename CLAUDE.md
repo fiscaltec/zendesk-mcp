@@ -566,7 +566,7 @@ Ticket comments, article bodies and user fields are written by customers and can
 | Area | File | Tools |
 |---|---|---|
 | Connection | `ConnectionTools.cs` | `Get_zendesk_connection`, `Get_zendesk_connect_link`, `Disconnect_zendesk` |
-| Tickets | `TicketsTools.cs`, `TicketAttachmentsTools.cs` | `Search_tickets`, `Count_tickets`, `Get_ticket`, `Get_ticket_conversation`, `Bulk_get_ticket_conversations`, `Create_ticket`, `Update_ticket`, `Get_ticket_attachment`, `Request_ticket_attachment_upload` |
+| Tickets | `TicketsTools.cs`, `TicketConversationsTools.cs`, `TicketAttachmentsTools.cs` | `Search_tickets`, `Count_tickets`, `Get_ticket`, `Get_ticket_conversation`, `Bulk_get_ticket_conversations`, `Create_ticket`, `Update_ticket`, `Get_ticket_attachment`, `Request_ticket_attachment_upload` |
 | Reporting | `AnalyticsTools.cs`, `SatisfactionTools.cs`, `TicketSla.cs` | `Get_ticket_metrics_summary`, `Get_sla_summary`, `Get_sla_queue`, `Get_satisfaction_ratings` |
 | Macros | `MacrosTools.cs` | `Search_macros`, `Preview_macro`, `Apply_macro`, `Create_macro`, `Update_macro`, `Set_macros_active` |
 | People | `UsersTools.cs`, `OrganizationsTools.cs` | `Search_users`, `Find_agent_by_name`, `Search_organizations`, `Add_user_to_organization` |
