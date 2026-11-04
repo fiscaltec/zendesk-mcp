@@ -431,6 +431,49 @@ public class ZendeskCredentialProviderTests
         (await store.GetAsync(TestHelpers.TestObjectId)).Should().BeNull();
     }
 
+    [Fact]
+    public async Task Disconnect_WhenTheRevocationTimesOut_ForgetsTheToken_ButSaysSo()
+    {
+        // HttpClient.Timeout surfaces as a TaskCanceledException although the caller's own token was
+        // never cancelled. That is a failed revocation, not a cancelled disconnect: the grant must
+        // still be forgotten here, and the outcome must say Zendesk did not confirm it (#13).
+        using var stalled = new HttpClient(new StalledHandler()) { Timeout = TimeSpan.FromMilliseconds(100) };
+        using var zendesk = TestHelpers.CreateFakeZendesk(_ => FakeResponse.Json("{}"));
+        var (service, store) = TestHelpers.BuildUserZendeskService(zendesk.Client, TestHelpers.SampleToken("to-revoke"),
+            oauthHttpClientFactory: new TestHelpers.SingleClientFactory(stalled));
+
+        var outcome = await service.Credentials.DisconnectAsync(TestContext.Current.CancellationToken);
+
+        outcome.Should().Be(DisconnectOutcome.ForgottenButNotRevoked);
+        (await store.GetAsync(TestHelpers.TestObjectId)).Should().BeNull();
+    }
+
+    [Fact]
+    public async Task Revoke_StillPropagatesTheCallersOwnCancellation()
+    {
+        using var stalled = new HttpClient(new StalledHandler()) { Timeout = Timeout.InfiniteTimeSpan };
+        using var cache = new Microsoft.Extensions.Caching.Memory.MemoryCache(new Microsoft.Extensions.Caching.Memory.MemoryCacheOptions());
+        var client = new ZendeskOAuthClient(new TestHelpers.SingleClientFactory(stalled),
+            Microsoft.Extensions.Options.Options.Create(new ZendeskServerOptions { Subdomain = "example" }),
+            cache,
+            Microsoft.Extensions.Logging.Abstractions.NullLogger<ZendeskOAuthClient>.Instance);
+        using var cts = new CancellationTokenSource(TimeSpan.FromMilliseconds(100));
+
+        var act = () => client.RevokeAsync("to-revoke", cts.Token);
+
+        await act.Should().ThrowAsync<OperationCanceledException>("a caller that gave up must not be told the revocation failed");
+    }
+
+    // Never answers: a request through it ends only when HttpClient.Timeout or the caller cancels.
+    private sealed class StalledHandler : HttpMessageHandler
+    {
+        protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+        {
+            await Task.Delay(Timeout.Infinite, cancellationToken);
+            throw new InvalidOperationException("unreachable");
+        }
+    }
+
     private sealed class FixedClock(DateTimeOffset now) : TimeProvider
     {
         public override DateTimeOffset GetUtcNow() => now;

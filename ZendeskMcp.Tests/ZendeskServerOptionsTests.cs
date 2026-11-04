@@ -26,6 +26,8 @@ public class ZendeskServerOptionsTests
         var opts = new ZendeskServerOptions();
         opts.MaxAutoPageFetches.Should().Be(10);
         opts.MaxAnalyticsTickets.Should().Be(2000);
+        opts.JobStatusPollInterval.Should().Be(TimeSpan.FromSeconds(2));
+        opts.MaxJobStatusPolls.Should().Be(10);
         opts.ConnectLinkLifetime.Should().Be(TimeSpan.FromMinutes(15));
         opts.RequireEmailMatch.Should().BeTrue("binding a Zendesk login to the Entra identity is on unless turned off");
         opts.OAuthScopes.Should().Be("read write");
@@ -238,6 +240,38 @@ public class ZendeskServerOptionsTests
         opts.MaxAnalyticsTickets = 0;
         Action act = () => opts.Validate();
         act.Should().Throw<InvalidOperationException>().WithMessage("*MaxAnalyticsTickets*");
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(31)]
+    public void Validate_RejectsMaxJobStatusPollsOutsideOneToThirty(int polls)
+    {
+        var opts = Valid();
+        opts.MaxJobStatusPolls = polls;
+        Action act = () => opts.Validate();
+        act.Should().Throw<InvalidOperationException>().WithMessage("*MaxJobStatusPolls*");
+    }
+
+    [Theory]
+    [InlineData(-1)]
+    [InlineData(11)]
+    public void Validate_RejectsAJobStatusPollIntervalOutsideZeroToTenSeconds(int seconds)
+    {
+        var opts = Valid();
+        opts.JobStatusPollInterval = TimeSpan.FromSeconds(seconds);
+        Action act = () => opts.Validate();
+        act.Should().Throw<InvalidOperationException>().WithMessage("*JobStatusPollInterval*");
+    }
+
+    [Fact]
+    public void Validate_AcceptsTheJobStatusBoundsAtTheirLimits()
+    {
+        var opts = Valid();
+        opts.MaxJobStatusPolls = 30;
+        opts.JobStatusPollInterval = TimeSpan.Zero;
+        Action act = () => opts.Validate();
+        act.Should().NotThrow();
     }
 
     [Fact]
