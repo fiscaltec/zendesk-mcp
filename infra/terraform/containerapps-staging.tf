@@ -6,10 +6,17 @@
 # reaches Key Vault and ACR over the existing private endpoints with no extra networking, and it
 # shares the managed identity, so every grant (AcrPull, Key Vault, Graph GroupMember.Read.All)
 # already applies. It scales to zero. What is staging-specific is this app, a stable hostname with
-# its certificate, one federated credential (identity.tf) and one redirect URI on each OAuth client.
+# its certificate, one federated credential (identity.tf), one redirect URI on the Entra app, and its
+# own Zendesk OAuth client (below).
 #
-# WHAT IT SHARES, AND WHAT KEEPS IT APART. There is one Zendesk account, one Zendesk OAuth client and
-# one vault. Two settings keep staging from touching production's state:
+# WHAT IT SHARES, AND WHAT KEEPS IT APART. There is one Zendesk account and one vault. Three things
+# keep staging from touching production's state:
+#   * Its own Zendesk OAuth client (var.staging_zendesk_oauth_client_id, split from production's on
+#     2026-11-04), whose only redirect URL is staging's callback and whose allowed scopes in Admin
+#     Centre are `read` alone. Staging requests `read` (Zendesk__OAuthScopes), so a staging token
+#     cannot write to Zendesk even if Authorization__ReadOnly is turned off: the read-only guard
+#     below is the server's, this one is Zendesk's. The client's secret is its own vault secret,
+#     zendesk-staging-oauth-client-secret (Zendesk__OAuthClientSecretRef).
 #   * Zendesk__TokenSecretPrefix = zendesk-staging-user-. A person connects to each target
 #     separately, and the tokens are stored under different names, so a person using staging is
 #     never acting through a token production stored, and a staging defect in token handling cannot
@@ -77,6 +84,10 @@ resource "azurerm_container_app" "staging" {
       dynamic "env" {
         for_each = merge(local.app_env_shared, {
           "Zendesk__TokenSecretPrefix" = "zendesk-staging-user-"
+
+          "Zendesk__OAuthClientId"        = var.staging_zendesk_oauth_client_id
+          "Zendesk__OAuthClientSecretRef" = "zendesk-staging-oauth-client-secret"
+          "Zendesk__OAuthScopes"          = "read"
 
           # NOT production's: each target publishes its own origin, and strict RFC 9728 clients
           # reject a document whose resource names another server.
