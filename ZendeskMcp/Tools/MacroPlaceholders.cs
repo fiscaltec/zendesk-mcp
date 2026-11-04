@@ -115,6 +115,9 @@ public static partial class MacroPlaceholders
                 }
 
                 var variants = (item["variants"] as JsonArray ?? []).Where(v => v is not null).ToList();
+                // Unverified against the live API: Zendesk's Dynamic Content docs say only that the
+                // default variant is used when none "matches the user's locale", not which user; the
+                // requester's is assumed here, as it is the person the comment is written to.
                 var chosen = variants.FirstOrDefault(v => requesterLocale is not null && ToolJson.Long(v!["locale_id"]) == requesterLocale)
                     ?? variants.FirstOrDefault(v => MacroSupport.ParseBool(v!["default"]) == true)
                     ?? variants.FirstOrDefault();
