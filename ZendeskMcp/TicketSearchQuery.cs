@@ -1,5 +1,7 @@
 using System.Globalization;
 using System.Text;
+using System.Text.Json.Serialization;
+using ZendeskMcp.Tools;
 
 namespace ZendeskMcp;
 
@@ -30,7 +32,22 @@ public sealed record TicketSearchFilters
     public string? EndDate { get; init; }
     public string? SolvedStartDate { get; init; }
     public string? SolvedEndDate { get; init; }
+
+    /// <summary>Channels (see <see cref="TicketSearchQuery.ChannelValues"/>); a ticket on any of them matches.</summary>
+    public IReadOnlyList<string>? Channels { get; init; }
+
+    /// <summary>Custom field conditions, all of which must hold.</summary>
+    public IReadOnlyList<TicketCustomFieldCondition>? CustomFields { get; init; }
 }
+
+/// <summary>
+/// One custom field condition in a ticket search: the field has exactly <c>value</c>, or, with
+/// <c>has_value</c>, the field is set (true) or empty (false). Exactly one of the two is given.
+/// </summary>
+public sealed record TicketCustomFieldCondition(
+    [property: JsonPropertyName("id")] long Id,
+    [property: JsonPropertyName("value")] string? Value = null,
+    [property: JsonPropertyName("has_value")] bool? HasValue = null);
 
 /// <summary>
 /// Turns <see cref="TicketSearchFilters"/> into a Zendesk Search query (<c>type:ticket status:open …</c>).
@@ -51,6 +68,34 @@ public sealed record TicketSearchFilters
 public static class TicketSearchQuery
 {
     public const int MaxTextLength = 500;
+
+    /// <summary>Most conditions one custom_fields filter takes.</summary>
+    public const int MaxCustomFieldConditions = 10;
+
+    /// <summary>The value that selects every messaging channel together.</summary>
+    public const string MessagingChannel = "messaging";
+
+    // The via: values messaging expands to: Web Widget and mobile SDK messaging, WhatsApp, LINE, WeChat,
+    // Instagram DM, Telegram, Viber, KakaoTalk, Apple Messages for Business, Google RCS and Business
+    // Messages, Facebook Messenger and X DM through Sunshine Conversations, messaging SMS (Twilio,
+    // MessageBird) and the Sunshine Conversations API. Swifteq's server sends this set, and on
+    // 2026-11-04 Zendesk accepted it as one search (an unknown via: value makes it refuse the whole
+    // search), so every value is valid search syntax.
+    // Unverified against the live API: whether each value matches its own tickets; the account has no
+    // messaging tickets.
+    private static readonly string[] MessagingSearchValues =
+    [
+        "native_messaging", "whatsapp", "line", "wechat", "instagram_dm", "telegram", "viber", "kakaotalk",
+        "apple_business_chat", "google_rcs", "google_business_messages", "sunshine_conversations_facebook_messenger",
+        "sunshine_conversations_twitter_dm", "twilio_sms", "messagebird_sms", "sunshine_conversations_api",
+    ];
+
+    /// <summary>
+    /// The values the channel filter takes: the channel keys Count_tickets groups by, so a channel here
+    /// selects exactly the tickets of its group there, plus <see cref="MessagingChannel"/>.
+    /// </summary>
+    public static readonly string[] ChannelValues =
+        [.. TicketCountHelpers.Channels.Select(c => c.Channel), MessagingChannel];
 
     private static readonly string[] Statuses = ["new", "open", "pending", "hold", "solved", "closed"];
     private static readonly string[] Priorities = ["low", "normal", "high", "urgent"];
@@ -99,13 +144,16 @@ public static class TicketSearchQuery
 
         if (filters.CustomFieldId is not null || !string.IsNullOrWhiteSpace(filters.CustomFieldValue))
         {
-            if (filters.CustomFieldId is not { } fieldId || fieldId <= 0 || string.IsNullOrWhiteSpace(filters.CustomFieldValue))
+            if (filters.CustomFieldId is not { } fieldId || fieldId <= 0 || !HasText(filters.CustomFieldValue))
             {
                 throw new ArgumentException("custom_field_id and custom_field_value must be given together, with a positive field id.");
             }
 
-            terms.Add($"custom_field_{fieldId.ToString(CultureInfo.InvariantCulture)}:{Quote(filters.CustomFieldValue)}");
+            terms.Add($"custom_field_{fieldId.ToString(CultureInfo.InvariantCulture)}:{ExactValue(filters.CustomFieldValue!)}");
         }
+
+        AddCustomFields(terms, filters);
+        AddChannels(terms, filters.Channels);
 
         if (filters.CustomStatusId is { } customStatus)
         {
@@ -163,6 +211,102 @@ public static class TicketSearchQuery
         }
 
         throw new ArgumentException($"{parameter} must be YYYY-MM-DD or YYYY-MM-DDThh:mm:ss[Z] (got '{value}').");
+    }
+
+    /// <summary>
+    /// The via: search values a channel filter expands to: the channel table's values in its order, then
+    /// messaging's. Each is one the live API accepts. Repeated via: terms OR: via:mail via:web counted the
+    /// email and web tickets together (confirmed against the live API through Swifteq's server).
+    /// </summary>
+    public static IReadOnlyList<string> ChannelSearchValues(IReadOnlyList<string>? channels)
+    {
+        if (channels is null || channels.Count == 0)
+        {
+            return [];
+        }
+
+        var wanted = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var channel in channels)
+        {
+            var normalised = (channel ?? string.Empty).Trim().ToLowerInvariant();
+            if (!ChannelValues.Contains(normalised))
+            {
+                throw new ArgumentException($"channel values must be from: {string.Join(", ", ChannelValues)} (got '{channel}'). Use this filter for the channel, never 'via:' in text.");
+            }
+
+            wanted.Add(normalised);
+        }
+
+        var values = TicketCountHelpers.Channels.Where(c => wanted.Contains(c.Channel)).Select(c => c.SearchValue);
+        if (wanted.Contains(MessagingChannel))
+        {
+            values = values.Concat(MessagingSearchValues);
+        }
+
+        return values.Distinct(StringComparer.Ordinal).ToList();
+    }
+
+    private static void AddChannels(List<string> terms, IReadOnlyList<string>? channels)
+    {
+        foreach (var value in ChannelSearchValues(channels))
+        {
+            terms.Add($"via:{value}");
+        }
+    }
+
+    // custom_fields: each condition one term, all ANDed (two different fields AND: confirmed against the
+    // live API through Swifteq's server). Repeating a keyword ORs its values (confirmed for priority: and
+    // via: on 2026-11-04), so two terms on one field would match either.
+    // Unverified against the live API: that custom_field_<id> terms OR like that. Refusing a repeat is right
+    // either way, since 'both' is never what is meant. So a field may appear once, and not alongside
+    // custom_field_id. What a field's type allows (a checkbox is
+    // never empty, a built-in field has its own filter) needs the field definitions, which
+    // TicketSearchHelpers.CheckCustomFieldsAsync reads; this checks only the shape.
+    private static void AddCustomFields(List<string> terms, TicketSearchFilters filters)
+    {
+        if (filters.CustomFields is not { Count: > 0 } conditions)
+        {
+            return;
+        }
+
+        if (conditions.Count > MaxCustomFieldConditions)
+        {
+            throw new ArgumentException($"custom_fields takes at most {MaxCustomFieldConditions} conditions (got {conditions.Count}).");
+        }
+
+        var seen = new HashSet<long>();
+        foreach (var condition in conditions)
+        {
+            if (condition is null || condition.Id <= 0)
+            {
+                throw new ArgumentException("Each custom_fields condition needs id, a positive ticket field id (see List_ticket_fields).");
+            }
+
+            var id = condition.Id.ToString(CultureInfo.InvariantCulture);
+            if (!seen.Add(condition.Id))
+            {
+                throw new ArgumentException($"custom_fields names field {id} more than once. Give each field once; to match any of several values, make separate calls.");
+            }
+
+            if (filters.CustomFieldId == condition.Id)
+            {
+                throw new ArgumentException($"Field {id} is already filtered by custom_field_id; give it in one place only.");
+            }
+
+            var hasValue = HasText(condition.Value);
+            if (hasValue == condition.HasValue.HasValue || (condition.Value is not null && !hasValue))
+            {
+                throw new ArgumentException($"custom_fields condition for field {id} needs exactly one of value (an exact value; for a drop-down, the option's tag) or has_value (true: any value, false: empty).");
+            }
+
+            // On a drop-down, custom_field_<id>:* counted exactly the tickets outside group_by custom_field's
+            // '(none)' group and -custom_field_<id>:* exactly those in it (confirmed against the live API).
+            // Unverified against the live API: the wildcard on text, number, date and other non-drop-down
+            // fields; the only text field tried was empty on every ticket, which cannot tell the two apart.
+            terms.Add(condition.HasValue is { } wantsValue
+                ? $"{(wantsValue ? string.Empty : "-")}custom_field_{id}:*"
+                : $"custom_field_{id}:{ExactValue(condition.Value!)}");
+        }
     }
 
     private static void AddDate(List<string> terms, string op, string? value, string parameter)
@@ -244,6 +388,20 @@ public static class TicketSearchQuery
 
         return tag.ToLowerInvariant();
     }
+
+    // An exact value: quoted when it carries search syntax (a wildcard, a comparison, a colon or a
+    // leading minus), as free text is, so '*' cannot turn into has_value true or 'a*' into a prefix match.
+    private static string ExactValue(string value)
+    {
+        var cleaned = Quote(value);
+        var bare = cleaned.Trim('"');
+        var hasSyntax = bare.IndexOfAny([':', '<', '>', '=', '*']) >= 0 || bare.StartsWith('-');
+        return hasSyntax && !cleaned.StartsWith('"') ? $"\"{bare}\"" : cleaned;
+    }
+
+    // Whether a value still says something once Quote has dropped its quote characters: "" or " " would
+    // otherwise become a term with no operand (custom_field_<id>:).
+    private static bool HasText(string? value) => value is not null && Quote(value).Trim('"').Length > 0;
 
     /// <summary>Quotes a value with whitespace; drops quote characters, which Zendesk search cannot escape.</summary>
     public static string Quote(string value)
