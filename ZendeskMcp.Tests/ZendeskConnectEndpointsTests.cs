@@ -58,6 +58,48 @@ public class ZendeskConnectEndpointsTests
     }
 
     [Fact]
+    public async Task AnIdentityCheckThatTimesOut_IsRevoked_AndNotStored()
+    {
+        // HttpClient.Timeout raises TaskCanceledException with the request's own token untouched.
+        // The new grant was neither checked nor stored, so it must be revoked, not left live (#13).
+        using var factory = new Factory(zendeskEmail: "agent@example.com")
+        {
+            StallPath = "/api/v2/users/me.json",
+            OAuthTimeout = TimeSpan.FromMilliseconds(200),
+        };
+        using var client = factory.CreateClient(new WebApplicationFactoryClientOptions { AllowAutoRedirect = false });
+        var state = await StartAsync(factory, client, "agent@example.com");
+
+        var callback = await GetWithCookieAsync(client, $"/zendesk/callback?code=c&state={state}", state);
+
+        callback.StatusCode.Should().Be(HttpStatusCode.BadGateway);
+        (await factory.Store.GetAsync(ObjectId, TestContext.Current.CancellationToken)).Should().BeNull();
+        factory.Revocations.Should().Equal("issued-access");
+    }
+
+    [Fact]
+    public async Task ABrowserThatGivesUpDuringTheIdentityCheck_StillHasTheNewGrantRevoked()
+    {
+        // The request's own cancellation must still propagate, but cleanup cannot use the token that
+        // has just been cancelled: it gets a bounded token of its own.
+        using var factory = new Factory(zendeskEmail: "agent@example.com") { StallPath = "/api/v2/users/me.json" };
+        using var client = factory.CreateClient(new WebApplicationFactoryClientOptions { AllowAutoRedirect = false });
+        var state = await StartAsync(factory, client, "agent@example.com");
+
+        using var abandon = new CancellationTokenSource();
+        using var request = new HttpRequestMessage(HttpMethod.Get, $"/zendesk/callback?code=c&state={state}");
+        request.Headers.Add("Cookie", $"zendesk_connect_state={state}");
+        var callback = client.SendAsync(request, abandon.Token);
+        await WaitUntilAsync(() => factory.ZendeskRequests.Any(r => r.Path == "/api/v2/users/me.json"));
+        await abandon.CancelAsync();
+        await FluentActions.Awaiting(() => callback).Should().ThrowAsync<OperationCanceledException>();
+
+        await WaitUntilAsync(() => factory.Revocations.Count > 0);
+        factory.Revocations.Should().Equal("issued-access");
+        (await factory.Store.GetAsync(ObjectId, TestContext.Current.CancellationToken)).Should().BeNull();
+    }
+
+    [Fact]
     public async Task ADifferentZendeskLogin_IsRefused_RevokedAndNotStored()
     {
         using var factory = new Factory(zendeskEmail: "someone.else@example.com");
@@ -206,6 +248,15 @@ public class ZendeskConnectEndpointsTests
         (refusal is null).Should().Be(allowed);
     }
 
+    // Polls for up to five seconds: the server finishes its cleanup after the client has given up.
+    private static async Task WaitUntilAsync(Func<bool> condition)
+    {
+        for (var i = 0; i < 100 && !condition(); i++)
+        {
+            await Task.Delay(50, TestContext.Current.CancellationToken);
+        }
+    }
+
     private static async Task<string> StartAsync(Factory factory, HttpClient client, string signInName)
     {
         var link = await factory.IssueLinkAsync(ObjectId, signInName);
@@ -261,6 +312,12 @@ public class ZendeskConnectEndpointsTests
         public Task<string> IssueLinkAsync(string objectId, string signInName) =>
             Services.GetRequiredService<ZendeskConnectLinks>().CreateAsync(objectId, signInName, "http://localhost");
 
+        /// <summary>A path the stub never answers: the request ends only when it is cancelled or times out.</summary>
+        public string? StallPath { get; init; }
+
+        /// <summary>Overrides the OAuth client's 15 s timeout, so a test can make a stalled call time out.</summary>
+        public TimeSpan? OAuthTimeout { get; init; }
+
         protected override IHost CreateHost(IHostBuilder builder)
         {
             builder.UseEnvironment(Environments.Development);
@@ -273,8 +330,12 @@ public class ZendeskConnectEndpointsTests
             });
             builder.ConfigureServices(services =>
             {
-                services.AddHttpClient(ZendeskOAuthClient.HttpClientName)
+                var oauthClient = services.AddHttpClient(ZendeskOAuthClient.HttpClientName)
                     .ConfigurePrimaryHttpMessageHandler(() => new StubZendesk(this));
+                if (OAuthTimeout is { } timeout)
+                {
+                    oauthClient.ConfigureHttpClient(c => c.Timeout = timeout);
+                }
             });
             return base.CreateHost(builder);
         }
@@ -289,6 +350,11 @@ public class ZendeskConnectEndpointsTests
                 lock (owner._requests)
                 {
                     owner._requests.Add(recorded);
+                }
+
+                if (recorded.Path == owner.StallPath)
+                {
+                    await Task.Delay(Timeout.Infinite, cancellationToken);
                 }
 
                 var json = recorded.Path switch
