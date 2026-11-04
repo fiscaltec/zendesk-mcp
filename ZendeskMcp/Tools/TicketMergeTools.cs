@@ -420,9 +420,10 @@ public static class TicketMerge
             summary = job is null ? null : JobSummary(job);
             jobId = job is null ? null : JobId(job);
         }
-        catch (Exception)
+        catch (Exception ex) when (ex is ArgumentException or InvalidOperationException)
         {
-            // Left null: the next step still says not to merge again.
+            // What reading a malformed JsonObject throws (a duplicate key, the wrong node kind). Left
+            // null: the next step still says not to merge again.
         }
 
         result["job"] = summary;
