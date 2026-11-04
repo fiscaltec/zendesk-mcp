@@ -14,10 +14,10 @@
 #   no-repo       optional; GET repos/{owner}/{repo} answers 404 (wrong or invisible repository)
 #   lose-removes  optional; DELETE .../labels/<name> reports success but changes nothing
 #   is-pr         optional; the issue is a pull request (GET carries a pull_request key)
+#   stderr-notice optional; every issue/label call prints a notice on stderr and still succeeds
 #
 # Only issue 11 exists; any other number answers 404, so a script addressing the wrong issue fails.
 # DELETE .../labels/ with an empty name removes EVERY label, as GitHub's endpoint does.
-#   stderr-notice optional; every issue/label call prints a notice on stderr and still succeeds
 #
 # Like real gh, -f with no -X means POST. Label and login lookups are case-insensitive, as GitHub's
 # are. Empty arrays are expanded with ${a[@]+...} so the stub also runs on macOS's bash 3.2.
