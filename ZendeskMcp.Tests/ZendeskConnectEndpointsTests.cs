@@ -141,6 +141,66 @@ public class ZendeskConnectEndpointsTests
     }
 
     [Fact]
+    public async Task AReconnectWhoseBrowserLeavesAfterTheStore_StillRevokesTheReplacedGrant()
+    {
+        // The replaced grant is revoked after the new one is kept. On the request's own token, a
+        // browser that left by then would cancel that revocation and leave the old grant live; it runs
+        // on a cleanup token instead (#13).
+        using var factory = new Factory(zendeskEmail: "agent@example.com");
+        using var client = factory.CreateClient(new WebApplicationFactoryClientOptions { AllowAutoRedirect = false });
+        await factory.Store.SaveAsync(ObjectId, TestHelpers.SampleToken("previous-access"), TestContext.Current.CancellationToken);
+        var state = await StartAsync(factory, client, "agent@example.com");
+        using var browser = new CancellationTokenSource();
+        factory.AfterSave = browser.Cancel;
+
+        await FluentActions.Awaiting(() => GetWithCookieAsync(client, $"/zendesk/callback?code=c&state={state}", state, browser.Token))
+            .Should().ThrowAsync<OperationCanceledException>();
+        factory.AfterSave = null;
+
+        await WaitUntilAsync(() => factory.Revocations.Contains("previous-access"));
+        factory.Revocations.Should().Equal(["previous-access"], "the replaced grant is revoked, and the kept one is not");
+        (await factory.Store.GetAsync(ObjectId, TestContext.Current.CancellationToken))!.AccessToken.Should().Be("issued-access");
+    }
+
+    [Fact]
+    public async Task AReconnect_OverAnExpiredGrant_RefreshesItFirst_SoTheRevocationReachesALiveGrant()
+    {
+        // Revoking an expired access token answers 401, which reads as revoked while the refresh
+        // token, and so the old grant, stays live (#12) — and an expired grant is the usual reason
+        // to reconnect.
+        using var factory = new Factory(zendeskEmail: "agent@example.com");
+        using var client = factory.CreateClient(new WebApplicationFactoryClientOptions { AllowAutoRedirect = false });
+        await factory.Store.SaveAsync(ObjectId, new ZendeskUserToken("old-access", "old-refresh", DateTimeOffset.UtcNow.AddHours(-1), null,
+            4242, "agent@example.com", "agent", DateTimeOffset.UtcNow.AddDays(-7)));
+        var state = await StartAsync(factory, client, "agent@example.com");
+
+        var callback = await GetWithCookieAsync(client, $"/zendesk/callback?code=the-code&state={state}", state);
+
+        callback.StatusCode.Should().Be(HttpStatusCode.OK);
+        (await factory.Store.GetAsync(ObjectId))!.AccessToken.Should().Be("issued-access");
+        factory.ZendeskRequests.Should().ContainSingle(r => r.Path == "/oauth/tokens" && r.Body!.Contains("\"refresh_token\":\"old-refresh\""));
+        factory.ZendeskRequests.Should().ContainSingle(r => r.Method == HttpMethod.Delete)
+            .Which.Headers["Authorization"].Should().Be("Bearer renewed-old", "the renewed old grant is the one to kill, never the new one");
+    }
+
+    [Fact]
+    public async Task AReconnect_OverAnUnreadableGrant_StoresTheNewOne_AndRevokesWhatCanBeRead()
+    {
+        var unreadable = new UnreadableTokenStore(new ZendeskStoredTokenUnreadableException(
+            new ZendeskUserToken("readable-old", null, null, null, 0, string.Empty, string.Empty, DateTimeOffset.MinValue)));
+        using var factory = new Factory(zendeskEmail: "agent@example.com", store: unreadable);
+        using var client = factory.CreateClient(new WebApplicationFactoryClientOptions { AllowAutoRedirect = false });
+        var state = await StartAsync(factory, client, "agent@example.com");
+
+        var callback = await GetWithCookieAsync(client, $"/zendesk/callback?code=the-code&state={state}", state);
+
+        callback.StatusCode.Should().Be(HttpStatusCode.OK, "a damaged old grant must not stop the person reconnecting");
+        (await unreadable.GetAsync(ObjectId))!.AccessToken.Should().Be("issued-access");
+        factory.ZendeskRequests.Should().ContainSingle(r => r.Method == HttpMethod.Delete)
+            .Which.Headers["Authorization"].Should().Be("Bearer readable-old");
+    }
+
+    [Fact]
     public async Task ADifferentZendeskLogin_IsRefused_RevokedAndNotStored()
     {
         using var factory = new Factory(zendeskEmail: "someone.else@example.com");
@@ -348,7 +408,7 @@ public class ZendeskConnectEndpointsTests
                 .Split('=', 2)[1]
             : null;
 
-    private sealed class Factory(string zendeskEmail, string role = "agent", string name = "Agent Example") : WebApplicationFactory<Program>
+    private sealed class Factory(string zendeskEmail, string role = "agent", string name = "Agent Example", IZendeskTokenStore? store = null) : WebApplicationFactory<Program>
     {
         private readonly List<RecordedRequest> _requests = [];
         private int _exchanges;
@@ -403,7 +463,8 @@ public class ZendeskConnectEndpointsTests
             });
             builder.ConfigureServices(services =>
             {
-                services.AddSingleton<IZendeskTokenStore>(new NotifyingStore(this));
+                // A store given by the test wins; otherwise the in-memory one, with an AfterSave hook.
+                services.AddSingleton(store ?? new NotifyingStore(this));
                 var oauthClient = services.AddHttpClient(ZendeskOAuthClient.HttpClientName)
                     .ConfigurePrimaryHttpMessageHandler(() => new StubZendesk(this));
                 if (OAuthTimeout is { } timeout)
@@ -439,6 +500,9 @@ public class ZendeskConnectEndpointsTests
         {
             protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
             {
+                // A request whose token is already cancelled never reaches Zendesk, so it is not
+                // recorded: Revocations must mean revocations that were actually sent.
+                cancellationToken.ThrowIfCancellationRequested();
                 var body = request.Content is null ? null : await request.Content.ReadAsStringAsync(cancellationToken);
                 var recorded = new RecordedRequest(request.Method, request.RequestUri!, body,
                     request.Headers.ToDictionary(h => h.Key, h => string.Join(",", h.Value), StringComparer.OrdinalIgnoreCase));
@@ -459,6 +523,8 @@ public class ZendeskConnectEndpointsTests
 
                 var json = recorded.Path switch
                 {
+                    "/oauth/tokens" when body!.Contains("\"grant_type\":\"refresh_token\"", StringComparison.Ordinal) =>
+                        "{\"access_token\":\"renewed-old\",\"refresh_token\":\"renewed-old-refresh\",\"expires_in\":7200,\"token_type\":\"bearer\"}",
                     // The first exchange issues "issued-access", later ones "issued-access-2" and so on,
                     // so a test can tell which grant was stored and which was revoked.
                     "/oauth/tokens" => Interlocked.Increment(ref owner._exchanges) switch
