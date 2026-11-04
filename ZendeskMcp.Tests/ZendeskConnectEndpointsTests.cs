@@ -58,6 +58,111 @@ public class ZendeskConnectEndpointsTests
     }
 
     [Fact]
+    public async Task AnIdentityCheckThatTimesOut_IsRevoked_AndNotStored()
+    {
+        // HttpClient.Timeout raises TaskCanceledException with the request's own token untouched.
+        // The new grant was neither checked nor stored, so it must be revoked, not left live (#13).
+        using var factory = new Factory(zendeskEmail: "agent@example.com")
+        {
+            StallPath = "/api/v2/users/me.json",
+            OAuthTimeout = TimeSpan.FromMilliseconds(200),
+        };
+        using var client = factory.CreateClient(new WebApplicationFactoryClientOptions { AllowAutoRedirect = false });
+        var state = await StartAsync(factory, client, "agent@example.com");
+
+        var callback = await GetWithCookieAsync(client, $"/zendesk/callback?code=c&state={state}", state);
+
+        callback.StatusCode.Should().Be(HttpStatusCode.BadGateway);
+        (await factory.Store.GetAsync(ObjectId, TestContext.Current.CancellationToken)).Should().BeNull();
+        factory.Revocations.Should().Equal("issued-access");
+    }
+
+    [Fact]
+    public async Task ABrowserThatGivesUpDuringTheIdentityCheck_StillHasTheNewGrantRevoked()
+    {
+        // The request's own cancellation must still propagate, but cleanup cannot use the token that
+        // has just been cancelled: it gets a bounded token of its own.
+        using var factory = new Factory(zendeskEmail: "agent@example.com") { StallPath = "/api/v2/users/me.json" };
+        using var client = factory.CreateClient(new WebApplicationFactoryClientOptions { AllowAutoRedirect = false });
+        var state = await StartAsync(factory, client, "agent@example.com");
+
+        using var abandon = new CancellationTokenSource();
+        using var request = new HttpRequestMessage(HttpMethod.Get, $"/zendesk/callback?code=c&state={state}");
+        request.Headers.Add("Cookie", $"zendesk_connect_state={state}");
+        var callback = client.SendAsync(request, abandon.Token);
+        await WaitUntilAsync(() => factory.ZendeskRequests.Any(r => r.Path == "/api/v2/users/me.json"));
+        await abandon.CancelAsync();
+        await FluentActions.Awaiting(() => callback).Should().ThrowAsync<OperationCanceledException>();
+
+        await WaitUntilAsync(() => factory.Revocations.Count > 0);
+        factory.Revocations.Should().Equal("issued-access");
+        (await factory.Store.GetAsync(ObjectId, TestContext.Current.CancellationToken)).Should().BeNull();
+    }
+
+    [Fact]
+    public async Task ABrowserThatGivesUpDuringTheCodeExchange_StillHasTheIssuedGrantRevoked()
+    {
+        // The exchange runs on a token of its own, so a grant Zendesk issues reaches UnkeptGrant even
+        // when the browser has gone, and is revoked rather than lost while live (#13).
+        using var factory = new Factory(zendeskEmail: "agent@example.com") { SlowPath = ("/oauth/tokens", TimeSpan.FromMilliseconds(400)) };
+        using var client = factory.CreateClient(new WebApplicationFactoryClientOptions { AllowAutoRedirect = false });
+        var state = await StartAsync(factory, client, "agent@example.com");
+
+        using var abandon = new CancellationTokenSource();
+        using var request = new HttpRequestMessage(HttpMethod.Get, $"/zendesk/callback?code=c&state={state}");
+        request.Headers.Add("Cookie", $"zendesk_connect_state={state}");
+        var callback = client.SendAsync(request, abandon.Token);
+        await WaitUntilAsync(() => factory.ZendeskRequests.Any(r => r.Path == "/oauth/tokens"));
+        await abandon.CancelAsync();
+        await FluentActions.Awaiting(() => callback).Should().ThrowAsync<OperationCanceledException>();
+
+        await WaitUntilAsync(() => factory.Revocations.Count > 0);
+        factory.Revocations.Should().Equal("issued-access");
+        (await factory.Store.GetAsync(ObjectId, TestContext.Current.CancellationToken)).Should().BeNull();
+    }
+
+    [Fact]
+    public async Task AReconnectWhoseStoreFailsAfterTheWriteLanded_RevokesBothGrants_AndForgetsTheConnection()
+    {
+        // SaveAsync has overwritten the previous grant before it fails. Revoking only the new grant
+        // would leave the previous one neither stored nor revoked, and the store holding a revoked
+        // token (#13).
+        using var factory = new Factory(zendeskEmail: "agent@example.com");
+        using var client = factory.CreateClient(new WebApplicationFactoryClientOptions { AllowAutoRedirect = false });
+        await factory.Store.SaveAsync(ObjectId, TestHelpers.SampleToken("previous-access"), TestContext.Current.CancellationToken);
+        var state = await StartAsync(factory, client, "agent@example.com");
+        factory.AfterSave = () => throw new InvalidOperationException("the vault write reported a failure after landing");
+
+        var callback = await GetWithCookieAsync(client, $"/zendesk/callback?code=c&state={state}", state);
+
+        callback.StatusCode.Should().Be(HttpStatusCode.ServiceUnavailable);
+        factory.Revocations.Should().BeEquivalentTo(["issued-access", "previous-access"]);
+        (await factory.Store.GetAsync(ObjectId, TestContext.Current.CancellationToken)).Should().BeNull("the store must not keep a revoked grant");
+    }
+
+    [Fact]
+    public async Task AReconnectWhoseBrowserLeavesAfterTheStore_StillRevokesTheReplacedGrant()
+    {
+        // The replaced grant is revoked after the new one is kept. On the request's own token, a
+        // browser that left by then would cancel that revocation and leave the old grant live; it runs
+        // on a cleanup token instead (#13).
+        using var factory = new Factory(zendeskEmail: "agent@example.com");
+        using var client = factory.CreateClient(new WebApplicationFactoryClientOptions { AllowAutoRedirect = false });
+        await factory.Store.SaveAsync(ObjectId, TestHelpers.SampleToken("previous-access"), TestContext.Current.CancellationToken);
+        var state = await StartAsync(factory, client, "agent@example.com");
+        using var browser = new CancellationTokenSource();
+        factory.AfterSave = browser.Cancel;
+
+        await FluentActions.Awaiting(() => GetWithCookieAsync(client, $"/zendesk/callback?code=c&state={state}", state, browser.Token))
+            .Should().ThrowAsync<OperationCanceledException>();
+        factory.AfterSave = null;
+
+        await WaitUntilAsync(() => factory.Revocations.Contains("previous-access"));
+        factory.Revocations.Should().Equal(["previous-access"], "the replaced grant is revoked, and the kept one is not");
+        (await factory.Store.GetAsync(ObjectId, TestContext.Current.CancellationToken))!.AccessToken.Should().Be("issued-access");
+    }
+
+    [Fact]
     public async Task AReconnect_OverAnExpiredGrant_RefreshesItFirst_SoTheRevocationReachesALiveGrant()
     {
         // Revoking an expired access token answers 401, which reads as revoked while the refresh
@@ -221,6 +326,7 @@ public class ZendeskConnectEndpointsTests
             .Should().ThrowAsync<OperationCanceledException>();
         factory.AfterSave = null;
         (await factory.Store.GetAsync(ObjectId))!.AccessToken.Should().Be("issued-access", "the store finished before the browser gave up");
+        factory.Revocations.Should().NotContain("issued-access", "a grant that was stored and its link spent is kept, not revoked as abandoned");
         await factory.Store.RemoveAsync(ObjectId);
 
         var second = await GetWithCookieAsync(client, $"/zendesk/callback?code=c2&state={secondState}", secondState);
@@ -267,6 +373,15 @@ public class ZendeskConnectEndpointsTests
         var refusal = ZendeskConnectEndpoints.Refusal(new ZendeskIdentity(1, "A", zendeskEmail, role), signInName, requireMatch);
 
         (refusal is null).Should().Be(allowed);
+    }
+
+    // Polls for up to five seconds: the server finishes its cleanup after the client has given up.
+    private static async Task WaitUntilAsync(Func<bool> condition)
+    {
+        for (var i = 0; i < 100 && !condition(); i++)
+        {
+            await Task.Delay(50, TestContext.Current.CancellationToken);
+        }
     }
 
     private static async Task<string> StartAsync(Factory factory, HttpClient client, string signInName)
@@ -327,6 +442,15 @@ public class ZendeskConnectEndpointsTests
         public Task<string> IssueLinkAsync(string objectId, string signInName) =>
             Services.GetRequiredService<ZendeskConnectLinks>().CreateAsync(objectId, signInName, "http://localhost");
 
+        /// <summary>A path the stub never answers: the request ends only when it is cancelled or times out.</summary>
+        public string? StallPath { get; init; }
+
+        /// <summary>A path the stub answers only after a delay, giving up if the request is cancelled first.</summary>
+        public (string Path, TimeSpan Delay)? SlowPath { get; init; }
+
+        /// <summary>Overrides the OAuth client's 15 s timeout, so a test can make a stalled call time out.</summary>
+        public TimeSpan? OAuthTimeout { get; init; }
+
         protected override IHost CreateHost(IHostBuilder builder)
         {
             builder.UseEnvironment(Environments.Development);
@@ -339,10 +463,14 @@ public class ZendeskConnectEndpointsTests
             });
             builder.ConfigureServices(services =>
             {
-                services.AddHttpClient(ZendeskOAuthClient.HttpClientName)
-                    .ConfigurePrimaryHttpMessageHandler(() => new StubZendesk(this));
                 // A store given by the test wins; otherwise the in-memory one, with an AfterSave hook.
                 services.AddSingleton(store ?? new NotifyingStore(this));
+                var oauthClient = services.AddHttpClient(ZendeskOAuthClient.HttpClientName)
+                    .ConfigurePrimaryHttpMessageHandler(() => new StubZendesk(this));
+                if (OAuthTimeout is { } timeout)
+                {
+                    oauthClient.ConfigureHttpClient(c => c.Timeout = timeout);
+                }
             });
             return base.CreateHost(builder);
         }
@@ -372,12 +500,25 @@ public class ZendeskConnectEndpointsTests
         {
             protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
             {
+                // A request whose token is already cancelled never reaches Zendesk, so it is not
+                // recorded: Revocations must mean revocations that were actually sent.
+                cancellationToken.ThrowIfCancellationRequested();
                 var body = request.Content is null ? null : await request.Content.ReadAsStringAsync(cancellationToken);
                 var recorded = new RecordedRequest(request.Method, request.RequestUri!, body,
                     request.Headers.ToDictionary(h => h.Key, h => string.Join(",", h.Value), StringComparer.OrdinalIgnoreCase));
                 lock (owner._requests)
                 {
                     owner._requests.Add(recorded);
+                }
+
+                if (recorded.Path == owner.StallPath)
+                {
+                    await Task.Delay(Timeout.Infinite, cancellationToken);
+                }
+
+                if (owner.SlowPath is { } slow && recorded.Path == slow.Path)
+                {
+                    await Task.Delay(slow.Delay, cancellationToken);
                 }
 
                 var json = recorded.Path switch

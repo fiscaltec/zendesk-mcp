@@ -28,6 +28,9 @@ public static class ZendeskConnectEndpoints
 
     /// <summary>How long the callback's check, store and spend of the link may take once begun, whatever the browser does.</summary>
     internal static readonly TimeSpan StoreTimeout = TimeSpan.FromSeconds(30);
+
+    /// <summary>How long the code exchange may take once begun, whatever the browser does.</summary>
+    internal static readonly TimeSpan ExchangeTimeout = TimeSpan.FromSeconds(30);
     internal const string StateCookie = "zendesk_connect_state";
 
     public static void MapZendeskConnect(this WebApplication app)
@@ -105,26 +108,40 @@ public static class ZendeskConnectEndpoints
                 return Page(StatusCodes.Status400BadRequest, "Connection not completed", "Zendesk returned no authorisation code.");
             }
 
+            // On a bounded token of its own, not the browser's: once the code is sent, Zendesk may issue a
+            // grant whatever the browser does, and an exchange cancelled at that point would leave it live
+            // with nobody to revoke it. Finishing the exchange hands any issued grant to UnkeptGrant.
             ZendeskOAuthClient.TokenResponse token;
-            try
+            using (var exchange = new CancellationTokenSource(ExchangeTimeout))
             {
-                token = await oauthClient.ExchangeCodeAsync(code, CallbackUrl(ctx, oauth.Value), attempt.CodeVerifier, ctx.RequestAborted);
+                try
+                {
+                    token = await oauthClient.ExchangeCodeAsync(code, CallbackUrl(ctx, oauth.Value), attempt.CodeVerifier, exchange.Token);
+                }
+                catch (ZendeskOAuthException ex)
+                {
+                    return Page(StatusCodes.Status502BadGateway, "Connection not completed", ex.Message);
+                }
             }
-            catch (ZendeskOAuthException ex)
-            {
-                return Page(StatusCodes.Status502BadGateway, "Connection not completed", ex.Message);
-            }
+
+            // From here — once the exchange has returned a grant — a live grant exists at Zendesk.
+            // Every exit that does not keep it revokes it:
+            // the refusals below explicitly, and anything else — the browser giving up, a timeout, an
+            // unexpected exception — when `unkept` is disposed. Revocation runs on a bounded token of
+            // its own, because RequestAborted may be the very thing that has just been cancelled.
+            await using var unkept = new UnkeptGrant(oauthClient, logger, token.AccessToken);
 
             ZendeskIdentity identity;
             try
             {
                 identity = await oauthClient.GetIdentityAsync(token.AccessToken, ctx.RequestAborted);
             }
-            catch (Exception ex) when (ex is not OperationCanceledException)
+            catch (Exception ex) when (ex is not OperationCanceledException || !ctx.RequestAborted.IsCancellationRequested)
             {
                 // A token whose owner could not be checked is never stored, and is revoked straight
-                // away like a refused one, rather than left live at Zendesk.
-                await oauthClient.RevokeAsync(token.AccessToken, ctx.RequestAborted);
+                // away like a refused one, rather than left live at Zendesk. An HTTP timeout lands here
+                // too: it is a TaskCanceledException, but not the browser's cancellation.
+                await unkept.RevokeAsync();
                 return Page(StatusCodes.Status502BadGateway, "Connection not completed",
                     ex is ZendeskOAuthException ? ex.Message : "Zendesk could not confirm who this sign-in belongs to. Open your connect link again.");
             }
@@ -133,7 +150,7 @@ public static class ZendeskConnectEndpoints
             if (refusal is not null)
             {
                 // Revoked straight away: a token for the wrong person must not outlive the refusal.
-                await oauthClient.RevokeAsync(token.AccessToken, ctx.RequestAborted);
+                await unkept.RevokeAsync();
                 logger.LogWarning(
                     "Refused a Zendesk connection for {UserObjectId}: {RefusalReason} (Zendesk user {ZendeskUserId})",
                     attempt.ObjectId, refusal.Value.LogReason, identity.Id);
@@ -156,6 +173,7 @@ public static class ZendeskConnectEndpoints
             ZendeskUserToken? replaced = null;
             var replacedUnreadable = false;
             var linkSpent = false;
+            var saveEntered = false;
             try
             {
                 if (await links.PeekAsync(attempt.Ticket, commit.Token) is null)
@@ -176,8 +194,11 @@ public static class ZendeskConnectEndpoints
                         replacedUnreadable = true;
                     }
 
+                    saveEntered = true;
                     await store.SaveAsync(attempt.ObjectId, oauthClient.ToUserToken(token, identity), commit.Token);
                     await links.RedeemAsync(attempt.Ticket, commit.Token);
+                    // Kept only once stored and the link spent; any exit before this revokes it.
+                    unkept.Keep();
                 }
             }
             catch (Exception ex) when (ex is not OperationCanceledException || commit.IsCancellationRequested)
@@ -185,7 +206,26 @@ public static class ZendeskConnectEndpoints
                 // Not persisted, so not kept: revoke it rather than leave a live grant nobody holds.
                 // (The store cached it before the write failed; revoked, a call with it meets a 401
                 // and is handed a fresh connect link.)
-                await oauthClient.RevokeAsync(token.AccessToken, ctx.RequestAborted);
+                await unkept.RevokeAsync();
+
+                // Once SaveAsync was entered the previous grant may already be overwritten: the write
+                // can land and still fail, or RedeemAsync or the commit timeout can fail after it. Left
+                // like that, the previous grant would be neither stored nor revoked, and the store would
+                // hold the grant just revoked. So the previous grant is revoked too and the connection
+                // forgotten (a tombstone), both on cleanup tokens and still under the person's lock;
+                // the link is unspent, so the person can simply open it again.
+                if (saveEntered)
+                {
+                    if (replaced is not null && replaced.AccessToken != token.AccessToken
+                        && !await UnkeptGrant.RevokeGrantForCleanupAsync(oauthClient, logger, replaced))
+                    {
+                        logger.LogWarning("Could not confirm the revocation of the Zendesk grant replaced for {UserObjectId}; it may still be live at Zendesk",
+                            attempt.ObjectId);
+                    }
+
+                    await UnkeptGrant.RemoveForCleanupAsync(store, logger, attempt.ObjectId);
+                }
+
                 logger.LogError("Could not store the Zendesk connection for {UserObjectId} ({FailureType}); the new grant was revoked",
                     attempt.ObjectId, ex.GetType().Name);
                 return Page(StatusCodes.Status503ServiceUnavailable, "Connection not completed",
@@ -199,7 +239,7 @@ public static class ZendeskConnectEndpoints
             if (linkSpent)
             {
                 // Revoked straight away, like a refused one: nothing holds it, so it must not stay live.
-                var revoked = await oauthClient.RevokeAsync(token.AccessToken, ctx.RequestAborted);
+                var revoked = await unkept.RevokeAsync();
                 logger.LogWarning("Refused a Zendesk connection for {UserObjectId}: its connect link was already used or has expired; revoking the new grant {RevocationOutcome}",
                     attempt.ObjectId, revoked ? "succeeded" : "was not confirmed");
                 return Page(StatusCodes.Status400BadRequest, "Connection not completed",
@@ -212,7 +252,10 @@ public static class ZendeskConnectEndpoints
             // refresh token stays live (#12).
             if (replaced is not null && replaced.AccessToken != token.AccessToken)
             {
-                if (!await oauthClient.RevokeGrantAsync(replaced, ctx.RequestAborted))
+                // On a cleanup token, never the browser's: this runs after Keep(), so a browser that
+                // left here would otherwise cancel it and leave the replaced grant live. The whole
+                // grant, through RevokeGrantAsync, not just its access token (#12).
+                if (!await UnkeptGrant.RevokeGrantForCleanupAsync(oauthClient, logger, replaced))
                 {
                     logger.LogWarning("Could not confirm the revocation of the Zendesk grant replaced for {UserObjectId}; it may still be live at Zendesk",
                         attempt.ObjectId);
@@ -229,6 +272,96 @@ public static class ZendeskConnectEndpoints
             return Page(StatusCodes.Status200OK, "Zendesk connected",
                 $"Connected as {identity.Name} ({identity.Email}). You can close this window and go back to Claude.");
         });
+    }
+
+    /// <summary>
+    /// A grant just issued by the code exchange, revoked on every exit from the callback that does not
+    /// keep it. <see cref="RevokeAsync"/> revokes it on purpose (a refusal); <see cref="Keep"/> marks
+    /// it stored; disposal revokes it if neither happened — the browser gave up, a call timed out, or
+    /// something threw.
+    /// </summary>
+    private sealed class UnkeptGrant(ZendeskOAuthClient oauthClient, ILogger logger, string accessToken) : IAsyncDisposable
+    {
+        // Revocation is one request; this bounds it without tying it to a request that has gone.
+        internal static readonly TimeSpan CleanupTimeout = TimeSpan.FromSeconds(10);
+
+        private bool _settled;
+
+        public void Keep() => _settled = true;
+
+        public Task<bool> RevokeAsync()
+        {
+            _settled = true;
+            return RevokeForCleanupAsync(oauthClient, logger, accessToken);
+        }
+
+        public async ValueTask DisposeAsync()
+        {
+            if (_settled)
+            {
+                return;
+            }
+
+            _settled = true;
+            var revoked = await RevokeForCleanupAsync(oauthClient, logger, accessToken);
+            logger.LogWarning("A Zendesk connection was abandoned before it was stored; revoking the new grant {RevocationOutcome}",
+                revoked ? "succeeded" : "was not confirmed");
+        }
+
+        /// <summary>
+        /// Forgets the person's connection (a tombstone) on a bounded token of its own. Never throws:
+        /// it runs on a path that is already reporting a failure, and only the exception type is logged.
+        /// </summary>
+        public static async Task RemoveForCleanupAsync(IZendeskTokenStore store, ILogger logger, string objectId)
+        {
+            using var cleanup = new CancellationTokenSource(CleanupTimeout);
+            try
+            {
+                await store.RemoveAsync(objectId, cleanup.Token);
+            }
+            catch (Exception ex)
+            {
+                logger.LogError("Could not forget the Zendesk connection for {UserObjectId} after a failed store ({FailureType})",
+                    objectId, ex.GetType().Name);
+            }
+        }
+
+        /// <summary>
+        /// Revokes on a bounded token of its own, never the request's: cleanup must still happen when
+        /// the browser has gone. Never throws; false means Zendesk did not confirm.
+        /// </summary>
+        public static async Task<bool> RevokeForCleanupAsync(ZendeskOAuthClient oauthClient, ILogger logger, string accessToken)
+        {
+            using var cleanup = new CancellationTokenSource(CleanupTimeout);
+            try
+            {
+                return await oauthClient.RevokeAsync(accessToken, cleanup.Token);
+            }
+            catch (OperationCanceledException)
+            {
+                logger.LogWarning("Zendesk token revocation did not complete within {CleanupSeconds} s", CleanupTimeout.TotalSeconds);
+                return false;
+            }
+        }
+
+        /// <summary>
+        /// Revokes a whole grant being discarded (through <see cref="ZendeskOAuthClient.RevokeGrantAsync"/>,
+        /// which refreshes an expired grant first) on a bounded token of its own, never the request's.
+        /// Never throws; false means Zendesk did not confirm.
+        /// </summary>
+        public static async Task<bool> RevokeGrantForCleanupAsync(ZendeskOAuthClient oauthClient, ILogger logger, ZendeskUserToken grant)
+        {
+            using var cleanup = new CancellationTokenSource(CleanupTimeout);
+            try
+            {
+                return await oauthClient.RevokeGrantAsync(grant, cleanup.Token);
+            }
+            catch (OperationCanceledException)
+            {
+                logger.LogWarning("Zendesk grant revocation did not complete within {CleanupSeconds} s", CleanupTimeout.TotalSeconds);
+                return false;
+            }
+        }
     }
 
     /// <summary>
