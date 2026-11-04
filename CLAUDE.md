@@ -89,18 +89,19 @@ FISCAL staff point their MCP client at `https://zendesk-mcp.fiscaltec.com/mcp` (
 
 ## GitHub issues (issue-driven work)
 
-Track non-trivial work as GitHub issues via the `gh` CLI. Trivial one-off changes don't need an
-issue — use judgement. This mirrors the flow used in `searledan/rosetechnologies.co.uk`,
+Track non-trivial work as GitHub issues, raised with the **`/create-issue`** skill
+(`.claude/skills/create-issue/SKILL.md`, ported from `searledan/spendy` in #11) and moved through their
+statuses with `.claude/scripts/issue-status.sh` — both over `gh api` REST. Trivial one-off changes
+don't need an issue — use judgement. This mirrors the flow used in `searledan/rosetechnologies.co.uk`,
 `searledan/dansearle.co.uk` and `searledan/spendy`; the labels below were copied from vitally-mcp on
 2026-10-28 (`gh label clone fiscaltec/vitally-mcp --repo fiscaltec/zendesk-mcp`), so names, colours
 and descriptions match there.
 
-⚠️ **In a Claude Code cloud session, `gh issue create` fails** with `HTTP 403: GitHub GraphQL is not
-available from Claude Code sessions` — it is GraphQL underneath, and the session's GitHub proxy serves
-REST only. Create issues through REST instead (`gh api -X POST repos/fiscaltec/zendesk-mcp/issues
---input body.json`, with `title`, `body` and `labels` in the JSON). `gh issue edit` and `gh issue view`
-fail the same way (checked 2026-10-28); use `gh api -X PATCH …/issues/<n>` and `gh api …/issues/<n>`.
-Hit when #2–#9 were raised. `gh pr merge` is GraphQL too, so merges use the REST endpoint instead
+⚠️ **In a Claude Code cloud session every `gh issue …` command fails** with `HTTP 403: GitHub GraphQL
+is not available from Claude Code sessions` — they are GraphQL underneath, and the session's GitHub
+proxy serves REST only (hit when #2–#9 were raised). The skill and the script above carry the REST
+forms; to read or edit an issue otherwise, use `gh api …/issues/<n>` and `gh api -X PATCH …/issues/<n>`.
+`gh pr merge` is GraphQL too, so merges use the REST endpoint instead
 (the merge step below), and the merge gate reads over REST since 2026-10-28 (#2). Before that it read
 through `gh pr view` and `gh api graphql`, so in a cloud session it denied every merge at its first
 step (*"could not resolve the current repo (failing closed)"*, verified by feeding it a synthetic
@@ -122,10 +123,15 @@ that assumes prior conversation is an issue that cannot be worked.
 
 **Lifecycle** — one `status:` label at a time:
 
-1. Pick a `status: ready` issue respecting priority, or create one with type + priority +
-   `status: ready`.
-2. Flip to in-progress:
-   `gh issue edit <n> --remove-label "status: ready" --add-label "status: in-progress"`.
+1. Pick a `status: ready` issue respecting priority, or raise one with `/create-issue` (type +
+   priority + `status: ready`, nobody assigned).
+2. Flip to in-progress: `bash .claude/scripts/issue-status.sh <n> in-progress`. That also **assigns
+   `searledan`**, the owner, who is assigned to an issue only while it is actively worked; every
+   other status unassigns them (`ISSUE_ASSIGNEE` overrides the login, and `ISSUE_ASSIGNEE=` leaves
+   assignees alone). The script adds the new label before removing the old, refuses a label the
+   repository lacks — adding an unknown label silently *creates* it — and reads the issue back, exiting
+   non-zero if it does not show the requested state. `.github/scripts/tests/issue-status.test.sh`
+   runs it against a stub `gh` in CI.
 3. Branch `<cc-type>/<short-description>`, where `<cc-type>` is the **Conventional-Commits** type used
    in the PR title — not the issue's type label. They map loosely: `feature` → `feat/…`,
    `documentation`/`content` → `docs/…`, `tech-debt` → `chore/…` or `refactor/…`, `bug` → `fix/…`,
@@ -134,9 +140,10 @@ that assumes prior conversation is an issue that cannot be worked.
 5. Open the PR with **`Closes #<n>`**. `.github/workflows/pr-title.yml` enforces the
    Conventional-Commits prefix on the PR *title*, and `main` takes squash merges — so the PR title
    becomes the commit subject on `main`. On squash-merge the issue auto-closes; flip it to
-   `status: complete` then, so a finished issue ends up *closed + `status: complete`*, distinguishable
+   `status: complete` then (`bash .claude/scripts/issue-status.sh <n> complete`), so a finished issue ends up *closed + `status: complete`*, distinguishable
    from one closed as won't-fix or duplicate.
-6. If work stalls, swap the status for `status: blocked` and comment what's blocking.
+6. If work stalls, `bash .claude/scripts/issue-status.sh <n> blocked` (which unassigns the owner) and
+   comment exactly what it is waiting for.
 
 **What actually gates a merge** — the `Secure branches` ruleset (id `26057156`), applied here on
 2026-10-28 as a field-for-field copy of vitally-mcp's (`16293585`), compared rule by rule (#2). It
@@ -436,7 +443,10 @@ copy an *LLM* reads — tool `[Description]` and `Title` values and `ZendeskServ
 Content wording changes model behaviour (which tool gets picked, how it's called), so they are
 defects rather than cosmetics; the form asks for the observed effect to keep that distinction sharp.
 
-**Writing issues** — aim for "detailed enough to implement without further context":
+**Writing issues** — aim for "detailed enough to implement without further context". `/create-issue`
+walks through these, takes each type's sections from its form, and adds a duplicate check and a
+read-back. **Never put ticket, user or organisation content in an issue** — it is customer data;
+describe shapes, not contents.
 
 - **Title** — conveys the scope at a glance without reading the body.
 - **Lead paragraph** — what and why, plus how it was discovered if that matters.
