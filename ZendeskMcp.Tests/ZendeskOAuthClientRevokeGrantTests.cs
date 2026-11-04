@@ -112,6 +112,21 @@ public sealed class ZendeskOAuthClientRevokeGrantTests : IDisposable
     }
 
     [Fact]
+    public async Task AnAccessTokenAboutToExpire_IsRefreshedFirst()
+    {
+        // Within RevokeSkew of expiry, the revocation could reach Zendesk after the token expires and
+        // come back 401, which would read as revoked while the refresh token lived.
+        using var zendesk = TestHelpers.CreateFakeZendesk(r => r.Path == TokenEndpoint
+            ? FakeResponse.Json("{\"access_token\":\"renewed\",\"refresh_token\":\"r2\",\"expires_in\":7200}")
+            : FakeResponse.WithStatus(HttpStatusCode.NoContent, string.Empty));
+
+        (await Build(zendesk.Client).RevokeGrantAsync(TestHelpers.SampleToken("nearly", DateTimeOffset.UtcNow.AddSeconds(30), "r1"), default))
+            .Should().BeTrue();
+
+        zendesk.Requests.Should().ContainSingle(r => r.Path == Revoke).Which.Headers["Authorization"].Should().Be("Bearer renewed");
+    }
+
+    [Fact]
     public async Task A401WithNoRefreshToken_CountsAsRevoked()
     {
         using var zendesk = TestHelpers.CreateFakeZendesk(_ => FakeResponse.WithStatus(HttpStatusCode.Unauthorized));

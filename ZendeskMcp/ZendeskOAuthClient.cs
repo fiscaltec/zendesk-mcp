@@ -171,9 +171,8 @@ public sealed class ZendeskOAuthClient(
     /// on a grant with a refresh token, is followed by one refresh and a revocation of its result.
     /// </para>
     /// <para>
-    /// The renewed grant is never stored: every caller is discarding this grant. That is the
-    /// difference from <see cref="ZendeskCredentialProvider.DisconnectAsync"/>, which keeps the
-    /// person's grant stored until the revocation is attempted and stops on a transient failure.
+    /// The renewed grant is never stored: every caller — disconnect, reconnect, a final 401, an
+    /// unreadable stored value — is discarding this grant.
     /// </para>
     /// </remarks>
     public async Task<bool> RevokeGrantAsync(ZendeskUserToken grant, CancellationToken cancellationToken)

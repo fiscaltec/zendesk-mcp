@@ -411,6 +411,26 @@ public class ZendeskCredentialProviderTests
         (await store.GetAsync(TestHelpers.TestObjectId)).Should().BeNull();
     }
 
+    [Fact]
+    public async Task Disconnect_WhenTheAccessTokenWasRevokedEarly_RevokesThroughTheRefreshToken()
+    {
+        // A 401 to the revocation proves nothing while the refresh token may still renew the grant.
+        using var zendesk = TestHelpers.CreateFakeZendesk(request => request switch
+        {
+            { Path: "/oauth/tokens" } => FakeResponse.Json("{\"access_token\":\"renewed\",\"refresh_token\":\"r2\",\"expires_in\":7200}"),
+            _ when request.Headers["Authorization"] == "Bearer revoked-early" => FakeResponse.WithStatus(HttpStatusCode.Unauthorized),
+            _ => FakeResponse.WithStatus(HttpStatusCode.NoContent, string.Empty),
+        });
+        var (service, store) = TestHelpers.BuildUserZendeskService(zendesk.Client, TestHelpers.SampleToken("revoked-early", refreshToken: "r1"));
+
+        var outcome = await service.Credentials.DisconnectAsync();
+
+        outcome.Should().Be(DisconnectOutcome.Disconnected);
+        zendesk.Requests.Where(r => r.Method == HttpMethod.Delete).Select(r => r.Headers["Authorization"])
+            .Should().Equal("Bearer revoked-early", "Bearer renewed");
+        (await store.GetAsync(TestHelpers.TestObjectId)).Should().BeNull();
+    }
+
     private sealed class FixedClock(DateTimeOffset now) : TimeProvider
     {
         public override DateTimeOffset GetUtcNow() => now;
