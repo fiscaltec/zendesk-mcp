@@ -332,6 +332,160 @@ public sealed class HelpCenterArticlesToolsTests : IDisposable
         fake.Requests.Count(r => r.Method == HttpMethod.Post).Should().Be(3);
     }
 
+    // ------------------------------------- Create_help_center_article: a lost response (#12)
+
+    private const string SectionList = "/api/v2/help_center/en-gb/sections/7/articles";
+
+    // A create whose first POST gets no usable answer (503), the connected user, and the section's
+    // article list answered by `list`.
+    private static Func<RecordedRequest, FakeResponse> LostCreateRoute(Func<RecordedRequest, FakeResponse> list, HttpStatusCode firstAnswer = HttpStatusCode.ServiceUnavailable)
+    {
+        var posts = 0;
+        return r =>
+        {
+            if (r.Method == HttpMethod.Post && r.Path == SectionList)
+            {
+                return ++posts == 1 ? FakeResponse.WithStatus(firstAnswer) : FakeResponse.Json(Draft("601"));
+            }
+
+            if (r.Method == HttpMethod.Get && r.Path == SectionList)
+            {
+                return list(r);
+            }
+
+            return r.Path switch
+            {
+                "/api/v2/users/me" => FakeResponse.Json("""{"user":{"id":900,"name":"Agent","email":"agent@example.com","role":"agent"}}"""),
+                "/api/v2/help_center/articles/600" => FakeResponse.Json(Draft("600")),
+                _ => FakeResponse.NotFound(),
+            };
+        };
+    }
+
+    private static FakeResponse Listed(long authorId, string title, DateTimeOffset at, bool hasMore = false) => FakeResponse.Json(
+        "{\"articles\":[{\"id\":600,\"title\":\"" + title + "\",\"locale\":\"en-gb\",\"draft\":true,\"author_id\":" + authorId
+        + ",\"created_at\":\"" + at.ToString("yyyy-MM-ddTHH:mm:ssZ", System.Globalization.CultureInfo.InvariantCulture) + "\"}],\"meta\":{\"has_more\":"
+        + (hasMore ? "true" : "false") + "}}");
+
+    [Fact]
+    public async Task Create_ResponseLost_AndTheSectionShowsTheArticle_IsAlreadyCreated()
+    {
+        using var cache = new MemoryCache(new MemoryCacheOptions());
+        using var fake = TestHelpers.CreateFakeZendesk(LostCreateRoute(_ => Listed(900, "New", DateTimeOffset.UtcNow)));
+        var zendesk = TestHelpers.BuildZendeskService(fake.Client);
+
+        var first = () => HelpCenterArticlesTools.CreateHelpCenterArticle(zendesk, cache, 7, "en-gb", "New", permission_group_id: 3);
+        await first.Should().ThrowAsync<HttpRequestException>();
+        var retry = JsonNode.Parse(await HelpCenterArticlesTools.CreateHelpCenterArticle(zendesk, cache, 7, "en-gb", "New", permission_group_id: 3))!;
+
+        retry["result"]!.GetValue<string>().Should().Be("already_created");
+        retry["id"]!.GetValue<long>().Should().Be(600);
+        fake.Requests.Count(r => r.Method == HttpMethod.Post).Should().Be(1, "the retry must not leave a second draft");
+        var list = fake.Requests.Single(r => r.Method == HttpMethod.Get && r.Path == SectionList);
+        list.Query("sort_by").Should().Be("created_at");
+        list.Query("sort_order").Should().Be("desc");
+    }
+
+    [Fact]
+    public async Task Create_ResponseLost_AndTheSectionDoesNotShowIt_CreatesIt()
+    {
+        foreach (var listed in new Func<RecordedRequest, FakeResponse>[]
+        {
+            _ => FakeResponse.Json("""{"articles":[],"meta":{"has_more":false}}"""),
+            _ => Listed(901, "New", DateTimeOffset.UtcNow),                  // another agent's
+            _ => Listed(900, "Other", DateTimeOffset.UtcNow),                // a different title
+            _ => Listed(900, "New", DateTimeOffset.UtcNow.AddHours(-1)),     // long before this attempt
+        })
+        {
+            using var cache = new MemoryCache(new MemoryCacheOptions());
+            using var fake = TestHelpers.CreateFakeZendesk(LostCreateRoute(listed));
+            var zendesk = TestHelpers.BuildZendeskService(fake.Client);
+
+            var first = () => HelpCenterArticlesTools.CreateHelpCenterArticle(zendesk, cache, 7, "en-gb", "New", permission_group_id: 3);
+            await first.Should().ThrowAsync<HttpRequestException>();
+            var retry = JsonNode.Parse(await HelpCenterArticlesTools.CreateHelpCenterArticle(zendesk, cache, 7, "en-gb", "New", permission_group_id: 3))!;
+
+            retry["result"]!.GetValue<string>().Should().Be("created");
+            fake.Requests.Count(r => r.Method == HttpMethod.Post).Should().Be(2);
+        }
+    }
+
+    [Fact]
+    public async Task Create_ResponseLost_AndTheSectionCannotSettleIt_IsRefused()
+    {
+        foreach (var listed in new Func<RecordedRequest, FakeResponse>[]
+        {
+            _ => FakeResponse.WithStatus(HttpStatusCode.ServiceUnavailable),
+            _ => Listed(900, "Other", DateTimeOffset.UtcNow, hasMore: true),  // not on the newest page, and more pages
+        })
+        {
+            using var cache = new MemoryCache(new MemoryCacheOptions());
+            using var fake = TestHelpers.CreateFakeZendesk(LostCreateRoute(listed));
+            var zendesk = TestHelpers.BuildZendeskService(fake.Client);
+
+            var first = () => HelpCenterArticlesTools.CreateHelpCenterArticle(zendesk, cache, 7, "en-gb", "New", permission_group_id: 3);
+            await first.Should().ThrowAsync<HttpRequestException>();
+            var retry = () => HelpCenterArticlesTools.CreateHelpCenterArticle(zendesk, cache, 7, "en-gb", "New", permission_group_id: 3);
+
+            (await retry.Should().ThrowAsync<ArgumentException>()).WithMessage("*could not confirm*create_again*");
+            fake.Requests.Count(r => r.Method == HttpMethod.Post).Should().Be(1);
+        }
+    }
+
+    [Fact]
+    public async Task Create_ResponseLost_MatchesATitleZendeskTrimmed()
+    {
+        using var cache = new MemoryCache(new MemoryCacheOptions());
+        using var fake = TestHelpers.CreateFakeZendesk(LostCreateRoute(_ => Listed(900, "New", DateTimeOffset.UtcNow)));
+        var zendesk = TestHelpers.BuildZendeskService(fake.Client);
+
+        var first = () => HelpCenterArticlesTools.CreateHelpCenterArticle(zendesk, cache, 7, "en-gb", "New ", permission_group_id: 3);
+        await first.Should().ThrowAsync<HttpRequestException>();
+        var retry = JsonNode.Parse(await HelpCenterArticlesTools.CreateHelpCenterArticle(zendesk, cache, 7, "en-gb", "New ", permission_group_id: 3))!;
+
+        retry["result"]!.GetValue<string>().Should().Be("already_created");
+        fake.Requests.Count(r => r.Method == HttpMethod.Post).Should().Be(1);
+    }
+
+    [Fact]
+    public async Task Create_SuccessWithoutAnId_StaysPending_SoARetryLooksFirst()
+    {
+        // The article exists, but without its id a retry cannot fetch it; forgetting the attempt would
+        // let the retry create a second draft.
+        var posts = 0;
+        using var cache = new MemoryCache(new MemoryCacheOptions());
+        using var fake = TestHelpers.CreateFakeZendesk(r => (r.Method.Method, r.Path) switch
+        {
+            ("POST", SectionList) => ++posts == 1 ? FakeResponse.Json("""{"article":{"title":"New","locale":"en-gb","draft":true}}""") : FakeResponse.Json(Draft("601")),
+            ("GET", SectionList) => Listed(900, "New", DateTimeOffset.UtcNow),
+            ("GET", "/api/v2/users/me") => FakeResponse.Json("""{"user":{"id":900}}"""),
+            ("GET", "/api/v2/help_center/articles/600") => FakeResponse.Json(Draft("600")),
+            _ => FakeResponse.NotFound(),
+        });
+        var zendesk = TestHelpers.BuildZendeskService(fake.Client);
+
+        await HelpCenterArticlesTools.CreateHelpCenterArticle(zendesk, cache, 7, "en-gb", "New", permission_group_id: 3);
+        var retry = JsonNode.Parse(await HelpCenterArticlesTools.CreateHelpCenterArticle(zendesk, cache, 7, "en-gb", "New", permission_group_id: 3))!;
+
+        retry["result"]!.GetValue<string>().Should().Be("already_created");
+        posts.Should().Be(1);
+    }
+
+    [Fact]
+    public async Task Create_RefusedByZendesk_ForgetsTheAttempt_AndARetryNeedsNoLookup()
+    {
+        using var cache = new MemoryCache(new MemoryCacheOptions());
+        using var fake = TestHelpers.CreateFakeZendesk(LostCreateRoute(_ => FakeResponse.WithStatus(HttpStatusCode.ServiceUnavailable), HttpStatusCode.UnprocessableEntity));
+        var zendesk = TestHelpers.BuildZendeskService(fake.Client);
+
+        var first = () => HelpCenterArticlesTools.CreateHelpCenterArticle(zendesk, cache, 7, "en-gb", "New", permission_group_id: 3);
+        await first.Should().ThrowAsync<HttpRequestException>();
+        var retry = JsonNode.Parse(await HelpCenterArticlesTools.CreateHelpCenterArticle(zendesk, cache, 7, "en-gb", "New", permission_group_id: 3))!;
+
+        retry["result"]!.GetValue<string>().Should().Be("created", "a 422 proves nothing was written");
+        fake.Requests.Should().NotContain(r => r.Method == HttpMethod.Get && r.Path == SectionList);
+    }
+
     [Fact]
     public async Task Create_WithSeveralPermissionGroups_RefusesAndListsThem()
     {

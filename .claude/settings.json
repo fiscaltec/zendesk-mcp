@@ -68,15 +68,7 @@
           {
             "type": "command",
             "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/pre-merge-copilot-gate.sh\"",
-            "if": "Bash(gh pr merge*)",
-            "shell": "bash",
-            "timeout": 30,
-            "statusMessage": "Checking Copilot merge gate…"
-          },
-          {
-            "type": "command",
-            "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/pre-merge-copilot-gate.sh\"",
-            "if": "Bash(gh api*)",
+            "if": "Bash(*gh*)",
             "shell": "bash",
             "timeout": 30,
             "statusMessage": "Checking Copilot merge gate…"
