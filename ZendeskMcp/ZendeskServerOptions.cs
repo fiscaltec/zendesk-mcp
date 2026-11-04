@@ -225,7 +225,7 @@ public class ZendeskServerOptions
 /// </summary>
 public class ZendeskFeatureOptions
 {
-    /// <summary>Allow public ticket comments, CCs and public macro replies (they email customers).</summary>
+    /// <summary>Allow public ticket comments, CCs, public macro replies and public merge comments (they email customers).</summary>
     public bool AllowPublicReplies { get; set; }
 
     /// <summary>Allow publishing Help Center articles and translations rather than saving drafts.</summary>

@@ -103,7 +103,7 @@ variable "zendesk_oauth_client_id" {
 # Staging's writes stay denied anyway while `staging_read_only` is true.
 variable "zendesk_allow_public_replies" {
   type        = bool
-  description = "Production: allow public ticket comments, CCs and public macro replies (they email customers)."
+  description = "Production: allow public ticket comments, CCs, public macro replies and public merge comments (they email customers)."
   default     = true
 }
 

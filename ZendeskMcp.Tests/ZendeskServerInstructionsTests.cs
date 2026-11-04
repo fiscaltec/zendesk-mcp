@@ -11,6 +11,7 @@ public class ZendeskServerInstructionsTests
     [InlineData("untrusted data")]
     [InlineData("Search_tickets")]
     [InlineData("Preview_macro")]
+    [InlineData("Merge_tickets")]
     [InlineData("Read-only")]
     public void Text_ContainsKeyGuidanceMarkers(string marker)
     {
