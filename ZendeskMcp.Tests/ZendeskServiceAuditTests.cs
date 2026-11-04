@@ -55,6 +55,66 @@ public class ZendeskServiceAuditTests
     }
 
     [Fact]
+    public async Task GetAllPagesAsync_MarksTheTruncation_WhenThePageCapAndTheItemCapAreReachedTogether()
+    {
+        // Ten full pages of 100 with more to come, against maxItems 1,000 and the default ten-page cap:
+        // both caps land on the same page. The read is incomplete because the page cap was reached, so
+        // the record must say so even though the item cap was reached at the same moment.
+        var pages = Enumerable.Range(0, 11).Select(n => FullPage(n, 100, hasMore: true)).ToArray();
+        var (client, _) = TestHelpers.CreateMockHttpClientPaged(pages);
+        using var _client = client;
+        var context = new ToolCallAuditContext();
+        var service = TestHelpers.BuildZendeskService(client, auditContext: context);
+
+        var result = await service.GetAllPagesAsync("/api/v2/tickets", null, "tickets", maxItems: 1000);
+
+        result.Items.Should().HaveCount(1000);
+        result.PagesFetched.Should().Be(10);
+        result.HasMore.Should().BeTrue();
+        context.Summarise().Truncated.Should().BeTrue("the page cap was reached with more pages to come");
+    }
+
+    [Fact]
+    public async Task GetAllPagesAsync_DoesNotMarkTheTruncation_WhenOnlyTheCallersItemCapStopsIt()
+    {
+        // The item cap is the caller's own choice and the caller reports it (HasMore); the audit flag
+        // means the page cap. Three full pages against maxItems 300 and a ten-page cap.
+        var pages = Enumerable.Range(0, 4).Select(n => FullPage(n, 100, hasMore: true)).ToArray();
+        var (client, _) = TestHelpers.CreateMockHttpClientPaged(pages);
+        using var _client = client;
+        var context = new ToolCallAuditContext();
+        var service = TestHelpers.BuildZendeskService(client, auditContext: context);
+
+        var result = await service.GetAllPagesAsync("/api/v2/tickets", null, "tickets", maxItems: 300);
+
+        result.PagesFetched.Should().Be(3);
+        result.HasMore.Should().BeTrue();
+        context.Summarise().Truncated.Should().BeFalse();
+    }
+
+    [Fact]
+    public async Task GetAllPagesAsync_DoesNotMarkTheTruncation_WhenTheLastPageIsAlsoTheCap()
+    {
+        // Exactly ten full pages and then nothing more: the endpoint was exhausted on the cap's page.
+        var pages = Enumerable.Range(0, 10).Select(n => FullPage(n, 100, hasMore: n < 9)).ToArray();
+        var (client, _) = TestHelpers.CreateMockHttpClientPaged(pages);
+        using var _client = client;
+        var context = new ToolCallAuditContext();
+        var service = TestHelpers.BuildZendeskService(client, auditContext: context);
+
+        var result = await service.GetAllPagesAsync("/api/v2/tickets", null, "tickets", maxItems: 1000);
+
+        result.Items.Should().HaveCount(1000);
+        result.HasMore.Should().BeFalse();
+        context.Summarise().Truncated.Should().BeFalse();
+    }
+
+    // A page of `size` tickets, each with its own id, saying whether another page follows.
+    private static string FullPage(int number, int size, bool hasMore) =>
+        "{\"tickets\":[" + string.Join(',', Enumerable.Range(number * size + 1, size).Select(id => $"{{\"id\":{id}}}"))
+        + "],\"meta\":{\"has_more\":" + (hasMore ? "true" : "false") + ",\"after_cursor\":" + (hasMore ? "\"more\"" : "null") + "}}";
+
+    [Fact]
     public async Task DeleteAsync_NamesTheRecord_FromTheUrlWhenTheBodyCarriesNoId()
     {
         // The acceptance criterion is "accessed, MODIFIED OR DELETED data for these customers", and a

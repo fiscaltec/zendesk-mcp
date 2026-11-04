@@ -1,6 +1,5 @@
 using System.ComponentModel;
 using System.Globalization;
-using System.Net;
 using System.Text.Json.Nodes;
 using Microsoft.AspNetCore.Authorization;
 using ModelContextProtocol.Server;
@@ -206,35 +205,20 @@ public static class OrganizationsTools
             return await MoveAsync();
         }
 
-        JsonNode? created = null;
-        try
+        // Reached only for a first membership or on an account the setting says allows several, so a
+        // refusal here is ordinary validation, not a one-organisation limit, and is surfaced as Zendesk
+        // returned it. Moving the user instead would change their default organisation and re-file
+        // their tickets, which replace_existing is documented never to do on such an account.
+        var body = new JsonObject
         {
-            var body = new JsonObject
+            ["organization_membership"] = new JsonObject
             {
-                ["organization_membership"] = new JsonObject
-                {
-                    ["user_id"] = user_id,
-                    ["organization_id"] = organization_id,
-                    ["default"] = make_default == true,
-                },
-            };
-            created = (await zendesk.PostAsync("/api/v2/organization_memberships", body, cancellationToken: cancellationToken))["organization_membership"];
-        }
-        catch (HttpRequestException ex) when (ex.StatusCode == HttpStatusCode.UnprocessableEntity && memberships.Count > 0)
-        {
-            // A backstop: the setting read above should have caught a one-organisation account, and live
-            // Zendesk replaces rather than refuses there. A 422 for a user who already has a membership
-            // is still read as that refusal.
-            if (replace_existing != true)
-            {
-                var current = memberships[0];
-                throw new ArgumentException(
-                    $"Zendesk refused a second organisation for user {user_id}, who belongs to organisation {ToolJson.Long(current["organization_id"])}; this account appears to allow one organisation per user. "
-                    + "Pass replace_existing true to move them into this organisation instead. Zendesk said: " + ex.Message);
-            }
-
-            return await MoveAsync();
-        }
+                ["user_id"] = user_id,
+                ["organization_id"] = organization_id,
+                ["default"] = make_default == true,
+            },
+        };
+        var created = (await zendesk.PostAsync("/api/v2/organization_memberships", body, cancellationToken: cancellationToken))["organization_membership"];
 
         var createdDefault = MacroSupport.ParseBool(created?["default"]) == true || make_default == true;
         AddSharingWarning(warnings, user, organization);

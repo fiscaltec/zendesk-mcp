@@ -68,6 +68,7 @@ public class ToolAnnotationCoverageTests
     [InlineData("Find_")]
     [InlineData("Preview_")]
     [InlineData("Export_")]
+    [InlineData("Bulk_get_")]
     public void ReadTools_AreReadOnlyIdempotentAndClosedWorld(string prefix)
     {
         var tools = AllTools().Where(t => t.Name.StartsWith(prefix, StringComparison.Ordinal)).ToList();
