@@ -271,7 +271,7 @@ public static class ZendeskUploadEndpoints
             var attachment = uploadNode["attachment"];
             return Results.Json(new JsonObject
             {
-                ["upload_token"] = uploadNode?["token"]?.DeepClone(),
+                ["upload_token"] = uploadNode["token"]!.DeepClone(),
                 ["file_name"] = attachment?["file_name"]?.DeepClone(),
                 ["content_type"] = attachment?["content_type"]?.DeepClone(),
                 ["size"] = attachment?["size"]?.DeepClone(),

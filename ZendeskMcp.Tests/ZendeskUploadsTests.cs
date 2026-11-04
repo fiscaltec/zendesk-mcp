@@ -146,7 +146,9 @@ public class ZendeskUploadsTests
         for (var i = 0; i < ZendeskUploadSlots.MaxOpenSlotsPerPerson; i++)
         {
             var slot = await factory.IssueSlotAsync("a.txt", 5, inline: false);
-            (await client.PutAsync($"/uploads/{slot}", new ByteArrayContent(new byte[5]))).StatusCode.Should().Be(HttpStatusCode.OK);
+            using var content = new ByteArrayContent(new byte[5]);
+            using var response = await client.PutAsync($"/uploads/{slot}", content);
+            response.StatusCode.Should().Be(HttpStatusCode.OK);
         }
 
         var act = () => factory.IssueSlotAsync("a.txt", 5, inline: false);
@@ -162,7 +164,9 @@ public class ZendeskUploadsTests
         for (var i = 0; i < ZendeskUploadSlots.MaxOpenSlotsPerPerson; i++)
         {
             var slot = await factory.IssueSlotAsync("a.txt", 5, inline: false);
-            (await client.PutAsync($"/uploads/{slot}", new ByteArrayContent(new byte[4]))).StatusCode.Should().Be(HttpStatusCode.BadRequest);
+            using var content = new ByteArrayContent(new byte[4]);
+            using var response = await client.PutAsync($"/uploads/{slot}", content);
+            response.StatusCode.Should().Be(HttpStatusCode.BadRequest);
         }
 
         var act = () => factory.IssueSlotAsync("a.txt", 5, inline: false);
@@ -214,7 +218,9 @@ public class ZendeskUploadsTests
 
     /// <summary>
     /// A memory cache that can refuse writes, and whose reads wait for a second concurrent read (at most
-    /// a second) so a race between two takes is reproduced rather than left to scheduling.
+    /// a second) so a race between two takes is reproduced rather than left to scheduling. Each read
+    /// takes its snapshot <b>before</b> the gate: reading after it would let whichever reader resumes
+    /// first remove the entry before the other reads, and an unguarded read-then-remove could pass.
     /// </summary>
     private sealed class GatedCache : IDistributedCache
     {
@@ -226,13 +232,14 @@ public class ZendeskUploadsTests
 
         public async Task<byte[]?> GetAsync(string key, CancellationToken token = default)
         {
+            var snapshot = await _inner.GetAsync(key, token);
             if (Interlocked.Increment(ref _reads) >= 2)
             {
                 _secondRead.TrySetResult();
             }
 
             await Task.WhenAny(_secondRead.Task, Task.Delay(TimeSpan.FromSeconds(1), token));
-            return await _inner.GetAsync(key, token);
+            return snapshot;
         }
 
         public Task SetAsync(string key, byte[] value, DistributedCacheEntryOptions options, CancellationToken token = default) =>
