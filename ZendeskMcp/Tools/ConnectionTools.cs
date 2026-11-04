@@ -14,7 +14,7 @@ namespace ZendeskMcp.Tools;
 public static class ConnectionTools
 {
     [Authorize(Policy = "zendesk:read")]
-    [McpServerTool(Name = "Get_zendesk_connection", Title = "Get Zendesk connection", ReadOnly = true, Destructive = false, Idempotent = true, OpenWorld = false), Description("Show which Zendesk account the signed-in person is connected as, or a link to connect one. Every other Zendesk tool runs as this account.")]
+    [McpServerTool(Name = "Get_zendesk_connection", Title = "Get Zendesk connection", ReadOnly = true, Destructive = false, Idempotent = true, OpenWorld = false), Description("Show which Zendesk account the signed-in person is connected as, or a link to connect one. Every other Zendesk tool runs as this account. This reads the stored connection without contacting Zendesk, so connected: true means a connection is stored, not that Zendesk still accepts it: to check it works, call a read tool such as List_brands.")]
     public static async Task<string> GetZendeskConnection(ZendeskService zendesk, CancellationToken cancellationToken = default)
     {
         var credentials = zendesk.Credentials;

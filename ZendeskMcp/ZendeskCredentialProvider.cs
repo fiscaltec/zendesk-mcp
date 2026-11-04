@@ -183,6 +183,7 @@ public sealed class ZendeskCredentialProvider(
     {
         if (string.IsNullOrWhiteSpace(token.RefreshToken))
         {
+            logger.LogWarning("The stored Zendesk token for {UserObjectId} has expired and has no refresh token; forgetting the grant", objectId);
             await store.RemoveAsync(objectId, cancellationToken);
             throw await ConnectionRequiredAsync(objectId, "Your Zendesk connection has expired.", cancellationToken);
         }
@@ -195,6 +196,9 @@ public sealed class ZendeskCredentialProvider(
         catch (ZendeskOAuthException ex) when (ex.Error is "invalid_grant" or "invalid_token" or "unauthorized_client")
         {
             // Expired, revoked in Zendesk, or the agent was downgraded: only a new sign-in helps.
+            // Logged because forgetting the grant is otherwise invisible afterwards. The error code is
+            // one of the three matched above, never Zendesk's description, which can echo the request.
+            logger.LogWarning("Zendesk refused to refresh the token for {UserObjectId} ({OAuthError}); forgetting the grant", objectId, ex.Error);
             await store.RemoveAsync(objectId, cancellationToken);
             throw await ConnectionRequiredAsync(objectId, "Your Zendesk connection has expired or was revoked.", cancellationToken);
         }

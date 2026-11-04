@@ -120,8 +120,9 @@ hold the old token, which is why revoking at Zendesk comes first.
 ## Read-only and the feature switches
 
 - `Authorization__ReadOnly=true` denies every create and update for everyone and hides the write
-  tools. Use it on staging whenever it is pointed at production Zendesk data and nobody is
-  deliberately testing writes. See vitally-mcp's `read-only-and-rbac-rollout.md` for why this was
+  tools, except *Disconnect_zendesk*: people can still cut their own connection during a lock-down.
+  Use it on staging whenever it is pointed at production Zendesk data and nobody is deliberately
+  testing writes. See vitally-mcp's `read-only-and-rbac-rollout.md` for why this was
   the safest staging posture there.
 - `Zendesk__Features__AllowPublicReplies`, `AllowArticlePublishing`, `AllowHelpCenterStructureChanges`, `AllowMacroChanges` and
   `AllowUserAndOrganizationChanges` are account-wide. The application defaults them off; FISCAL's

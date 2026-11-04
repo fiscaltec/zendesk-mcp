@@ -59,14 +59,16 @@ public class ReadOnlyToolsListTests : IClassFixture<ReadOnlyToolsListTests.Facto
         toolNames.Should().NotContain(n => n.StartsWith("Delete_"),
             "Delete_* tools must be hidden in read-only mode");
 
-        // The prefix checks above cannot see a mutation named otherwise (Apply_*, Request_*, or the
-        // read-tier Disconnect_zendesk), so the exact list is asserted too: what is left must be
-        // precisely the tools that declare ReadOnly.
+        // The prefix checks above cannot see a mutation named otherwise (Apply_*, Request_*), so the
+        // exact list is asserted too: what is left must be precisely the tools that declare ReadOnly,
+        // plus the read-tier Disconnect_zendesk, which only touches the caller's own connection.
         toolNames.Should().BeEquivalentTo(
-            ToolCatalogue.ProductionAndProbes().Where(t => t.Attribute.ReadOnly).Select(t => t.Name),
-            "read-only mode keeps exactly the tools annotated ReadOnly");
-        toolNames.Should().NotContain("Disconnect_zendesk",
-            "it is in the read tier but changes state, so a read-only deployment hides it too");
+            ToolCatalogue.ProductionAndProbes()
+                .Where(t => t.Attribute.ReadOnly || ToolCatalogue.ReadTierMutations.Contains(t.Name))
+                .Select(t => t.Name),
+            "read-only mode keeps exactly the tools annotated ReadOnly, and Disconnect_zendesk");
+        toolNames.Should().Contain("Disconnect_zendesk",
+            "read-only mode is the emergency lock-down, and people must still be able to cut their own connection");
     }
 
     /// <summary>
