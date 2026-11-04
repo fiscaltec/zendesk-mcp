@@ -214,11 +214,16 @@ public class GraphGroupPermissionResolver : IGroupPermissionResolver
             request.Headers.Add("ConsistencyLevel", "eventual");
 
             using var response = await _httpClient.SendAsync(request, cancellationToken);
-            var body = await response.Content.ReadAsStringAsync(cancellationToken);
             if (!response.IsSuccessStatusCode)
             {
-                throw new HttpRequestException($"Graph group members query returned {(int)response.StatusCode}: {body}");
+                // The status only, never the body. Both failure branches attach this exception to a
+                // Warning, and the console and the OTel exporter render its message, so an upstream
+                // body here would reach stdout and AppTraces (vitally-mcp#94).
+                throw new HttpRequestException(
+                    $"Graph group members query returned {(int)response.StatusCode}.", inner: null, response.StatusCode);
             }
+
+            var body = await response.Content.ReadAsStringAsync(cancellationToken);
 
             using var doc = JsonDocument.Parse(body);
             if (doc.RootElement.TryGetProperty("value", out var value)

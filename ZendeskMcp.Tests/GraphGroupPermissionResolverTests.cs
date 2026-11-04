@@ -24,6 +24,10 @@ public class GraphGroupPermissionResolverTests : IDisposable
     private const string OtherUserOid = "9f2c3f1e-1111-4222-8333-444455556666";
     private static readonly DateTimeOffset ClockStart = new(2026, 8, 28, 12, 0, 0, TimeSpan.Zero);
 
+    // What a failing Graph answers with. The marker lets a test prove the body never reaches a log.
+    private const string ErrorBodyMarker = "graph-error-body-marker";
+    private const string ErrorBody = "{\"error\":{\"code\":\"boom\",\"message\":\"" + ErrorBodyMarker + "\"}}";
+
     // Disposed at the end of each test so the HttpClient (and its inner RecordingHandler, and every
     // HttpResponseMessage that handler created) is cleaned up deterministically rather than by the GC.
     private readonly List<HttpClient> _clients = [];
@@ -97,7 +101,7 @@ public class GraphGroupPermissionResolverTests : IDisposable
             OnRequest?.Invoke();
 
             var response = Status != HttpStatusCode.OK
-                ? new HttpResponseMessage(Status) { Content = new StringContent("{\"error\":\"boom\"}") }
+                ? new HttpResponseMessage(Status) { Content = new StringContent(ErrorBody) }
                 : new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent(MembershipBody(uri)) };
             _responses.Add(response);
             return Task.FromResult(response);
@@ -310,6 +314,37 @@ public class GraphGroupPermissionResolverTests : IDisposable
         warning.Message.Should().Contain("300", "the operator needs to know how stale the served result is");
         warning.Message.Should().Contain(UserOid, "the subject id is the audit key");
         warning.Message.Should().NotContain("@", "never log the caller's email — subject id only");
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task FailureLog_CarriesTheStatus_ButNeverTheGraphResponseBody(bool retainedCopy)
+    {
+        // Both failure branches attach the exception to a Warning, and the console and the OTel
+        // exporter both render its ToString() — message included. So the exception is held to the same
+        // rule as the log line itself (vitally-mcp#94): type and status, never an upstream body.
+        var clock = new FakeClock(ClockStart);
+        var logger = new CapturingLogger<GraphGroupPermissionResolver>();
+        var handler = new RecordingHandler(new HashSet<string> { ReaderGroup });
+        var resolver = Build(handler, timeProvider: clock, logger: logger);
+
+        if (retainedCopy)
+        {
+            await resolver.TryResolvePermissionsAsync(UserOid);
+            clock.Advance(TimeSpan.FromSeconds(300));
+        }
+
+        handler.Status = HttpStatusCode.Forbidden;
+        await resolver.TryResolvePermissionsAsync(UserOid);
+
+        var index = logger.Entries.FindIndex(e => e.Level == LogLevel.Warning);
+        index.Should().BeGreaterThanOrEqualTo(0, "the failure is logged");
+        var exception = logger.Exceptions[index];
+        exception.Should().BeOfType<HttpRequestException>();
+        exception!.Message.Should().Contain("403", "the status is what diagnoses a Graph failure");
+        exception.ToString().Should().NotContain(ErrorBodyMarker, "the upstream body must never reach a log");
+        logger.Entries[index].Message.Should().NotContain(ErrorBodyMarker);
     }
 
     [Fact]
