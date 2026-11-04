@@ -149,8 +149,13 @@ public sealed class KeyVaultZendeskTokenStore(
         try
         {
             stored = JsonNode.Parse(value) as JsonObject;
+
+            // A JsonObject builds its members lazily, so a duplicate key surfaces as ArgumentException
+            // on first access. Forced here, so it is refused as unreadable like any other bad JSON
+            // rather than escaping as an exception nothing logs or tombstones.
+            _ = stored?.Count;
         }
-        catch (JsonException)
+        catch (Exception ex) when (ex is JsonException or ArgumentException or InvalidOperationException)
         {
             throw new ZendeskStoredTokenUnreadableException(salvaged: null);
         }

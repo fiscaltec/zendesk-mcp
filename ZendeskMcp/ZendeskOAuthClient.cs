@@ -122,25 +122,30 @@ public sealed class ZendeskOAuthClient(
     /// logged and reported as false rather than thrown, so a caller can still forget the token
     /// locally — and must then say the revocation did not happen rather than claim it did.
     /// </summary>
-    public async Task<bool> RevokeAsync(string accessToken, CancellationToken cancellationToken)
+    public async Task<bool> RevokeAsync(string accessToken, CancellationToken cancellationToken) =>
+        await RevokeStatusAsync(accessToken, cancellationToken) is { } status && (status is >= 200 and < 300 || status == 401);
+
+    // The revocation's HTTP status, or null when it could not be made (logged). Kept apart from
+    // RevokeAsync so RevokeGrantAsync can tell "revoked" from "already refused (401)".
+    private async Task<int?> RevokeStatusAsync(string accessToken, CancellationToken cancellationToken)
     {
         try
         {
             using var request = new HttpRequestMessage(HttpMethod.Delete, $"{_options.BaseUrl}/api/v2/oauth/tokens/current.json");
             request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", accessToken);
             using var response = await Client().SendAsync(request, cancellationToken);
-            if (response.IsSuccessStatusCode || (int)response.StatusCode == 401)
+            var status = (int)response.StatusCode;
+            if (!response.IsSuccessStatusCode && status != 401)
             {
-                return true;
+                logger.LogWarning("Zendesk token revocation returned {StatusCode}", status);
             }
 
-            logger.LogWarning("Zendesk token revocation returned {StatusCode}", (int)response.StatusCode);
-            return false;
+            return status;
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             logger.LogWarning("Zendesk token revocation failed: {FailureType}", ex.GetType().Name);
-            return false;
+            return null;
         }
     }
 
@@ -158,6 +163,12 @@ public sealed class ZendeskOAuthClient(
     /// expired token, whose 401 would read as success.
     /// </para>
     /// <para>
+    /// An access token that is not expired can still be refused (the final-401 path of
+    /// <see cref="ZendeskCredentialProvider.OnTokenRejectedAsync"/> revokes exactly such a token), and
+    /// its refresh token may be live. So a 401 to revoking an access token that was not just refreshed,
+    /// on a grant with a refresh token, is followed by one refresh and a revocation of its result.
+    /// </para>
+    /// <para>
     /// The renewed grant is never stored: every caller is discarding this grant. That is the
     /// difference from <see cref="ZendeskCredentialProvider.DisconnectAsync"/>, which keeps the
     /// person's grant stored until the revocation is attempted and stops on a transient failure.
@@ -165,26 +176,46 @@ public sealed class ZendeskOAuthClient(
     /// </remarks>
     public async Task<bool> RevokeGrantAsync(ZendeskUserToken grant, CancellationToken cancellationToken)
     {
-        var accessToken = grant.AccessToken;
-        if (!string.IsNullOrWhiteSpace(grant.RefreshToken)
-            && (string.IsNullOrWhiteSpace(accessToken) || grant.NeedsRefresh(_time.GetUtcNow(), RevokeSkew)))
+        var hasRefresh = !string.IsNullOrWhiteSpace(grant.RefreshToken);
+        if (hasRefresh && (string.IsNullOrWhiteSpace(grant.AccessToken) || grant.NeedsRefresh(_time.GetUtcNow(), RevokeSkew)))
         {
-            try
-            {
-                accessToken = (await RefreshAsync(grant.RefreshToken, cancellationToken)).AccessToken;
-            }
-            catch (ZendeskOAuthException ex) when (ex.Error is "invalid_grant" or "invalid_token" or "unauthorized_client")
-            {
-                return true;
-            }
-            catch (Exception ex) when (ex is not OperationCanceledException)
-            {
-                logger.LogWarning("Could not refresh a discarded Zendesk grant to revoke it: {FailureType}", ex.GetType().Name);
-                return false;
-            }
+            return await RefreshAndRevokeAsync(grant.RefreshToken!, cancellationToken);
         }
 
-        return !string.IsNullOrWhiteSpace(accessToken) && await RevokeAsync(accessToken, cancellationToken);
+        if (string.IsNullOrWhiteSpace(grant.AccessToken))
+        {
+            return false;
+        }
+
+        var status = await RevokeStatusAsync(grant.AccessToken, cancellationToken);
+        return status switch
+        {
+            >= 200 and < 300 => true,
+            401 when hasRefresh => await RefreshAndRevokeAsync(grant.RefreshToken!, cancellationToken),
+            401 => true,
+            _ => false,
+        };
+    }
+
+    // Refreshes a discarded grant and revokes the access token that comes back.
+    private async Task<bool> RefreshAndRevokeAsync(string refreshToken, CancellationToken cancellationToken)
+    {
+        string renewed;
+        try
+        {
+            renewed = (await RefreshAsync(refreshToken, cancellationToken)).AccessToken;
+        }
+        catch (ZendeskOAuthException ex) when (ex.Error is "invalid_grant" or "invalid_token" or "unauthorized_client")
+        {
+            return true;
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            logger.LogWarning("Could not refresh a discarded Zendesk grant to revoke it: {FailureType}", ex.GetType().Name);
+            return false;
+        }
+
+        return await RevokeAsync(renewed, cancellationToken);
     }
 
     /// <summary>Builds the stored record from a token response and the identity it was checked against.</summary>

@@ -106,6 +106,8 @@ public class ZendeskTokenStoreTests
     [InlineData("{\"access_token\":\"a1\",\"expires_at\":\"not a date\"}", "a1", null)]
     [InlineData("{\"access_token\":\"a1\",\"refresh_token\":\"r1\",\"zendesk_user_id\":\"x\"}", "a1", "r1")]
     [InlineData("{\"refresh_token\":\"r1\"}", null, "r1")]
+    [InlineData("{\"access_token\":\"a1\",\"access_token\":\"a1\"}", null, null)]
+    [InlineData("{\"revoked\":true,\"revoked\":true}", null, null)]
     public void Parse_RefusesAnythingElse_SalvagingTheTokensForRevocation(string value, string? access, string? refresh)
     {
         // Read as "not connected", such a value let a reconnect replace the grant inside it without

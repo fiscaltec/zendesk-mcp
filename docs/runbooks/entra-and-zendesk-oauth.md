@@ -120,8 +120,9 @@ hold the old token, which is why revoking at Zendesk comes first.
 A value that is neither a token nor exactly that tombstone — hand-edited, truncated — is **not** read
 as "not connected" (#12). The server logs an error naming the object id and secret version, and on
 that person's next call (or reconnect) revokes whatever token it can read from the value and writes a
-tombstone. If the log then says the grant *"may still be live at Zendesk"*, nothing in the value could
-be revoked: find the token under Admin Centre → APIs → OAuth tokens and delete it there.
+tombstone. Whenever a log line says a grant *"may still be live at Zendesk"* — nothing in such a value
+could be revoked, or a revocation of a readable one failed — find the token under Admin Centre → APIs →
+OAuth tokens and delete it there.
 
 ## Read-only and the feature switches
 
