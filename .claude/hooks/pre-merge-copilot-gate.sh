@@ -2,10 +2,14 @@
 # PreToolUse (Bash) hook — block a merge of a human PR until Copilot's review cycle for the
 # current HEAD commit is complete and clean.
 #
-# Two merge commands are gated, both registered in .claude/settings.json:
-#   * `gh pr merge <n> --squash --match-head-commit <sha>`          (`if: "Bash(gh pr merge*)"`)
+# Two merge commands are gated:
+#   * `gh pr merge <n> --squash --match-head-commit <sha>`
 #   * `gh api -X PUT repos/{owner}/{repo}/pulls/<n>/merge -f merge_method=squash -f sha=<sha>`
-#                                                                   (`if: "Bash(gh api*)"`)
+# It is registered in .claude/settings.json with `if: "Bash(*gh*)"`, deliberately wider than either
+# form. Claude Code matches `if` as a PREFIX of each subcommand, after stripping leading VAR=value
+# assignments: `Bash(gh api*)` never saw `command gh api …`, `env gh api …` or `/usr/local/bin/gh
+# api …` (reproduced on 2026-11-04, #12). So the filter only narrows to commands mentioning gh, and
+# step 1 below decides what is a merge — without a network call for anything that is not.
 # The second is the documented form: `gh pr merge` is GraphQL underneath, and Claude Code cloud
 # sessions refuse GraphQL outright, so it cannot merge there at all. Everything this hook reads
 # goes through REST for the same reason, except review threads when NOT in a cloud session (REST
@@ -50,19 +54,42 @@ COPILOT_LOGINS='["Copilot","copilot-pull-request-reviewer[bot]","copilot-pull-re
 # 1. Is this a merge at all? (Bash regex — no external grep, so a broken grep can't fail open.)
 # ---------------------------------------------------------------------------------------------
 form=""
-if [[ "$cmd" =~ (^|[[:space:]])gh[[:space:]]+pr[[:space:]]+merge([[:space:]]|$) ]]; then
+# Spotting every shell spelling of a merge one at a time has lost twice (#12, Copilot on #46,
+# then a `#` comment, a newline, `${IFS}`, brace expansion and `gh pr -R x merge` in the
+# pre-review). So detection is deliberately coarse, and reading is deliberately strict:
+#   * a command is a CANDIDATE when `gh` and `merge` both appear as words anywhere in it, in any
+#     case, after quotes and backslashes are removed (`"gh"`, `g\h`, `GH`, `{gh,pr,merge}`);
+#   * a candidate must then be written plainly — no quotes, `#`, control characters (newline,
+#     tab), braces other than gh's `{owner}`/`{repo}` placeholders, commas or shell
+#     metacharacters — and be one of the two gated forms from its first word.
+# Anything else that names gh and merge is denied rather than parsed. Over-matching only denies.
+probe=${cmd//[\"\'\\]/}
+probe=${probe,,}
+nw='[^[:alnum:]_-]'
+[[ "$probe" =~ (^|$nw)gh($nw|$) ]] || allow
+
+# A GraphQL merge mutation is a merge by another route: refuse it rather than parse it. A query
+# read from a file (-F query=@file) or a body (--input) could carry one unseen.
+[[ "$probe" =~ (mergepullrequest|enablepullrequestautomerge) ]] \
+	&& deny "merging through a GraphQL mutation is not gated; use the REST form: gh api -X PUT repos/{owner}/{repo}/pulls/<n>/merge -f merge_method=squash -f sha=<head> (failing closed)"
+[[ "$probe" =~ (^|$nw)graphql($nw|$) ]] && [[ "$probe" =~ (=@|[[:space:]]--input([[:space:]=]|$)) ]] \
+	&& deny "a GraphQL request whose query comes from a file or --input cannot be checked for a merge mutation; pass the query inline (failing closed)"
+
+[[ "$probe" =~ (^|$nw)merge($nw|$) ]] || allow
+
+plain=${cmd//\{owner\}/}
+plain=${plain//\{repo\}/}
+case "$plain" in
+*[\"\'\`\$\;\|\&\<\>\(\)\\\#\{\},]* | *[[:cntrl:]]*)
+	deny "the command names gh and merge but contains quotes or shell metacharacters (a comment, a line break and braces count), so this gate cannot read it with certainty. Write the merge plainly on one line, e.g. gh api -X PUT repos/{owner}/{repo}/pulls/<n>/merge -f merge_method=squash -f sha=<head> (failing closed)" ;;
+esac
+if [[ "$cmd" =~ ^[[:space:]]*gh[[:space:]]+pr[[:space:]]+merge([[:space:]]|$) ]]; then
 	form="gh-pr-merge"
-elif [[ "$cmd" =~ (^|[[:space:]])gh[[:space:]]+api([[:space:]]|$) ]]; then
-	# A GraphQL merge mutation is a merge by another route: refuse it rather than parse it.
-	[[ "$cmd" =~ (mergePullRequest|enablePullRequestAutoMerge) ]] \
-		&& deny "merging through a GraphQL mutation is not gated; use the REST form: gh api -X PUT repos/{owner}/{repo}/pulls/<n>/merge -f merge_method=squash -f sha=<head> (failing closed)"
-	# A GraphQL query read from a file (-F query=@file) or a body (--input) is invisible here, so
-	# it could carry that mutation unseen: refuse it rather than allow what cannot be read.
-	[[ "$cmd" =~ (^|[[:space:]])graphql([[:space:]]|$) ]] && [[ "$cmd" =~ (=@|[[:space:]]--input([[:space:]=]|$)) ]] \
-		&& deny "a GraphQL request whose query comes from a file or --input cannot be checked for a merge mutation; pass the query inline (failing closed)"
-	[[ "$cmd" =~ pulls/[^[:space:]]*/merge ]] && form="rest-merge"
+elif [[ "$cmd" =~ ^[[:space:]]*gh[[:space:]]+api[[:space:]] ]] && [[ "$cmd" =~ pulls/[^[:space:]]*/merge ]]; then
+	form="rest-merge"
+else
+	deny "the command names gh and merge but is not one of the two gated forms written from its first word (gh pr merge … or gh api … pulls/<n>/merge …); a path to gh, a wrapper (env, command, exec), a flag before merge or any other shape is refused. Write it plainly, e.g. gh api -X PUT repos/{owner}/{repo}/pulls/<n>/merge -f merge_method=squash -f sha=<head> (failing closed)"
 fi
-[ -n "$form" ] || allow
 
 # ---------------------------------------------------------------------------------------------
 # 2. Read the command with certainty or not at all.
@@ -274,12 +301,29 @@ last=$(printf '%s\n' "$reviews" | awk 'NF' | sort | awk 'END { print $2 }')
 
 # (3) Zero unresolved review threads, outdated ones included (the ruleset requires every thread
 #     resolved). REST has no resolution state: in a cloud session use its `ccr/review_threads`
-#     route; locally, GraphQL. Neither is paged here, so fail closed at 100 — the tail could hide
-#     an open thread.
+#     route; locally, GraphQL (first 100, failing closed when there are more — that check, below,
+#     is reachable only locally, as the cloud branch replaces it with the completeness check).
+#
+#     The `ccr` route takes no paging parameters and sends no Link header (checked 2026-11-04 on
+#     PR #1: `per_page=1`, `page=2`, `first=2` and `limit=2` all returned all 8 threads, #12), so
+#     nothing says whether a long PR's list is complete. Each thread lists its `comment_ids`, which
+#     are the REST review-comment ids, replies included; so every comment REST returns — paginated,
+#     so complete — must belong to a returned thread. One that does not means the list is short,
+#     and the threads it would have carried could be unresolved.
 if [ -n "${CLAUDE_CODE_REMOTE:-}" ]; then
-	threads=$(gh api "repos/$nwo/pulls/$pr/ccr/review_threads" \
-		--jq '"\([.[] | select(.resolved != true)] | length) \(length >= 100)"' 2>/dev/null) \
+	tjson=$(gh api "repos/$nwo/pulls/$pr/ccr/review_threads" 2>/dev/null) \
 		|| deny "could not read review threads for PR #$pr (failing closed)"
+	unresolved=$(printf '%s' "$tjson" | jq -er 'if type == "array" then [.[] | select(.resolved != true)] | length else error end' 2>/dev/null) \
+		|| deny "could not read review threads for PR #$pr (failing closed)"
+	threaded=$(printf '%s' "$tjson" | jq -r '.[] | (.comment_ids // [])[] | tostring' 2>/dev/null)
+	comments=$(gh api --paginate "repos/$nwo/pulls/$pr/comments?per_page=100" --jq '.[].id | tostring' 2>/dev/null) \
+		|| deny "could not read the review comments of PR #$pr to check the thread list is complete (failing closed)"
+	orphans=$(printf '%s\n' "$comments" | awk -v t="$threaded" '
+		BEGIN { n = split(t, a, "\n"); for (i = 1; i <= n; i++) if (a[i] != "") in_thread[a[i]] = 1 }
+		NF && !($1 in in_thread) { m++ }
+		END { print m + 0 }')
+	[ "$orphans" = "0" ] || deny "$orphans review comment(s) on PR #$pr belong to no thread the review-threads route returned — its list may be cut short, and the missing threads could be unresolved (failing closed; if a comment was posted just now, re-check)"
+	threads="$unresolved false"
 else
 	threads=$(gh api graphql -f owner="$owner" -f name="$name" -F number="$pr" \
 		-f query='query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){pullRequest(number:$number){reviewThreads(first:100){nodes{isResolved} pageInfo{hasNextPage}}}}}' \
@@ -288,7 +332,7 @@ else
 fi
 unresolved=${threads%% *}
 morepages=${threads#* }
-[ "$morepages" = "false" ] || deny "PR #$pr has 100 or more review threads — cannot verify the tail (failing closed)"
+[ "$morepages" = "false" ] || deny "PR #$pr has more than 100 review threads — cannot verify the tail (failing closed)"
 [[ "$unresolved" =~ ^[0-9]+$ ]] || deny "could not count unresolved review threads on PR #$pr (failing closed)"
 [ "$unresolved" = "0" ] || deny "$unresolved unresolved review thread(s) on PR #$pr"
 

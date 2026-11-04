@@ -10,7 +10,7 @@ It is built to the same standard as FISCAL's [Vitally MCP server](https://github
 
 ## Features
 
-- **45 tools** — tickets (search, count, read, create, update, conversation, attachments), KPI and SLA reporting (metrics summary, SLA summary, SLA queue, CSAT), macros (search, preview, apply, create, update, activate), users and organisations, ticket fields/forms/triggers/brands, and the Help Center (articles, translations, who can view an article, categories, sections, segments, permission groups, images, export). See [Tool catalogue](#tool-catalogue).
+- **46 tools** — tickets (search, count, read, create, update, conversation, several conversations at once, attachments), KPI and SLA reporting (metrics summary, SLA summary, SLA queue, CSAT), macros (search, preview, apply, create, update, activate), users and organisations, ticket fields/forms/triggers/brands, and the Help Center (articles, translations, who can view an article, categories, sections, segments, permission groups, images, export). See [Tool catalogue](#tool-catalogue).
 - **Every call is made as you.** Each person connects their own Zendesk account once (per-user Zendesk OAuth). Ticket updates, comments and macro use are attributed to the agent who asked for them, and Zendesk's own role, group and brand restrictions apply on top of this server's permissions. There is no shared Zendesk service account.
 - **Two layers of permission.** Your Entra group decides which tools you see and may call (`zendesk:read` / `zendesk:write`); your Zendesk role decides what Zendesk lets that agent do. Account-wide switches (public replies, article publishing, Help Center structure, macro changes, user and organisation changes) are off by default in the application; FISCAL's deployment turns all five on.
 - **Per-user audit trail** in Application Insights, keyed on your Entra object id — including reads, which Zendesk does not log.
@@ -102,7 +102,7 @@ Two separate OAuth relationships are involved, and they never share a token, cli
 | **Entra** (`/oauth/*`) | this server | MCP client ↔ the server's OAuth façade ↔ Entra, exactly as in vitally-mcp | every `/mcp` request (bearer JWT), and the Entra group lookup that decides the tier |
 | **Zendesk** (`/zendesk/*`) | Zendesk, as the server's delegate | a browser link handed out in a tool result → Zendesk authorise (PKCE) → `/zendesk/callback` | every Zendesk API call, as that agent |
 
-The Zendesk grant is stored in Key Vault against the person's **Entra object id**. At the callback the server reads the new token's identity from `/api/v2/users/me` and stores it only when it is an agent or admin whose email matches the Entra sign-in name. Otherwise the token is revoked on the spot. That check, plus a browser-bound `state` cookie, is what stops a forwarded or planted connect link from attaching someone else's Zendesk account to your identity. Expiring tokens are refreshed once, under a per-person lock, because Zendesk rotates the refresh token. A Zendesk `401` forgets the token and hands back a fresh connect link.
+The Zendesk grant is stored in Key Vault against the person's **Entra object id**. At the callback the server reads the new token's identity from `/api/v2/users/me` and stores it only when it is an agent or admin whose email matches the Entra sign-in name. Otherwise the token is revoked on the spot. That check, plus a browser-bound `state` cookie, is what stops a forwarded or planted connect link from attaching someone else's Zendesk account to your identity. Expiring tokens are refreshed once, under a per-person lock, because Zendesk rotates the refresh token. A Zendesk `401` that a refresh cannot cure revokes the grant, forgets it and hands back a fresh connect link; a reconnect revokes the grant it replaces.
 
 ## Tool catalogue
 
@@ -111,7 +111,7 @@ Each tool carries `ReadOnly` / `Destructive` / `Idempotent` / `OpenWorld` hints 
 | Area | Read (`zendesk:read`) | Write (`zendesk:write`) |
 |---|---|---|
 | Connection | `Get_zendesk_connection`, `Get_zendesk_connect_link` | `Disconnect_zendesk` *(read tier — it only affects the caller's own connection)* |
-| Tickets | `Search_tickets`, `Count_tickets`, `Get_ticket`, `Get_ticket_conversation`, `Get_ticket_attachment` | `Create_ticket`, `Update_ticket`, `Request_ticket_attachment_upload` |
+| Tickets | `Search_tickets`, `Count_tickets`, `Get_ticket`, `Get_ticket_conversation`, `Bulk_get_ticket_conversations`, `Get_ticket_attachment` | `Create_ticket`, `Update_ticket`, `Request_ticket_attachment_upload` |
 | Reporting | `Get_ticket_metrics_summary`, `Get_sla_summary`, `Get_sla_queue`, `Get_satisfaction_ratings` | — |
 | Macros | `Search_macros`, `Preview_macro` | `Apply_macro`, `Create_macro`, `Update_macro`, `Set_macros_active` |
 | People | `Search_users`, `Find_agent_by_name`, `Search_organizations` | `Add_user_to_organization` |
