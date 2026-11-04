@@ -420,12 +420,17 @@ Caveats worth knowing before trusting it:
   `Bash(gh pr merge*)` and `Bash(gh api*)` filters, `GH_HOST=github.com gh …` and `cd . && gh …`
   reached the hook, but `command gh …`, `env gh …` and `/usr/local/bin/gh …` ran without it. Under
   `Bash(*gh*)` all three reached it — the change to `if` took effect without a restart. The hook's
-  own step 1 then decides what is a merge (it accepts `gh` after a `/` as well as a space), so any
-  Bash call mentioning `gh` runs it — including a heredoc or commit message that merely quotes a
-  merge command, which it then denies. For anything that is not a merge it allows at once, without
-  a network call. Testing the hook or editing text that quotes a merge command means doing it from a
-  script file rather than inline. Over-matching is the safe direction; don't loosen it. It guards
-  against a mistaken merge, not a determined one: a command that never spells `gh` (a shell
+  own step 1 then decides what is a merge: `gh` counts after anything that cannot continue a word
+  (a space, `/`, `\`, a quote, `;`, `&`, `|`, `(`), and may be quoted itself, so `"gh" pr merge`
+  and `true;gh api …` are recognised and then refused for their metacharacters. So any Bash call
+  mentioning `gh` runs the hook, and one whose text contains a merge command anywhere — a heredoc,
+  a commit message — is denied. For anything that is not a
+  merge it allows at once, without a network call; but because every such call now runs `jq`,
+  `sed` and `awk`, a broken one of those denies every Bash call mentioning `gh`, not only merges.
+  Testing the hook or editing text that quotes a merge command means doing it from a script file
+  rather than inline. Over-matching is the safe direction; don't loosen it. The `if` filter itself
+  is covered only by the live check above, not by the CI test, which calls the hook directly. It
+  guards against a mistaken merge, not a determined one: a command that never spells `gh` (a shell
   variable, `curl` to the API) is invisible to any `if` filter.
 - **The REST reviews list can lag** (above). The lag only makes the gate deny a merge it would allow;
   wait and re-check.

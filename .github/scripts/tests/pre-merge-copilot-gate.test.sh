@@ -96,6 +96,10 @@ new_case; expect_deny "command gh api, unpinned" "command gh api -X PUT repos/{o
 new_case; expect_deny "env gh pr merge, unpinned" "env gh pr merge 7 --squash" "--match-head-commit $HEAD_SHA"
 new_case; expect_deny "GH_HOST=… gh api, unpinned" "GH_HOST=github.com gh api -X PUT repos/{owner}/{repo}/pulls/7/merge -f merge_method=squash" "add -f sha=$HEAD_SHA"
 new_case; expect_allow "a command that merely contains gh" "git log --grep=ghost"
+new_case; expect_allow "a word ending in gh is not gh" "sigh pr merge 7"
+for spelt in '\gh pr merge 7 --squash' '"gh" pr merge 7 --squash' "'gh' api -X PUT repos/{owner}/{repo}/pulls/7/merge" 'true;gh pr merge 7 --squash' '(gh pr merge 7 --squash)' 'x|gh pr merge 7' "true&&gh api -X PUT repos/{owner}/{repo}/pulls/7/merge -f merge_method=squash"; do
+	new_case; expect_deny "gh after a metacharacter: $spelt" "$spelt" "quotes or shell metacharacters"
+done
 
 # --- not a merge: no gating -----------------------------------------------------------------------
 new_case; expect_allow "an unrelated gh api call" "gh api repos/{owner}/{repo}/pulls/7"
@@ -158,6 +162,7 @@ expect_allow "no threads and no comments (cloud)" "$REST"
 new_case; rm "$F/${REPO}_pulls_7_comments.json"; expect_deny "review comments refused (cloud)" "$REST" "could not read the review comments"
 new_case; rm "$F/${REPO}_pulls_7_ccr_review_threads.json"; expect_deny "threads refused (cloud)" "$REST" "could not read review threads"
 new_case; echo '{"not":"a list"}' >"$F/${REPO}_pulls_7_ccr_review_threads.json"; expect_deny "threads unreadable (cloud)" "$REST" "could not read review threads"
+new_case; echo '{"a":{"resolved":true,"comment_ids":[1,2]}}' >"$F/${REPO}_pulls_7_ccr_review_threads.json"; expect_deny "threads as an object, not a list (cloud)" "$REST" "could not read review threads"
 new_case; unset CLAUDE_CODE_REMOTE
 echo '{"data":{"repository":{"pullRequest":{"reviewThreads":{"nodes":[{"isResolved":true}],"pageInfo":{"hasNextPage":true}}}}}}' >"$F/graphql.json"
 expect_deny "more than 100 threads (local)" "$REST" "cannot verify the tail"

@@ -54,10 +54,15 @@ COPILOT_LOGINS='["Copilot","copilot-pull-request-reviewer[bot]","copilot-pull-re
 # 1. Is this a merge at all? (Bash regex — no external grep, so a broken grep can't fail open.)
 # ---------------------------------------------------------------------------------------------
 form=""
-#    `gh` may follow a `/` as well as a space or the start: `/usr/local/bin/gh pr merge` is gh.
-if [[ "$cmd" =~ (^|[[:space:]/])gh[[:space:]]+pr[[:space:]]+merge([[:space:]]|$) ]]; then
+#    `gh` counts after anything that cannot continue a word — a space, `/` (`/usr/local/bin/gh`),
+#    `\`, a quote, `;`, `&`, `|`, `(` — not only after a space: those forms run gh too, and step 2
+#    then refuses them for their metacharacters. Over-matching only denies; under-matching allowed
+#    an unpinned merge.
+# In a variable because a quote written inside [[ =~ ]] is shell quoting, not part of the pattern.
+gh_word='(^|[^[:alnum:]_-])gh["'"'"']?[[:space:]]+'
+if [[ "$cmd" =~ ${gh_word}pr[[:space:]]+merge([[:space:]]|$) ]]; then
 	form="gh-pr-merge"
-elif [[ "$cmd" =~ (^|[[:space:]/])gh[[:space:]]+api([[:space:]]|$) ]]; then
+elif [[ "$cmd" =~ ${gh_word}api([[:space:]]|$) ]]; then
 	# A GraphQL merge mutation is a merge by another route: refuse it rather than parse it.
 	[[ "$cmd" =~ (mergePullRequest|enablePullRequestAutoMerge) ]] \
 		&& deny "merging through a GraphQL mutation is not gated; use the REST form: gh api -X PUT repos/{owner}/{repo}/pulls/<n>/merge -f merge_method=squash -f sha=<head> (failing closed)"
@@ -279,7 +284,8 @@ last=$(printf '%s\n' "$reviews" | awk 'NF' | sort | awk 'END { print $2 }')
 
 # (3) Zero unresolved review threads, outdated ones included (the ruleset requires every thread
 #     resolved). REST has no resolution state: in a cloud session use its `ccr/review_threads`
-#     route; locally, GraphQL (first 100, failing closed when there are more).
+#     route; locally, GraphQL (first 100, failing closed when there are more — that check, below,
+#     is reachable only locally, as the cloud branch replaces it with the completeness check).
 #
 #     The `ccr` route takes no paging parameters and sends no Link header (checked 2026-11-04 on
 #     PR #1: `per_page=1`, `page=2`, `first=2` and `limit=2` all returned all 8 threads, #12), so
@@ -290,9 +296,9 @@ last=$(printf '%s\n' "$reviews" | awk 'NF' | sort | awk 'END { print $2 }')
 if [ -n "${CLAUDE_CODE_REMOTE:-}" ]; then
 	tjson=$(gh api "repos/$nwo/pulls/$pr/ccr/review_threads" 2>/dev/null) \
 		|| deny "could not read review threads for PR #$pr (failing closed)"
-	unresolved=$(printf '%s' "$tjson" | jq -er '[.[] | select(.resolved != true)] | length' 2>/dev/null) \
+	unresolved=$(printf '%s' "$tjson" | jq -er 'if type == "array" then [.[] | select(.resolved != true)] | length else error end' 2>/dev/null) \
 		|| deny "could not read review threads for PR #$pr (failing closed)"
-	threaded=$(printf '%s' "$tjson" | jq -er '.[] | (.comment_ids // [])[] | tostring' 2>/dev/null)
+	threaded=$(printf '%s' "$tjson" | jq -r '.[] | (.comment_ids // [])[] | tostring' 2>/dev/null)
 	comments=$(gh api --paginate "repos/$nwo/pulls/$pr/comments?per_page=100" --jq '.[].id | tostring' 2>/dev/null) \
 		|| deny "could not read the review comments of PR #$pr to check the thread list is complete (failing closed)"
 	orphans=$(printf '%s\n' "$comments" | awk -v t="$threaded" '
