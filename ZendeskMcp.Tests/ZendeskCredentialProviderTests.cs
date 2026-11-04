@@ -313,6 +313,125 @@ public class ZendeskCredentialProviderTests
     }
 
     [Fact]
+    public async Task ASecond401AfterARefresh_RevokesTheFreshGrant_BeforeForgettingIt()
+    {
+        // If that 401 was specific to one endpoint (a brand host, say), the refreshed grant still
+        // works; a tombstone alone would leave it live in Key Vault's version history (#12).
+        using var zendesk = TestHelpers.CreateFakeZendesk(request => request switch
+        {
+            { Path: "/oauth/tokens" } => FakeResponse.Json("{\"access_token\":\"fresh\",\"refresh_token\":\"r2\",\"expires_in\":7200}"),
+            { Path: "/api/v2/oauth/tokens/current.json" } => FakeResponse.WithStatus(HttpStatusCode.NoContent, string.Empty),
+            _ => FakeResponse.WithStatus(HttpStatusCode.Unauthorized),
+        });
+        var (service, store) = TestHelpers.BuildUserZendeskService(zendesk.Client, TestHelpers.SampleToken("first", refreshToken: "r1"));
+
+        var act = () => service.GetAsync("/api/v2/tickets/101");
+
+        await act.Should().ThrowAsync<ZendeskConnectionRequiredException>();
+        var revoke = zendesk.Requests.Should().ContainSingle(r => r.Method == HttpMethod.Delete).Which;
+        revoke.Path.Should().Be("/api/v2/oauth/tokens/current.json");
+        revoke.Headers["Authorization"].Should().Be("Bearer fresh");
+        (await store.GetAsync(TestHelpers.TestObjectId)).Should().BeNull();
+    }
+
+    [Fact]
+    public async Task A401WithNoRefreshToken_RevokesTheGrant_BeforeForgettingIt()
+    {
+        using var zendesk = TestHelpers.CreateFakeZendesk(request => request.Method == HttpMethod.Delete
+            ? FakeResponse.WithStatus(HttpStatusCode.NoContent, string.Empty)
+            : FakeResponse.WithStatus(HttpStatusCode.Unauthorized));
+        var (service, store) = TestHelpers.BuildUserZendeskService(zendesk.Client, TestHelpers.SampleToken("only", refreshToken: null));
+
+        var act = () => service.GetAsync("/api/v2/tickets/101");
+
+        await act.Should().ThrowAsync<ZendeskConnectionRequiredException>();
+        zendesk.Requests.Should().ContainSingle(r => r.Method == HttpMethod.Delete)
+            .Which.Headers["Authorization"].Should().Be("Bearer only");
+        (await store.GetAsync(TestHelpers.TestObjectId)).Should().BeNull();
+    }
+
+    [Fact]
+    public async Task AnUnreadableGrant_IsRevokedThroughItsRefreshToken_Forgotten_AndAsksForAReconnect()
+    {
+        // Read as "not connected", it was cached that way and a reconnect replaced it unrevoked (#12).
+        using var zendesk = TestHelpers.CreateFakeZendesk(request => request.Path switch
+        {
+            "/oauth/tokens" => FakeResponse.Json("{\"access_token\":\"renewed\",\"refresh_token\":\"r2\",\"expires_in\":7200}"),
+            _ => FakeResponse.WithStatus(HttpStatusCode.NoContent, string.Empty),
+        });
+        var store = new UnreadableTokenStore(new ZendeskStoredTokenUnreadableException(
+            new ZendeskUserToken("stale", "r1", DateTimeOffset.UnixEpoch, null, 0, string.Empty, string.Empty, DateTimeOffset.MinValue)));
+        var logger = new CapturingLogger<ZendeskCredentialProvider>();
+        var service = TestHelpers.BuildZendeskService(zendesk.Client, tokenStore: store,
+            user: TestHelpers.UserPrincipal(), credentialLogger: logger);
+
+        var act = () => service.GetAsync("/api/v2/tickets/101");
+
+        await act.Should().ThrowAsync<ZendeskConnectionRequiredException>();
+        zendesk.Requests.Should().HaveCount(2);
+        zendesk.Requests[0].Body.Should().Contain("\"refresh_token\":\"r1\"");
+        zendesk.Requests[1].Method.Should().Be(HttpMethod.Delete);
+        zendesk.Requests[1].Headers["Authorization"].Should().Be("Bearer renewed");
+        store.Removed.Should().Be(1, "the unreadable value is tombstoned once, so later calls read as not connected");
+        logger.Entries.Should().ContainSingle(e => e.Message.Contains("Revoked and forgot the unreadable"))
+            .Which.Message.Should().Contain(TestHelpers.TestObjectId);
+        logger.Entries.Should().NotContain(e => e.Message.Contains("stale") || e.Message.Contains("r1") || e.Message.Contains("renewed"));
+    }
+
+    [Fact]
+    public async Task AnUnreadableGrantWithNothingToRevoke_IsForgotten_AndLoggedAsAnError()
+    {
+        using var zendesk = TestHelpers.CreateFakeZendesk(_ => FakeResponse.Json("{}"));
+        var store = new UnreadableTokenStore(new ZendeskStoredTokenUnreadableException(salvaged: null));
+        var logger = new CapturingLogger<ZendeskCredentialProvider>();
+        var service = TestHelpers.BuildZendeskService(zendesk.Client, tokenStore: store,
+            user: TestHelpers.UserPrincipal(), credentialLogger: logger);
+
+        var outcome = await service.Credentials.DisconnectAsync();
+
+        outcome.Should().Be(DisconnectOutcome.ForgottenButNotRevoked, "nothing confirms the grant is dead");
+        zendesk.Requests.Should().BeEmpty();
+        store.Removed.Should().Be(1);
+        logger.Entries.Should().ContainSingle(e => e.Level == Microsoft.Extensions.Logging.LogLevel.Error)
+            .Which.Message.Should().Contain(TestHelpers.TestObjectId).And.Contain("may still be live");
+    }
+
+    [Fact]
+    public async Task Disconnect_OfAnUnreadableGrant_RevokesWhatCanBeRead()
+    {
+        using var zendesk = TestHelpers.CreateFakeZendesk(_ => FakeResponse.WithStatus(HttpStatusCode.NoContent, string.Empty));
+        var store = new UnreadableTokenStore(new ZendeskStoredTokenUnreadableException(
+            new ZendeskUserToken("readable-access", null, null, null, 0, string.Empty, string.Empty, DateTimeOffset.MinValue)));
+        var service = TestHelpers.BuildZendeskService(zendesk.Client, tokenStore: store, user: TestHelpers.UserPrincipal());
+
+        var outcome = await service.Credentials.DisconnectAsync();
+
+        outcome.Should().Be(DisconnectOutcome.Disconnected);
+        zendesk.Requests.Should().ContainSingle().Which.Headers["Authorization"].Should().Be("Bearer readable-access");
+        (await store.GetAsync(TestHelpers.TestObjectId)).Should().BeNull();
+    }
+
+    [Fact]
+    public async Task Disconnect_WhenTheAccessTokenWasRevokedEarly_RevokesThroughTheRefreshToken()
+    {
+        // A 401 to the revocation proves nothing while the refresh token may still renew the grant.
+        using var zendesk = TestHelpers.CreateFakeZendesk(request => request switch
+        {
+            { Path: "/oauth/tokens" } => FakeResponse.Json("{\"access_token\":\"renewed\",\"refresh_token\":\"r2\",\"expires_in\":7200}"),
+            _ when request.Headers["Authorization"] == "Bearer revoked-early" => FakeResponse.WithStatus(HttpStatusCode.Unauthorized),
+            _ => FakeResponse.WithStatus(HttpStatusCode.NoContent, string.Empty),
+        });
+        var (service, store) = TestHelpers.BuildUserZendeskService(zendesk.Client, TestHelpers.SampleToken("revoked-early", refreshToken: "r1"));
+
+        var outcome = await service.Credentials.DisconnectAsync();
+
+        outcome.Should().Be(DisconnectOutcome.Disconnected);
+        zendesk.Requests.Where(r => r.Method == HttpMethod.Delete).Select(r => r.Headers["Authorization"])
+            .Should().Equal("Bearer revoked-early", "Bearer renewed");
+        (await store.GetAsync(TestHelpers.TestObjectId)).Should().BeNull();
+    }
+
+    [Fact]
     public async Task Disconnect_WhenTheRevocationTimesOut_ForgetsTheToken_ButSaysSo()
     {
         // HttpClient.Timeout surfaces as a TaskCanceledException although the caller's own token was

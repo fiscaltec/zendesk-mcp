@@ -90,42 +90,69 @@ public static partial class TicketConversationHelpers
         var entries = new List<JsonObject>();
         foreach (var item in events)
         {
-            if (item is not JsonObject evt)
+            if (ParseLogEvent(item) is not { } evt)
             {
                 continue;
             }
 
-            var content = evt["content"] as JsonObject;
-            var isHtml = string.Equals(ToolJson.String(content?["type"]), "html", StringComparison.OrdinalIgnoreCase);
-            var body = ToolJson.String(content?["body"]);
-            var message = (isHtml ? null : body) ?? ToolJson.String(content?["text"])
-                ?? ToolJson.String(evt["body"]) ?? ToolJson.String(evt["text"]);
-            var htmlBody = (isHtml ? body : null) ?? ToolJson.String(content?["html_body"]) ?? ToolJson.String(evt["html_body"]);
-            if (message is null && htmlBody is not null)
-            {
-                message = HtmlToText(htmlBody);
-            }
-
-            var attachments = Attachments(content?["attachments"] ?? evt["attachments"]);
-            if (string.IsNullOrWhiteSpace(message) && attachments.Count == 0)
-            {
-                continue;
-            }
-
-            var authorType = (ToolJson.String(evt["author"]?["type"]) ?? string.Empty).ToLowerInvariant();
-            var isPublic = (evt["public"] ?? evt["metadata"]?["is_public"]) is not JsonValue p || !p.TryGetValue<bool>(out var flag) || flag;
             entries.Add(new JsonObject
             {
-                ["timestamp"] = (evt["created_at"] ?? evt["timestamp"])?.DeepClone(),
-                ["side"] = authorType is "user" or "end-user" or "end_user" or "customer" ? "customer" : "agent",
-                ["author"] = ToolJson.String(evt["author"]?["display_name"]) ?? ToolJson.String(evt["author"]?["name"]) ?? authorType,
-                ["message"] = message ?? string.Empty,
-                ["visibility"] = isPublic ? "public" : "private",
-                ["attachments"] = attachments,
+                ["timestamp"] = evt.Timestamp?.DeepClone(),
+                ["side"] = evt.AuthorType is "user" or "end-user" or "end_user" or "customer" ? "customer" : "agent",
+                ["author"] = evt.AuthorName ?? evt.AuthorType,
+                ["message"] = evt.Message,
+                ["visibility"] = evt.IsPublic ? "public" : "private",
+                ["attachments"] = evt.Attachments,
             });
         }
 
         return entries;
+    }
+
+    /// <summary>One conversation-log event, read tolerantly.</summary>
+    /// <param name="AuthorType">The raw <c>author.type</c>, lower-cased (empty when absent).</param>
+    public sealed record LogEvent(
+        JsonNode? Timestamp, string AuthorType, string? AuthorName, long? AuthorId, string Message, bool IsPublic, JsonArray Attachments);
+
+    /// <summary>
+    /// A conversation-log event, or null when it is not an object or carries neither a message nor
+    /// attachments (such events are not part of the conversation a reader sees).
+    /// </summary>
+    public static LogEvent? ParseLogEvent(JsonNode? item)
+    {
+        if (item is not JsonObject evt)
+        {
+            return null;
+        }
+
+        var content = evt["content"] as JsonObject;
+        var isHtml = string.Equals(ToolJson.String(content?["type"]), "html", StringComparison.OrdinalIgnoreCase);
+        var body = ToolJson.String(content?["body"]);
+        var message = (isHtml ? null : body) ?? ToolJson.String(content?["text"])
+            ?? ToolJson.String(evt["body"]) ?? ToolJson.String(evt["text"]);
+        var htmlBody = (isHtml ? body : null) ?? ToolJson.String(content?["html_body"]) ?? ToolJson.String(evt["html_body"]);
+        if (message is null && htmlBody is not null)
+        {
+            message = HtmlToText(htmlBody);
+        }
+
+        var attachments = Attachments(content?["attachments"] ?? evt["attachments"]);
+        if (string.IsNullOrWhiteSpace(message) && attachments.Count == 0)
+        {
+            return null;
+        }
+
+        var author = evt["author"];
+        var authorType = (ToolJson.String(author?["type"]) ?? string.Empty).ToLowerInvariant();
+        var isPublic = (evt["public"] ?? evt["metadata"]?["is_public"]) is not JsonValue p || !p.TryGetValue<bool>(out var flag) || flag;
+        return new LogEvent(
+            evt["created_at"] ?? evt["timestamp"],
+            authorType,
+            ToolJson.String(author?["display_name"]) ?? ToolJson.String(author?["name"]),
+            ToolJson.Long(author?["zen:support:user_id"]) ?? ToolJson.Long(author?["user_id"]),
+            message ?? string.Empty,
+            isPublic,
+            attachments);
     }
 
     /// <summary>

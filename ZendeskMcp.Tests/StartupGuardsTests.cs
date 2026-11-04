@@ -177,4 +177,26 @@ public sealed class StartupGuardsTests : IDisposable
             act.Should().NotThrow();
         }
     }
+
+    [Theory]
+    [InlineData("false", false, true)]  // sign-in on: refused wherever it runs, local development included
+    [InlineData("False", false, true)]
+    [InlineData("false", true, false)]  // NoAuth bypasses the checks anyway
+    [InlineData("true", false, false)]
+    [InlineData(null, false, false)]    // unset means on
+    public void EnsureAuthorizationIsOn_RefusesSwitchingOffTheTierChecksOutsideNoAuth(string? setting, bool noAuth, bool refused)
+    {
+        // Authorization:Enabled=false lets any signed-in person call any tool, writes included, and
+        // until #12 nothing refused it in a deployed target.
+        var act = () => StartupGuards.EnsureAuthorizationIsOn(setting, noAuth);
+
+        if (refused)
+        {
+            act.Should().Throw<InvalidOperationException>().WithMessage("*Authorization:Enabled=false*");
+        }
+        else
+        {
+            act.Should().NotThrow();
+        }
+    }
 }

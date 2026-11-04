@@ -6,12 +6,21 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 A Model Context Protocol (MCP) server in C# giving FISCAL staff access to Zendesk Support and the Help Center. It is built to the standard of [fiscaltec/vitally-mcp](https://github.com/fiscaltec/vitally-mcp) — the same host, OAuth façade, RBAC, audit, telemetry, CI/CD and Azure shape, ported rather than reinvented — and reproduces the functionality of Swifteq's hosted Zendesk MCP server.
 
-**Status: built and deployed; validation partly done.** The Azure and Entra estate was built on 2026-10-28/29 with `az` CLI by `docs/runbooks/build-the-estate.md` (#3; the runbook fixes it needed are in PR #16), as the Vitally estate is, and serves at `https://zendesk-mcp.fiscaltec.com` and `https://zendesk-mcp-staging.fiscaltec.com` (image `sha-d5528c7`). The secret-expiry scanner Job (9.4) followed the same day; it posts to the Teams channel Vitally's scanner uses, its card titled "Zendesk MCP:". Phase 14 passed: on both origins the owner signed in with Microsoft, connected their own Zendesk agent account, called `List_brands`, and the `ZendeskToolCall` audit records reached `AppEvents`. `infra/terraform/` describes the same estate as a record and is **never applied** (it passes `terraform validate`). The Zendesk endpoints were written from the API documentation; on 2026-10-28 every **read** tool was run against the live account with a development token in read-only mode, and what that showed was fixed (PR #1). The same day every write tool was exercised against throwaway records (all since deleted): test tickets, an inactive personal macro, draft articles, a test category and section, and a test end user and organisations; every feature-switch refusal was confirmed. That found and fixed `Update_ticket` silently dropping tag changes, `Add_user_to_organization` moving people out of their organisation without `replace_existing`, and a rename reporting the old name. A public reply on an existing ticket was sent too, notifying only the test agent. On 2026-11-04 staging was given its own **read-only** Zendesk OAuth client (`fiscal_zendesk_mcp_staging`, allowed and requested scope `read`), and production's client trimmed to `read write` with only its own callback; staging reconnected through it live. The same day the rest of per-user OAuth was exercised live and checked against the server's own logs (#4): refresh past expiry, persisted to Key Vault and surviving a deploy; disconnect, tombstone and reconnect; and a refused login (an end user) revoked; the contents of a tool-call record and its upstream record were confirmed too (#5). Not yet exercised: the rest of #5 (multi-record searches, denial records, the negative control), the email-mismatch refusal (no spare agent login; accepted, as it shares the refuse-and-revoke code), reads as an ordinary agent rather than an admin (#6), and eight shapes the account could not show, among them a reused idempotency key with a different body (#7). Read the open issues rather than trusting this paragraph: it describes 2026-11-04. Code marks each remaining uncertainty `// Unverified against the live API` — writes checked against the documentation only say "docs-checked, not live-tested". See *Staging validation* before trusting any tool against production.
+**Status: built and deployed; validation partly done.** The Azure and Entra estate was built on 2026-10-28/29 with `az` CLI by `docs/runbooks/build-the-estate.md` (#3; the runbook fixes it needed are in PR #16), as the Vitally estate is, and serves at `https://zendesk-mcp.fiscaltec.com` and `https://zendesk-mcp-staging.fiscaltec.com` (image `sha-d5528c7`). The secret-expiry scanner Job (9.4) followed the same day; it posts to the Teams channel Vitally's scanner uses, its card titled "Zendesk MCP:". Phase 14 passed: on both origins the owner signed in with Microsoft, connected their own Zendesk agent account, called `List_brands`, and the `ZendeskToolCall` audit records reached `AppEvents`. `infra/terraform/` describes the same estate as a record and is **never applied** (it passes `terraform validate`). The Zendesk endpoints were written from the API documentation; on 2026-10-28 every **read** tool was run against the live account with a development token in read-only mode, and what that showed was fixed (PR #1). The same day every write tool was exercised against throwaway records (all since deleted): test tickets, an inactive personal macro, draft articles, a test category and section, and a test end user and organisations; every feature-switch refusal was confirmed. That found and fixed `Update_ticket` silently dropping tag changes, `Add_user_to_organization` moving people out of their organisation without `replace_existing`, and a rename reporting the old name. A public reply on an existing ticket was sent too, notifying only the test agent. On 2026-11-04 staging was given its own **read-only** Zendesk OAuth client (`fiscal_zendesk_mcp_staging`, allowed and requested scope `read`), and production's client trimmed to `read write` with only its own callback; staging reconnected through it live. The same day the rest of per-user OAuth was exercised live and checked against the server's own logs (#4): refresh past expiry, persisted to Key Vault and surviving a deploy; disconnect, tombstone and reconnect; and a refused login (an end user) revoked; the contents of a tool-call record and its upstream record were confirmed too (#5). Not yet exercised: the rest of #5 (multi-record searches, denial records, the negative control), the email-mismatch refusal (no spare agent login; accepted, as it shares the refuse-and-revoke code), reads as an ordinary agent rather than an admin (#6), and eight shapes the account could not show, among them a reused idempotency key with a different body (#7), plus #26's `has_value` on non-drop-down custom fields and its messaging channels (no messaging tickets). Read the open issues rather than trusting this paragraph: it describes 2026-11-04. Code marks each remaining uncertainty `// Unverified against the live API` — writes checked against the documentation only say "docs-checked, not live-tested". See *Staging validation* before trusting any tool against production.
 
 **Provenance.** Issue references written `vitally-mcp#NNN` point at fiscaltec/vitally-mcp, where the lesson was learnt; the design and the code that carries it came across together. vitally-mcp's own `CLAUDE.md` holds the full history — dates, measurements, incident write-ups — behind the rules stated here more briefly. When this file and that one disagree about a shared component, check the code here.
 
+**Keeping in step with vitally-mcp.** The port of everything outside the source and test folders (workflows, scripts, templates, runbooks, `CLAUDE.md` sections) is current to vitally-mcp **`0c6d4e1`** (2026-10-26), audited on 2026-11-04 in #10, whose decision table records what was ported, adapted or judged not applicable, and why. Findings that flow the other way go to #17. To check for drift, diff from that commit rather than re-auditing:
+
+```bash
+# One command: a failed or skipped fetch leaves a stale origin/main, which prints nothing with exit 0 — not "no drift".
+git -C <vitally-mcp clone> fetch origin main && git -C <vitally-mcp clone> log --oneline 0c6d4e1..origin/main -- . ':!VitallyMcp' ':!VitallyMcp.Tests'
+```
+
+That lists vitally-mcp's non-source changes since this audit; decide each as #10 did, then move the commit named here. Run on 2026-11-04, it listed nothing: the one later commit, `fdc6f5e` (#197), touches only the two `.csproj` files. ⚠️ The clone must hold history back to `0c6d4e1`: in a `--depth 1` clone the command fails with `fatal: bad revision` (exit 128), which is not "no drift". Check the exit status, not just the empty output. Source drift (a fix to a shared component such as the OAuth proxy, `ToolAuthorizer` or the Graph resolver) is out of this command's scope: list it with the same range over `-- VitallyMcp`, and read each commit, since the code here was ported and renamed rather than copied file for file.
+
 **Key characteristics:**
-- 45 tools over tickets, KPI/SLA/CSAT reporting, macros, users and organisations, configuration and the Help Center — see *Tools*.
+- 46 tools over tickets, KPI/SLA/CSAT reporting, macros, users and organisations, configuration and the Help Center — see *Tools*.
 - **Per-user Zendesk OAuth.** Every Zendesk call is made with the signed-in person's own Zendesk token. There is no shared Zendesk credential in a deployed target, so Zendesk attributes every change to the agent and applies their role, group and brand restrictions. This is the main architectural difference from vitally-mcp, which calls Vitally with one shared key.
 - **Two OAuth relationships, never mixed:** Entra signs people in to *this server* (`/oauth/*`, unchanged from vitally-mcp); Zendesk OAuth lets the server act *as them* (`/zendesk/connect`, `/zendesk/callback`).
 - **Streamable HTTP transport** (MCP 2026-07-28), stateless, on `ModelContextProtocol.AspNetCore`.
@@ -41,7 +50,7 @@ dotnet run --project ZendeskMcp/ZendeskMcp.csproj
 
 `StartupGuards.EnsureDevelopmentTokenIsLocal` refuses the development token unless `OAuth:NoAuth=true`, no `Zendesk:KeyVaultUri` is set **and** the host runs in the `Development` environment (there is no `launchSettings.json`, so `dotnet run` alone starts in Production and refuses). Behind real sign-in it would turn a per-user server back into a shared service account, attributing everyone's changes to the token's owner. Do not weaken that guard.
 
-To exercise per-user OAuth locally instead, leave `NoAuth` off, set `Zendesk:OAuthClientId` and `Zendesk:DevelopmentOAuthClientSecret` (in-memory token store; nothing survives a restart), and add `http://localhost:5099/zendesk/callback` to the redirect URLs of a **separate development** Zendesk OAuth client — not `fiscal_zendesk_mcp` (production) or `fiscal_zendesk_mcp_staging` (staging), each of which lists only its own deployed callback (`docs/runbooks/build-the-estate.md`, Phase 0.2).
+To exercise per-user OAuth locally instead, leave `NoAuth` off, set `Zendesk:OAuthClientId` and `Zendesk:DevelopmentOAuthClientSecret` (in-memory token store; nothing survives a restart), and add `http://localhost:5099/zendesk/callback` to the redirect URLs of a **separate development** Zendesk OAuth client — not `fiscal_zendesk_mcp` (production) or `fiscal_zendesk_mcp_staging` (staging), each of which lists only its own deployed callback (`docs/runbooks/build-the-estate.md`, Phase 0.2). The tier checks stay on: `Authorization:Enabled=false` is refused without `NoAuth` (#12), so give the local host `Authorization:LiveGroupCheck=true` and the Entra tier group ids, as a deployed target has.
 
 ### Smoke-testing the server
 
@@ -89,18 +98,19 @@ FISCAL staff point their MCP client at `https://zendesk-mcp.fiscaltec.com/mcp` (
 
 ## GitHub issues (issue-driven work)
 
-Track non-trivial work as GitHub issues via the `gh` CLI. Trivial one-off changes don't need an
-issue — use judgement. This mirrors the flow used in `searledan/rosetechnologies.co.uk`,
+Track non-trivial work as GitHub issues, raised with the **`/create-issue`** skill
+(`.claude/skills/create-issue/SKILL.md`, ported from `searledan/spendy` in #11) and moved through their
+statuses with `.claude/scripts/issue-status.sh` — both over `gh api` REST. Trivial one-off changes
+don't need an issue — use judgement. This mirrors the flow used in `searledan/rosetechnologies.co.uk`,
 `searledan/dansearle.co.uk` and `searledan/spendy`; the labels below were copied from vitally-mcp on
 2026-10-28 (`gh label clone fiscaltec/vitally-mcp --repo fiscaltec/zendesk-mcp`), so names, colours
 and descriptions match there.
 
-⚠️ **In a Claude Code cloud session, `gh issue create` fails** with `HTTP 403: GitHub GraphQL is not
-available from Claude Code sessions` — it is GraphQL underneath, and the session's GitHub proxy serves
-REST only. Create issues through REST instead (`gh api -X POST repos/fiscaltec/zendesk-mcp/issues
---input body.json`, with `title`, `body` and `labels` in the JSON). `gh issue edit` and `gh issue view`
-fail the same way (checked 2026-10-28); use `gh api -X PATCH …/issues/<n>` and `gh api …/issues/<n>`.
-Hit when #2–#9 were raised. `gh pr merge` is GraphQL too, so merges use the REST endpoint instead
+⚠️ **In a Claude Code cloud session every `gh issue …` command fails** with `HTTP 403: GitHub GraphQL
+is not available from Claude Code sessions` — they are GraphQL underneath, and the session's GitHub
+proxy serves REST only (hit when #2–#9 were raised). The skill and the script above carry the REST
+forms; to read or edit an issue otherwise, use `gh api …/issues/<n>` and `gh api -X PATCH …/issues/<n>`.
+`gh pr merge` is GraphQL too, so merges use the REST endpoint instead
 (the merge step below), and the merge gate reads over REST since 2026-10-28 (#2). Before that it read
 through `gh pr view` and `gh api graphql`, so in a cloud session it denied every merge at its first
 step (*"could not resolve the current repo (failing closed)"*, verified by feeding it a synthetic
@@ -122,21 +132,28 @@ that assumes prior conversation is an issue that cannot be worked.
 
 **Lifecycle** — one `status:` label at a time:
 
-1. Pick a `status: ready` issue respecting priority, or create one with type + priority +
-   `status: ready`.
-2. Flip to in-progress:
-   `gh issue edit <n> --remove-label "status: ready" --add-label "status: in-progress"`.
+1. Pick a `status: ready` issue respecting priority, or raise one with `/create-issue` (type +
+   priority + `status: ready`, or `status: blocked` with a comment saying what it waits for; nobody
+   assigned).
+2. Flip to in-progress: `bash .claude/scripts/issue-status.sh <n> in-progress`. That also **assigns
+   `searledan`**, the maintainer, who asked on 2026-11-04 to be assigned to an issue only while it is actively worked; every
+   other status unassigns them (`ISSUE_ASSIGNEE` overrides the login, and `ISSUE_ASSIGNEE=` leaves
+   assignees alone). The script adds the new label before removing the old, refuses a label the
+   repository lacks — adding an unknown label silently *creates* it — and reads the issue back, exiting
+   non-zero if it does not show the requested state. `.github/scripts/tests/issue-status.test.sh`
+   runs it against a stub `gh` in CI.
 3. Branch `<cc-type>/<short-description>`, where `<cc-type>` is the **Conventional-Commits** type used
    in the PR title — not the issue's type label. They map loosely: `feature` → `feat/…`,
    `documentation`/`content` → `docs/…`, `tech-debt` → `chore/…` or `refactor/…`, `bug` → `fix/…`,
-   `ops` → `ci/…` or `chore/…`.
+   `ops` → `ci/…` or `chore/…`; validation and test-only work of either type → `test/…`.
 4. Reference `#<n>` in commits where relevant.
 5. Open the PR with **`Closes #<n>`**. `.github/workflows/pr-title.yml` enforces the
    Conventional-Commits prefix on the PR *title*, and `main` takes squash merges — so the PR title
    becomes the commit subject on `main`. On squash-merge the issue auto-closes; flip it to
-   `status: complete` then, so a finished issue ends up *closed + `status: complete`*, distinguishable
+   `status: complete` then (`bash .claude/scripts/issue-status.sh <n> complete`), so a finished issue ends up *closed + `status: complete`*, distinguishable
    from one closed as won't-fix or duplicate.
-6. If work stalls, swap the status for `status: blocked` and comment what's blocking.
+6. If work stalls, `bash .claude/scripts/issue-status.sh <n> blocked` (which unassigns the maintainer) and
+   comment exactly what it is waiting for.
 
 **What actually gates a merge** — the `Secure branches` ruleset (id `26057156`), applied here on
 2026-10-28 as a field-for-field copy of vitally-mcp's (`16293585`), compared rule by rule (#2). It
@@ -426,17 +443,21 @@ the current head (58afb2b…)"* — which is the mistake that prompted the port.
 `feature.yml`, `tech-debt.yml`, `security.yml`, `ops.yml`, `documentation.yml`, `content.yml`.
 Filenames match the label they preset, and the shared four match the sibling repos. Each form
 presets its type label plus `status: ready`, and its title with the matching Conventional-Commits
-prefix; add a `priority:` label after creating. Blank issues stay enabled for quick notes and for
+prefix; add a `priority:` label after creating one through the web form (`/create-issue` sets it
+at creation). Blank issues stay enabled for quick notes and for
 `ux`. Bug and Feature carry server-specific fields (MCP client, server URL, a failure
 timestamp for correlating with Application Insights) — keep those if you edit the forms.
 
 `documentation` and `content` both map to `docs/…` branches but cover different audiences:
-**Documentation** is prose for humans (`CLAUDE.md`, `README.md`, `docs/`), whereas **Content** is the
+**Documentation** is prose for humans (`CLAUDE.md`, `README.md`, `ACCESS.md`, `docs/`), whereas **Content** is the
 copy an *LLM* reads — tool `[Description]` and `Title` values and `ZendeskServerInstructions.Text`.
 Content wording changes model behaviour (which tool gets picked, how it's called), so they are
 defects rather than cosmetics; the form asks for the observed effect to keep that distinction sharp.
 
-**Writing issues** — aim for "detailed enough to implement without further context":
+**Writing issues** — aim for "detailed enough to implement without further context". `/create-issue`
+walks through these, takes each type's sections from its form, and adds a duplicate check and a
+read-back. **Never put ticket, user or organisation content in an issue** — it is customer data;
+describe shapes, not contents.
 
 - **Title** — conveys the scope at a glance without reading the body.
 - **Lead paragraph** — what and why, plus how it was discovered if that matters.
@@ -469,7 +490,7 @@ Added for Zendesk:
 | `AddDistributedMemoryCache()` | backs the two above — **in-memory, so single replica** (below) |
 | `app.MapZendeskConnect()`, `app.MapZendeskUploads()` | `/zendesk/connect`, `/zendesk/callback`, `PUT /uploads/{slot}` — mapped before `UseAuthentication` and not behind the bearer requirement, because a browser or curl has no Entra token; each authenticates with a capability issued to a signed-in tool caller |
 
-⚠️ **Single replica is a correctness constraint, not a cost choice.** The `/oauth/*` proxy state (inherited from vitally-mcp), connect links, connect attempts and upload slots all live in process memory, and a token removed on one replica stays cached on another for up to `Zendesk:TokenCacheDuration`. `containerapps.tf` pins `max_replicas = 1`. Scaling out means registering a shared `IDistributedCache` (Redis) first and moving the OAuth proxy's `IMemoryCache` state onto it — a registration change for the Zendesk parts, a small code change for the proxy.
+⚠️ **Single replica is a correctness constraint, not a cost choice.** The `/oauth/*` proxy state (inherited from vitally-mcp), connect links, connect attempts, upload slots and `Bulk_get_ticket_conversations`'s two-calls-at-once gate (`TicketConversationsTools.Gate`, which is per account only because there is one process) all live in process memory, and a token removed on one replica stays cached on another for up to `Zendesk:TokenCacheDuration`. `containerapps.tf` pins `max_replicas = 1`. Scaling out means registering a shared `IDistributedCache` (Redis) first and moving the OAuth proxy's `IMemoryCache` state onto it — a registration change for the Zendesk parts, a small code change for the proxy.
 
 ### The Entra façade, RBAC, logging and audit — as vitally-mcp
 
@@ -482,7 +503,7 @@ These components are ported without behavioural change, and their rules hold her
 - **Upstream endpoints come from OIDC discovery**, checked against `Authority` (§4.3), cached 12 h with last-known-good fallback; startup refuses to boot without them (vitally-mcp#104).
 - **`/oauth/token` services only `authorization_code` and `refresh_token`** — it injects the confidential secret, so any other grant would mint tokens without a sign-in.
 - **Entitlement comes from live Entra group membership via Graph** (`Authorization:LiveGroupCheck`, transitive, keyed on `oid` — never `sub`), fresh → stale (up to `LiveGroupStaleSeconds`) → deny. No claim authorises while the live check is on (vitally-mcp#106, vitally-mcp#108, vitally-mcp#156).
-- **`ZendeskService.SendAsync` is the enforcement point**; `[Authorize]` discovery filtering shares `HasEffectivePermissionAsync` with it so they cannot disagree. `Authorization:ReadOnly` denies every non-GET for everyone.
+- **`ZendeskService.SendAsync` is the enforcement point**; `[Authorize]` discovery filtering shares `HasEffectivePermissionAsync` with it so they cannot disagree. `Authorization:ReadOnly` denies every non-GET for everyone; `docs/runbooks/read-only-and-rbac.md` says what it is and is not for, and how to verify staging is serving it.
 - **Log levels are a security control and live in `Program.cs`**, not `appsettings.json` (excluded from the image) or environment variables (lost on a recreate). Failure records log the exception *type*, the status and the resource *type* — never a message, an attached exception, a body or the rest of the path (vitally-mcp#94).
 - **Four audit record shapes** — tool call (primary: caller `oid`, tool, arguments, record ids touched, tier, staleness, outcome, correlation id), action (per upstream call), service denial, tier denial. Tool arguments are recorded; upstream response bodies never are. Records route to `AppEvents` when `ApplicationInsights__ConnectionString` is set, and must not depend on trace sampling (vitally-mcp#147, vitally-mcp#178).
 
@@ -508,7 +529,8 @@ here, in `ZendeskMetrics`):
 - **Calls that fail before a response have no duration.** A timeout, a DNS failure or a refused
   connection never reaches `LogAction`, so there is no `ZendeskUpstreamCall` row. (A non-2xx
   response is different: `SendAsync` logs it, with its duration, before throwing.) Timeouts are the slowest calls of
-  all; look for them in the failure records. The clock also starts *after* the caller's credential
+  all; look for them in the failure records (`Bulk_get_ticket_conversations` reports a timed-out
+  ticket in its result, and logs it as `Tool call partly failed` with the correlation id). The clock also starts *after* the caller's credential
   is resolved, so a cold Key Vault read of the person's token, or a token refresh, shows in the
   tool-call duration and in no upstream one. The same goes for recovery after a `401`: the rejected
   call and its retry each get a row, and the `OnTokenRejectedAsync` refresh between them is in
@@ -624,15 +646,15 @@ Zendesk ──302──> /zendesk/callback?code&state ──> exchange code ─�
 |---|---|
 | `ZendeskConnectLinks` | A link is 256 random bits naming the Entra `oid` and sign-in name it was issued to, valid `ConnectLinkLifetime` (15 min), spent only on a successful store. Issued **only** inside an authenticated caller's own tool result. |
 | `/zendesk/connect` | Peeks the link (an abandoned Zendesk sign-in can be retried), starts an attempt with a fresh PKCE verifier, pins `state` to the browser with a cookie. |
-| `/zendesk/callback` | Requires cookie == `state` (fixed-time compare) — a code completed in another browser is login CSRF. Spends the attempt. Exchanges the code with the client secret **and** the verifier. Reads `/api/v2/users/me` with the new token and refuses unless the role is agent/admin and, with `RequireEmailMatch` (default on), the email equals the sign-in name case-insensitively. A refused token is revoked immediately. Result pages HTML-encode everything Zendesk returned. |
+| `/zendesk/callback` | Requires cookie == `state` (fixed-time compare) — a code completed in another browser is login CSRF. Spends the attempt. Exchanges the code with the client secret **and** the verifier. Reads `/api/v2/users/me` with the new token and refuses unless the role is agent/admin and, with `RequireEmailMatch` (default on), the email equals the sign-in name case-insensitively. A refused token is revoked immediately. A reconnect revokes the grant it replaces with `RevokeGrantAsync`, which refreshes an expired grant first: revoking an expired access token answers 401, read as revoked, while its refresh token stays live (#12). Result pages HTML-encode everything Zendesk returned. |
 | Sign-in name | `CallerIdentity.TryGetSignInName` prefers `upn` (an optional claim `entra.tf` requests) over `preferred_username`, which Microsoft documents as mutable. |
-| Startup guards | `RequireEmailMatch=false` is refused unless `OAuth:NoAuth`; the development token is refused unless NoAuth, no Key Vault **and** the Development environment; connect links and the callback refuse to derive their origin from the request unless NoAuth — behind sign-in `OAuth:PublicBaseUrl` is required. |
+| Startup guards | `RequireEmailMatch=false` is refused unless `OAuth:NoAuth`; `Authorization:Enabled=false` (no tier checks at all) is refused unless NoAuth, so local per-user OAuth runs with the tier checks on (#12); the development token is refused unless NoAuth, no Key Vault **and** the Development environment; connect links and the callback refuse to derive their origin from the request unless NoAuth — behind sign-in `OAuth:PublicBaseUrl` is required. |
 | Why the email match matters | Without it, anyone who opens a person's link — forwarded, leaked, or planted in a ticket — attaches **their** Zendesk account to that person's identity, and every later call that person makes acts as the opener. The cookie stops a planted *code*; the email match stops a planted *link*. Keep both. |
 | `ZendeskCredentialProvider` | Reads the caller's `oid` (no `oid` → refused); no token → connect link; token within 2 min of expiry → refresh **under a per-person lock** (Zendesk rotates the refresh token, so a second concurrent refresh would present a spent token, fail `invalid_grant`, and disconnect someone who did nothing wrong); refresh refused with `invalid_grant`/`invalid_token`/`unauthorized_client` → forget the token and hand back a link. |
-| `ZendeskService` on a `401` | `OnTokenRejectedAsync(rejectedHeader)` decides, **under the person's lock and about the token that was actually sent**: if the stored token has since changed (a refresh or reconnect landed while the request was in flight), retry with it; else, if a refresh token exists, refresh and retry once; only then forget the grant and fail with a fresh connect link. Forgetting "the current token" on any 401 would wipe a working grant that replaced the rejected one. |
+| `ZendeskService` on a `401` | `OnTokenRejectedAsync(rejectedHeader)` decides, **under the person's lock and about the token that was actually sent**: if the stored token has since changed (a refresh or reconnect landed while the request was in flight), retry with it; else, if a refresh token exists, refresh and retry once; only then revoke the grant at Zendesk, forget it, and fail with a fresh connect link — revoked first because a 401 straight after a refresh may be specific to one endpoint, leaving the fresh grant live in Key Vault history otherwise (#12). Forgetting "the current token" on any 401 would wipe a working grant that replaced the rejected one. |
 | `ZendeskConnectionRequiredException` | Surfaced verbatim by `ToolErrorResult` — its message *is* the link. `ZendeskServerInstructions` tells the model to hand it over unchanged. |
 | Refresh persistence | The store caches **before** it writes to Key Vault, and a failed write after a refresh is logged, not thrown: Zendesk has already spent the old refresh token, so losing the new one would disconnect the person. The connect callback stores under the person's lock, so an in-flight refresh cannot overwrite a fresh connection. |
-| `KeyVaultZendeskTokenStore` | One secret per person, `{TokenSecretPrefix}{oid}` (`zendesk-user-` in production, `zendesk-staging-user-` in staging, so the targets never share a token), JSON, tagged `kind=zendesk-user-token`, `ExpiresOn` = refresh expiry. Reads cached `TokenCacheDuration`, including "not connected". **Removal writes a tombstone version, never a delete**: soft delete is on, and a soft-deleted name cannot be set again until purged, so a delete would make reconnecting fail for the whole retention window. Older versions keep the old token, which is why disconnecting revokes at Zendesk first. |
+| `KeyVaultZendeskTokenStore` | One secret per person, `{TokenSecretPrefix}{oid}` (`zendesk-user-` in production, `zendesk-staging-user-` in staging, so the targets never share a token), JSON, tagged `kind=zendesk-user-token`, `ExpiresOn` = refresh expiry. Reads cached `TokenCacheDuration`, including "not connected". A value that is neither a grant nor a tombstone is **not** "not connected" — the grant in it may be live — so it is logged (with the secret version), never cached, and thrown as `ZendeskStoredTokenUnreadableException` carrying whatever tokens can be read; `ZendeskCredentialProvider` revokes those under the person's lock and tombstones it, and a reconnect revokes them (#12). That happens on whichever call meets the value first, so `Get_zendesk_connection`, a read-tier tool, can revoke and tombstone, outside `Authorization:ReadOnly`'s verb check as `Disconnect_zendesk` is. Every discard path — disconnect, reconnect, a final 401, an unreadable value — revokes through `RevokeGrantAsync`, and logs *"may still be live at Zendesk"* when it cannot confirm it. **Removal writes a tombstone version, never a delete**: soft delete is on, and a soft-deleted name cannot be set again until purged, so a delete would make reconnecting fail for the whole retention window. Older versions keep the old token, which is why disconnecting revokes at Zendesk first. |
 | Clients and scopes | **One Zendesk OAuth client per target** (split 2026-11-04): production `fiscal_zendesk_mcp` requests `read write`; staging `fiscal_zendesk_mcp_staging` requests `read` (`Zendesk__OAuthScopes`) with its own secret (`Zendesk__OAuthClientSecretRef` = `zendesk-staging-oauth-client-secret`). Each client's **allowed scopes** in Admin Centre equal what its target requests, so a staging token cannot write to Zendesk even with `Authorization__ReadOnly` lifted, and each lists only its own callback. A `read`-only token **can** revoke itself (`DELETE /api/v2/oauth/tokens/current`): confirmed live on staging 2026-11-04 16:39Z — `Disconnect_zendesk` returned `disconnected`, Key Vault wrote the tombstone, and no revocation warning was logged — so the disconnect and refused-login revocations work on staging's client too. See `docs/runbooks/entra-and-zendesk-oauth.md`. |
 | Lifetimes | access tokens requested at 2 h and refresh tokens at 90 days (`AccessTokenExpiresInSeconds` null requests Zendesk's legacy non-expiring token instead). |
 | Managed identity | Needs **Key Vault Secrets Officer** on the vault (it writes), which also lets it overwrite `zendesk-oauth-client-secret`. Accepted: the identity already holds every person's token; see `infra/terraform/identity.tf`. |
@@ -655,7 +677,7 @@ Zendesk ──302──> /zendesk/callback?code&state ──> exchange code ─�
 
 **`AuditRecordIds` for Zendesk shapes:** ids are numbers (rendered as raw text); the primary collection is the first array of objects in the body (`tickets`, `results`, `articles` — Zendesk serialises it before sideloads such as `users`), `meta`/`links` ignored; a single record is bare or wrapped (`{"ticket":{…}}`). The mutation-URL fallback accepts only a **numeric** last segment — Zendesk paths also end in locales and collection names, and recording `en-gb` as a record id would be a fabricated identifier.
 
-**Paging.** Tools that page for the caller pass Zendesk's cursor through (`after_cursor` → `page[after]`, `pagination_info {has_more, next_cursor, page_size}`). `GetAllPagesAsync` pages on the server's behalf (sideloads merged) up to `MaxAutoPageFetches`, marking the audit record truncated when it stops early. Analytics tools read at most `MaxAnalyticsTickets` tickets and refuse beyond it, saying how to split the range.
+**Paging.** Tools that page for the caller pass Zendesk's cursor through (`after_cursor` → `page[after]`, `pagination_info {has_more, next_cursor, page_size}`). `GetAllPagesAsync` pages on the server's behalf (sideloads merged) up to `MaxAutoPageFetches`, marking the audit record truncated when it stops early. A page envelope it cannot read (not an object, or a `meta` of the wrong shape) throws `ZendeskResponseFormatException` rather than returning a silently short result; an optional `beforeNextPage` callback runs before each later page and may throw to stop paging (`Bulk_get_ticket_conversations` stops at its deadline that way, never cancelling a request in flight). Analytics tools read at most `MaxAnalyticsTickets` tickets and refuse beyond it, saying how to split the range.
 
 **Rate limits.** Zendesk's budget is per *account* (200–2,500 requests a minute by plan) and shared with every other integration. The handler retries `429` on `Retry-After` and warns as `X-Rate-Limit-Remaining` runs low; analytics tools bound their own concurrency.
 
@@ -677,16 +699,16 @@ Ticket comments, article bodies and user fields are written by customers and can
 
 - One `[McpServerToolType] public static class` per area in `ZendeskMcp/Tools/`; methods `public static async Task<string>` returning compact JSON (a `CallToolResult` only for non-text content — `Get_ticket_attachment` returns an image block); first parameter `ZendeskService zendesk`, last `CancellationToken`.
 - Names in vitally-mcp's style (`Search_tickets`). **Parameters are snake_case and match Swifteq's schema**, so prompts written for either server work with both.
-- All four hints set explicitly, `ReadOnly` xor `Destructive`. `Get_`/`List_`/`Search_`/`Count_`/`Find_`/`Preview_`/`Export_` are read tools (`zendesk:read`, read-only, idempotent); everything that changes Zendesk is `zendesk:write`. **`Disconnect_zendesk` is the one deliberate exception** — destructive in annotation, read tier in policy — because it touches only the caller's own connection and every person who can use anything must be able to manage that. For the same reason `ReadOnlyToolFilter` keeps it in read-only mode, the emergency lock-down, when cutting one's own connection matters most; its revoke goes through `ZendeskOAuthClient`, so the read-only verb check never applied to it (found 2026-11-04, when staging offered no way to disconnect).
+- All four hints set explicitly, `ReadOnly` xor `Destructive`. `Get_`/`List_`/`Search_`/`Count_`/`Find_`/`Preview_`/`Export_`/`Bulk_get_` are read tools (`zendesk:read`, read-only, idempotent); everything that changes Zendesk is `zendesk:write`. **`Disconnect_zendesk` is the one deliberate exception** — destructive in annotation, read tier in policy — because it touches only the caller's own connection and every person who can use anything must be able to manage that. For the same reason `ReadOnlyToolFilter` keeps it in read-only mode, the emergency lock-down, when cutting one's own connection matters most; its revoke goes through `ZendeskOAuthClient`, so the read-only verb check never applied to it (found 2026-11-04, when staging offered no way to disconnect).
 - Validate arguments and throw `ArgumentException` naming the parameter — the message reaches the model.
-- Shared helpers: `ToolJson` (query pairs, picking fields, pagination block, page-size and id validation, feature refusal), `TicketSearchQuery` (the ticket filters shared by Search/Count/metrics/SLA tools), `TicketSla` (the `sla` object shared by Get_ticket, Search_tickets, Get_sla_queue and Get_sla_summary).
+- Shared helpers: `ToolJson` (query pairs, picking fields, pagination block, page-size and id validation, feature refusal), `TicketSearchQuery` (the ticket filters shared by Search/Count/metrics/SLA tools; `channel` reuses `TicketCountHelpers.Channels`, so a channel filter selects exactly its `group_by channel` group, and `custom_fields` is checked against the account's field definitions before any search — tools build the query with `TicketSearchHelpers.BuildQueryAsync`, not `TicketSearchQuery.Build`), `TicketSla` (the `sla` object shared by Get_ticket, Search_tickets, Get_sla_queue and Get_sla_summary).
 
 ### Catalogue
 
 | Area | File | Tools |
 |---|---|---|
 | Connection | `ConnectionTools.cs` | `Get_zendesk_connection`, `Get_zendesk_connect_link`, `Disconnect_zendesk` |
-| Tickets | `TicketsTools.cs`, `TicketAttachmentsTools.cs` | `Search_tickets`, `Count_tickets`, `Get_ticket`, `Get_ticket_conversation`, `Create_ticket`, `Update_ticket`, `Get_ticket_attachment`, `Request_ticket_attachment_upload` |
+| Tickets | `TicketsTools.cs`, `TicketConversationsTools.cs`, `TicketAttachmentsTools.cs` | `Search_tickets`, `Count_tickets`, `Get_ticket`, `Get_ticket_conversation`, `Bulk_get_ticket_conversations`, `Create_ticket`, `Update_ticket`, `Get_ticket_attachment`, `Request_ticket_attachment_upload` |
 | Reporting | `AnalyticsTools.cs`, `SatisfactionTools.cs`, `TicketSla.cs` | `Get_ticket_metrics_summary`, `Get_sla_summary`, `Get_sla_queue`, `Get_satisfaction_ratings` |
 | Macros | `MacrosTools.cs` | `Search_macros`, `Preview_macro`, `Apply_macro`, `Create_macro`, `Update_macro`, `Set_macros_active` |
 | People | `UsersTools.cs`, `OrganizationsTools.cs` | `Search_users`, `Find_agent_by_name`, `Search_organizations`, `Add_user_to_organization` |
@@ -721,7 +743,7 @@ The tests are immune to a shell set up to run the server locally: `AmbientConfig
 
 | Area | Tests |
 |---|---|
-| Per-user OAuth | `ZendeskCredentialProviderTests` (own bearer, connect link with no request made, 401 → forget + link, refresh and rotation stored, one refresh under concurrency, refused refresh, development token), `ZendeskConnectEndpointsTests` (full flow through the host, wrong email / end user refused **and revoked**, missing cookie, one-shot link and state, encoded result page), `ZendeskTokenStoreTests` (secret shape, absence cached, tombstone not delete) |
+| Per-user OAuth | `ZendeskCredentialProviderTests` (own bearer, connect link with no request made, 401 → forget + link, refresh and rotation stored, one refresh under concurrency, refused refresh, development token, a final 401 revokes before forgetting, an unreadable grant revoked and tombstoned), `ZendeskConnectEndpointsTests` (full flow through the host, wrong email / end user refused **and revoked**, missing cookie, one-shot link and state, encoded result page, reconnect over an expired or unreadable grant), `ZendeskTokenStoreTests` (secret shape, absence cached, tombstone not delete, unreadable refused and never cached), `ZendeskOAuthClientRevokeGrantTests` (refresh before revoking, a 401 not taken as proof while a refresh token lives), `AuthorizationGuardStartupTests` |
 | Transport | `ZendeskServiceTests` (escaping, error bodies, cursor paging and cap, brand and download host boundaries, RBAC backstop), `AuditRecordIdsTests`, `ZendeskRateLimitHandlerTests` |
 | Uploads | `ZendeskUploadsTests` (through the host: exact size, one use, inline, identity and claims carried, tier re-checked) |
 | Shared components | everything ported from vitally-mcp — OAuth proxy, discovery, RBAC, Graph resolver, stale entitlement, audit composition, logging filters, telemetry redaction, metrics |
@@ -857,7 +879,9 @@ Steps 3–7 are `curl` against the public origin, so they run anywhere, a cloud 
 
 What is left for a person, because it needs a real token: sign-in per tier, `tools/list` as a
 **department-nested** user, a reader denied a write tool, and decoding the token for `aud`, `iss`,
-`oid` and `upn`. #4 writes that up as `docs/runbooks/zendesk-oauth-staging-validation.md`.
+`oid` and `upn`. `docs/runbooks/zendesk-oauth-staging-validation.md` (#4) covers sign-in and the
+read tier (its step 3); the department-nested user, a reader denied a write tool and the token
+decode are not written up there yet.
 
 #### If an identity change fails
 
@@ -912,11 +936,11 @@ a green no-op. Train-driven deploys run inside `release.yml`'s run, so they neve
 
 ### Staging validation
 
-Before production, on staging against the real Zendesk account, with `Authorization__ReadOnly=true`. **Since 2026-11-04 staging's Zendesk OAuth client allows only `read`**, so write checks cannot run through staging at all — not even with the guard lifted: they run through production, on throwaway records, with the care below.
+Steps 1, 4, 5 and 6 are written out, with the log queries that verify them, in `docs/runbooks/zendesk-oauth-staging-validation.md`. Before production, on staging against the real Zendesk account, with `Authorization__ReadOnly=true`. **Since 2026-11-04 staging's Zendesk OAuth client allows only `read`**, so write checks cannot run through staging at all — not even with the guard lifted: they run through production, on throwaway records, with the care below.
 
 1. Sign in (Entra), then connect a Zendesk agent; confirm a mismatched Zendesk login is refused and its token revoked.
 2. Run every read tool once, and every write tool against a test ticket, test macro (inactive) and draft article, with the feature switches as production will have them.
-3. Check each place the code says `// Unverified against the live API` — the response shapes in particular — and remove the marker once confirmed. The read-side markers were settled live on 2026-10-28; what remains is write endpoints (docs-checked only) and shapes the validation account could not show (no messaging tickets, checkbox fields, custom objects, macro attachments or next-reply SLA targets; one Help Center locale; agent and account in the same time zone).
+3. Check each place the code says `// Unverified against the live API` — the response shapes in particular — and remove the marker once confirmed. The read-side markers were settled live on 2026-10-28; what remains is write endpoints (docs-checked only) and shapes the validation account could not show (no messaging tickets, checkbox fields, custom objects, macro attachments or next-reply SLA targets; one Help Center locale; agent and account in the same time zone; and #26's `custom_fields` `has_value` on anything but a drop-down — confirmed on a drop-down, with repeated `via:` terms ORing and two custom fields ANDing, through Swifteq's server on 2026-11-04).
 4. Confirm refresh: leave a connection past its access-token expiry and call again.
 5. Confirm the audit records in `AppEvents` (`AppRoleName` separates staging) carry the expected ids.
 6. Disconnect, and confirm the token is revoked in Zendesk and the secret reads as a tombstone.
@@ -926,9 +950,9 @@ Where each step stands, mapped to its issue (updated 2026-11-04):
 | Step | State | Issue |
 |---|---|---|
 | Staging itself | **built** 2026-10-28/29, read-only, at `https://zendesk-mcp-staging.fiscaltec.com` | #3 |
-| 1 — sign-in, connect, mismatched login refused and revoked | **sign-in and connect done** on both origins (2026-10-29, Phase 14); **an end-user login refused and revoked** on staging (2026-11-04); the email-mismatch branch not exercised live (no spare agent login; accepted); becomes a standing runbook, `docs/runbooks/zendesk-oauth-staging-validation.md`, modelled on vitally-mcp's `entra-cutover-staging-validation.md` | #4 |
+| 1 — sign-in, connect, mismatched login refused and revoked | **sign-in and connect done** on both origins (2026-10-29, Phase 14); **an end-user login refused and revoked** on staging (2026-11-04); the email-mismatch branch not exercised live (no spare agent login; accepted); the standing runbook is `docs/runbooks/zendesk-oauth-staging-validation.md` (every step and log check, as run on 2026-11-04) | #4 |
 | 2 — every read and write tool | **done live** with a development token (PR #1), as an **admin**; repeating the reads as an ordinary agent is open | #6 |
-| 3 — `Unverified` markers | read-side settled; eight remain that need data the account lacks | #7 |
+| 3 — `Unverified` markers | read-side settled; eight remain that need data the account lacks, plus #26's `has_value` on non-drop-down fields and messaging channels | #7, #26 |
 | 4 — refresh | **done** on production 2026-11-04: a six-day-old grant refreshed, the rotated token persisted (Key Vault `SecretSet`), across the `v1.1.1` deploy | #4 |
 | 5 — audit records in `AppEvents` | **partly done** 2026-11-04 on production: a tool-call record carries the caller `oid`, tool, arguments, record id, tier, client and outcome, and its correlation id joins the upstream record; multi-record searches, the denial records and the negative control are open | #5 |
 | 6 — disconnect, revoke, tombstone | **done** on production 2026-11-04 (staging could not, until `ReadOnlyToolFilter` kept `Disconnect_zendesk`): refresh, revoke, tombstone `SecretSet`, no delete, then reconnect | #4 |
