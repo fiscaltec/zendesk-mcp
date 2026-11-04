@@ -1,0 +1,116 @@
+#!/usr/bin/env bash
+# Stateful stub `gh` for issue-status.test.sh. It models just enough of GitHub's issues REST API
+# for .claude/scripts/issue-status.sh, with state in $FAKE_GH_DIR:
+#
+#   repo-labels   one label name per line: the labels that exist in the repository
+#   labels        one per line: the issue's labels
+#   assignees     one per line: the issue's assignees
+#   calls.log     every call, appended as "METHOD path [field=value ...]"
+#   fail          optional; lines "METHOD path-prefix" -- a matching call fails (as a refused call would)
+#   lose-adds     optional; if present, POST .../labels reports success but changes nothing
+#   lose-assigns  optional; POST .../assignees reports success but changes nothing (as GitHub does
+#                 for a login it cannot assign)
+#   lose-unassigns optional; DELETE .../assignees reports success but changes nothing
+#   no-repo       optional; GET repos/{owner}/{repo} answers 404 (wrong or invisible repository)
+#   lose-removes  optional; DELETE .../labels/<name> reports success but changes nothing
+#   is-pr         optional; the issue is a pull request (GET carries a pull_request key)
+#   stderr-notice optional; every issue/label call prints a notice on stderr and still succeeds
+#
+# Only issue 11 exists; any other number answers 404, so a script addressing the wrong issue fails.
+# DELETE .../labels/ with an empty name removes EVERY label, as GitHub's endpoint does.
+#
+# Like real gh, -f with no -X means POST. Label and login lookups are case-insensitive, as GitHub's
+# are. Empty arrays are expanded with ${a[@]+...} so the stub also runs on macOS's bash 3.2.
+#
+# Supported: gh api [-X METHOD] <path> [-f key=value ...] [--jq expr]. Paths keep gh's literal
+# `repos/{owner}/{repo}/` prefix. Anything else fails, so an unexpected call is never a silent pass.
+set -uo pipefail
+shopt -s extglob
+[ "${1:-}" = "api" ] || { echo "fake-gh-issues: only 'gh api' is supported (got: $*)" >&2; exit 2; }
+shift
+method="" path="" expr="." fields=()
+while [ $# -gt 0 ]; do
+	case "$1" in
+	-X | --method) method=$2; shift ;;
+	--jq) expr=$2; shift ;;
+	-f | -F | --field | --raw-field) fields+=("$2"); shift ;;
+	-*) echo "fake-gh-issues: unsupported flag $1" >&2; exit 2 ;;
+	*) [ -z "$path" ] && path=$1 ;;
+	esac
+	shift
+done
+if [ -z "$method" ]; then
+	if [ ${#fields[@]} -gt 0 ]; then method=POST; else method=GET; fi
+fi
+D=$FAKE_GH_DIR
+touch "$D/labels" "$D/assignees" "$D/repo-labels"
+echo "$method $path ${fields[*]+${fields[*]}}" >> "$D/calls.log"
+
+if [ -f "$D/fail" ]; then
+	while read -r fm fp; do
+		[ "$fm" = "$method" ] && [[ "$path" == "$fp"* ]] \
+			&& { echo "gh: injected failure (HTTP 500)" >&2; exit 1; }
+	done < "$D/fail"
+fi
+
+urldecode() { local s=${1//+/ }; printf '%b' "${s//%/\\x}"; }
+field() { local f; for f in ${fields[@]+"${fields[@]}"}; do [[ "$f" == "$1="* ]] && echo "${f#*=}"; done; }
+lines_json() { jq -Rn --arg k "$2" '[inputs | select(length > 0) | {($k): .}]' < "$1"; }
+issue_json() {
+	jq -n --argjson l "$(lines_json "$D/labels" name)" --argjson a "$(lines_json "$D/assignees" login)" \
+		--argjson pr "$([ -f "$D/is-pr" ] && echo true || echo false)" \
+		'{number: 11, labels: $l, assignees: $a} + (if $pr then {pull_request: {}} else {} end)'
+}
+remove_line() { grep -vxF -- "$2" "$1" > "$1.tmp"; mv "$1.tmp" "$1"; }
+out() { jq -r "$expr" <<< "$1"; }
+
+if [ "$method $path" = 'GET repos/{owner}/{repo}' ]; then
+	[ -f "$D/no-repo" ] && { echo "gh: Not Found (HTTP 404)" >&2; exit 1; }
+	out '{"full_name": "example/repo"}'; exit 0
+fi
+[ -f "$D/stderr-notice" ] && echo "warning: a harmless notice on stderr" >&2
+prefix='repos/{owner}/{repo}/'
+[[ "$path" == "$prefix"* ]] || { echo "fake-gh-issues: unexpected path $path" >&2; exit 2; }
+rest=${path#"$prefix"}
+if [[ "$rest" == issues/* ]] && ! [[ "$rest" =~ ^issues/11(/|$) ]]; then
+	echo "gh: Not Found (HTTP 404)" >&2; exit 1
+fi
+
+case "$method $rest" in
+"GET labels/"*)
+	name=$(urldecode "${rest#labels/}")
+	stored=$(grep -ixF -- "$name" "$D/repo-labels" | head -1)
+	[ -n "$stored" ] || { echo "gh: Not Found (HTTP 404)" >&2; exit 1; }
+	out "$(jq -n --arg n "$stored" '{name: $n}')" ;;
+"GET issues/"+([0-9]))
+	out "$(issue_json)" ;;
+"POST issues/"+([0-9])"/labels")
+	if [ ! -f "$D/lose-adds" ]; then
+		while IFS= read -r l; do
+			grep -qxF -- "$l" "$D/labels" || echo "$l" >> "$D/labels"
+		done < <(field 'labels[]')
+	fi
+	out "$(lines_json "$D/labels" name)" ;;
+"DELETE issues/"+([0-9])"/labels/"*)
+	name=$(urldecode "${rest##*/labels/}")
+	if [ -z "$name" ]; then : > "$D/labels"; out '[]'; exit 0; fi
+	grep -qxF -- "$name" "$D/labels" || { echo "gh: Label does not exist (HTTP 404)" >&2; exit 1; }
+	[ -f "$D/lose-removes" ] || remove_line "$D/labels" "$name"
+	out "$(lines_json "$D/labels" name)" ;;
+"POST issues/"+([0-9])"/assignees")
+	if [ ! -f "$D/lose-assigns" ]; then
+		while IFS= read -r a; do
+			grep -qixF -- "$a" "$D/assignees" || echo "$a" >> "$D/assignees"
+		done < <(field 'assignees[]')
+	fi
+	out "$(issue_json)" ;;
+"DELETE issues/"+([0-9])"/assignees")
+	if [ ! -f "$D/lose-unassigns" ]; then
+		while IFS= read -r a; do
+			grep -vixF -- "$a" "$D/assignees" > "$D/assignees.tmp"; mv "$D/assignees.tmp" "$D/assignees"
+		done < <(field 'assignees[]')
+	fi
+	out "$(issue_json)" ;;
+*)
+	echo "fake-gh-issues: unsupported call $method $path" >&2; exit 2 ;;
+esac

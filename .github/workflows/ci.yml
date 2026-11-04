@@ -79,6 +79,13 @@ jobs:
         if: ${{ !cancelled() }}
         run: bash .github/scripts/tests/pre-merge-copilot-gate.test.sh
 
+      # .claude/scripts/issue-status.sh moves issues between status labels over REST. A regression
+      # could leave an issue with no status or quietly create a stray label, so it is gated too.
+      # Runs against a stateful stub `gh`; needs only bash and jq.
+      - name: Test the issue-status script
+        if: ${{ !cancelled() }}
+        run: bash .github/scripts/tests/issue-status.test.sh
+
       - name: Upload test results
         if: always()
         uses: actions/upload-artifact@v7
