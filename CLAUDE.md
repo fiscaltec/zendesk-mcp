@@ -13,8 +13,8 @@ A Model Context Protocol (MCP) server in C# giving FISCAL staff access to Zendes
 **Keeping in step with vitally-mcp.** The port of everything outside the source and test folders (workflows, scripts, templates, runbooks, `CLAUDE.md` sections) is current to vitally-mcp **`0c6d4e1`** (2026-10-26), audited on 2026-11-04 in #10, whose decision table records what was ported, adapted or judged not applicable, and why. Findings that flow the other way go to #17. To check for drift, diff from that commit rather than re-auditing:
 
 ```bash
-git -C <vitally-mcp clone> fetch origin main   # an unfetched origin/main prints nothing, exit 0 — not "no drift"
-git -C <vitally-mcp clone> log --oneline 0c6d4e1..origin/main -- . ':!VitallyMcp' ':!VitallyMcp.Tests'
+# One command: a failed or skipped fetch leaves a stale origin/main, which prints nothing with exit 0 — not "no drift".
+git -C <vitally-mcp clone> fetch origin main && git -C <vitally-mcp clone> log --oneline 0c6d4e1..origin/main -- . ':!VitallyMcp' ':!VitallyMcp.Tests'
 ```
 
 That lists vitally-mcp's non-source changes since this audit; decide each as #10 did, then move the commit named here. Run on 2026-11-04, it listed nothing: the one later commit, `fdc6f5e` (#197), touches only the two `.csproj` files. ⚠️ The clone must hold history back to `0c6d4e1`: in a `--depth 1` clone the command fails with `fatal: bad revision` (exit 128), which is not "no drift". Check the exit status, not just the empty output. Source drift (a fix to a shared component such as the OAuth proxy, `ToolAuthorizer` or the Graph resolver) is out of this command's scope: list it with the same range over `-- VitallyMcp`, and read each commit, since the code here was ported and renamed rather than copied file for file.

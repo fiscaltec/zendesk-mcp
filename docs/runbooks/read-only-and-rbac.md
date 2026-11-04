@@ -115,12 +115,13 @@ runbook for it under #4):
 
 - A reader never sees a write tool (tier filtering hides it), and a raw `tools/call` to one is refused
   at the per-tool `[Authorize]` check (`ZendeskPermissionHandler`) whatever `ReadOnly` says. So this
-  check runs on staging as it stands, with no lift.
+  check runs on staging as it stands, with no lift. For **that refused call**, look in `AppEvents`
+  for a record keyed by the reader's Entra **object id**, and expect a **`ZendeskToolCallDenied`**
+  (`LogToolCallDenied`), not a `ZendeskUpstreamDenied` (`LogDenied`). The SDK's authorisation filter
+  rejects an out-of-tier call before `ZendeskService.SendAsync` runs, and `LogDenied` is reached only
+  from inside `SendAsync`. If you look for the wrong event, you cannot tell it apart from the denial
+  not being audited at all.
 - An editor's write succeeds. That needs a write-capable Zendesk token, so it runs on production
-  against a throwaway record. Look for the denial in
-`AppEvents` keyed by the caller's Entra **object id**, and expect a **`ZendeskToolCallDenied`**
-record (`LogToolCallDenied`), not `ZendeskUpstreamDenied` (`LogDenied`). The SDK's authorisation filter rejects an out-of-tier call at the per-tool `[Authorize]`
-check, before `ZendeskService.SendAsync` runs, and `LogDenied` is reached only from inside
-`SendAsync`. If you look for the wrong event, you cannot tell it apart from the denial not being
-audited at all. (A read-only refusal for a caller whose tier allows the tool is the other way round: its
+  against a throwaway record, and it records a `ZendeskToolCall` and its `ZendeskUpstreamCall`, not a
+  denial. (A read-only refusal for a caller whose tier allows the tool is the other way round: its
 non-GET call is refused inside `SendAsync`, so it is a `ZendeskUpstreamDenied`.)
