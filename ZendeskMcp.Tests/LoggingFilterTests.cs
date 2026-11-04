@@ -406,10 +406,12 @@ public class LoggingFilterTests
     /// <summary>
     /// Every configuration prefix <c>Program.cs</c> binds from the environment. Anything under these
     /// is cleared before composing, so the host sees exactly <see cref="RequiredSettings"/>.
+    ///
+    /// <para>Shared with <see cref="AmbientConfiguration"/>, which clears whatever the shell exported
+    /// before any test runs (#8). This class still clears for itself because sibling fixtures in the
+    /// collection can leave values behind.</para>
     /// </summary>
-    private static readonly string[] ConfigurationPrefixes =
-        ["OAuth__", "Authorization__", "Zendesk__", "Audit__", "ToolsListCache__", "Logging__",
-         "ApplicationInsights__"];
+    private static readonly string[] ConfigurationPrefixes = [.. AmbientConfiguration.SectionPrefixes];
 
     // Logging__ is in that list for a reason specific to this class: WebApplication.CreateBuilder
     // reads it, so an ambient Logging__LogLevel__Default=Warning makes
