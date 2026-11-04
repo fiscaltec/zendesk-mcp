@@ -889,7 +889,9 @@ Steps 3–7 are `curl` against the public origin, so they run anywhere, a cloud 
 
 What is left for a person, because it needs a real token: sign-in per tier, `tools/list` as a
 **department-nested** user, a reader denied a write tool, and decoding the token for `aud`, `iss`,
-`oid` and `upn`. #4 writes that up as `docs/runbooks/zendesk-oauth-staging-validation.md`.
+`oid` and `upn`. `docs/runbooks/zendesk-oauth-staging-validation.md` (#4) covers sign-in and the
+read tier (its step 3); the department-nested user, a reader denied a write tool and the token
+decode are not written up there yet.
 
 #### If an identity change fails
 
@@ -944,7 +946,7 @@ a green no-op. Train-driven deploys run inside `release.yml`'s run, so they neve
 
 ### Staging validation
 
-Before production, on staging against the real Zendesk account, with `Authorization__ReadOnly=true`. **Since 2026-11-04 staging's Zendesk OAuth client allows only `read`**, so write checks cannot run through staging at all — not even with the guard lifted: they run through production, on throwaway records, with the care below.
+Steps 1, 4, 5 and 6 are written out, with the log queries that verify them, in `docs/runbooks/zendesk-oauth-staging-validation.md`. Before production, on staging against the real Zendesk account, with `Authorization__ReadOnly=true`. **Since 2026-11-04 staging's Zendesk OAuth client allows only `read`**, so write checks cannot run through staging at all — not even with the guard lifted: they run through production, on throwaway records, with the care below.
 
 1. Sign in (Entra), then connect a Zendesk agent; confirm a mismatched Zendesk login is refused and its token revoked.
 2. Run every read tool once, and every write tool against a test ticket, test macro (inactive) and draft article, with the feature switches as production will have them.
@@ -958,7 +960,7 @@ Where each step stands, mapped to its issue (updated 2026-11-04):
 | Step | State | Issue |
 |---|---|---|
 | Staging itself | **built** 2026-10-28/29, read-only, at `https://zendesk-mcp-staging.fiscaltec.com` | #3 |
-| 1 — sign-in, connect, mismatched login refused and revoked | **sign-in and connect done** on both origins (2026-10-29, Phase 14); **an end-user login refused and revoked** on staging (2026-11-04); the email-mismatch branch not exercised live (no spare agent login; accepted); becomes a standing runbook, `docs/runbooks/zendesk-oauth-staging-validation.md`, modelled on vitally-mcp's `entra-cutover-staging-validation.md` | #4 |
+| 1 — sign-in, connect, mismatched login refused and revoked | **sign-in and connect done** on both origins (2026-10-29, Phase 14); **an end-user login refused and revoked** on staging (2026-11-04); the email-mismatch branch not exercised live (no spare agent login; accepted); the standing runbook is `docs/runbooks/zendesk-oauth-staging-validation.md` (every step and log check, as run on 2026-11-04) | #4 |
 | 2 — every read and write tool | **done live** with a development token (PR #1), as an **admin**; repeating the reads as an ordinary agent is open | #6 |
 | 3 — `Unverified` markers | read-side settled; eight remain that need data the account lacks | #7 |
 | 4 — refresh | **done** on production 2026-11-04: a six-day-old grant refreshed, the rotated token persisted (Key Vault `SecretSet`), across the `v1.1.1` deploy | #4 |
