@@ -51,8 +51,10 @@ Throughout, `<oid>` is your Entra object id (`az ad user show --id <you>@fiscalt
 
 ## 1 — Sign in and connect
 
-1. In the client, call any Zendesk tool on staging, e.g. `List_brands`. The client opens a Microsoft
-   sign-in first if it has no token; complete it.
+1. In the client, call `Get_zendesk_connect_link` on staging. The client opens a Microsoft sign-in
+   first if it has no token; complete it. Ask for the link explicitly rather than waiting for a tool
+   such as `List_brands` to hand one over: on a repeat run you are still connected from step 6, so a
+   read tool would simply succeed and the connect flow would go untested.
 2. The tool answers with a **connect link** (`…/zendesk/connect?ticket=…`). Open it in your normal
    browser, sign in to Zendesk as yourself, and click **Allow**.
    - The consent screen must name **FISCAL Zendesk MCP (staging)** and ask for **read** access only.
@@ -107,11 +109,15 @@ by tier, do this step against **production**, which is not read-only (that is wh
 2026-11-04); the step makes no writes either way.
 
 Either have a colleague who holds only the **read** tier do it, or move yourself to the read tier for
-a few minutes. To move yourself (needs a role that can change group membership), record your
-**direct** memberships first and change only those:
+a few minutes. Tiers are cumulative (an editor's group grants read as well as write), so removing
+your editor or admin membership leaves you with **nothing** unless you are also in
+`sg-zendesk-readers`, directly or through a nested group: check that first, and if it prints
+`false` use the colleague option instead. To move yourself (needs a role that can change group
+membership), record your **direct** memberships first and change only those:
 
 ```bash
 ME=$(az ad user show --id <you>@fiscaltec.com --query id -o tsv)
+az ad group member check -g sg-zendesk-readers --member-id "$ME" --query value -o tsv   # must be true: transitive is right HERE, because effective read is what must survive
 for g in sg-zendesk-editors sg-zendesk-admins; do [ "$(az ad group member list -g $g --query "length([?id=='$ME'])" -o tsv)" = 1 ] && echo $g; done > ~/zendesk-tier-groups.txt
 cat ~/zendesk-tier-groups.txt   # the groups you are a DIRECT member of; only these are removed and restored
 # `az ad group member list` returns DIRECT members only. Not `az ad group member check`: that is
@@ -133,8 +139,8 @@ re-reads `tools/list`, then:
    `Apply_`, `Add_` or `Request_` tool. (On staging you will see the same 28 whatever your tier.)
 2. Run a read, e.g. *search for three tickets created this week*.
 
-Verify the tier the server used, and do not go on until it shows `zendesk:read` alone (an editor or
-admin shows `zendesk:delete,zendesk:read,zendesk:write`):
+Verify the tier the server used, and do not go on until it shows `zendesk:read` alone (an editor shows
+`zendesk:read,zendesk:write`, an admin `zendesk:delete,zendesk:read,zendesk:write`):
 
 ```bash
 q 'AppEvents | where TimeGenerated > ago(1h) and Name == "ZendeskToolCall" and tostring(Properties.AuditUserId) == "<oid>" | project TimeGenerated, AppRoleName, tool=tostring(Properties.McpToolName), tier=tostring(Properties.AuditPermissionTier), outcome=tostring(Properties.AuditOutcome)'
@@ -197,8 +203,10 @@ q 'AzureDiagnostics | where ResourceProvider == "MICROSOFT.KEYVAULT" and TimeGen
 q 'AppTraces | where TimeGenerated > ago(1h) and AppRoleName == "zendesk-staging-ca-uksouth" and Message has "Zendesk token revocation" | project TimeGenerated, Message'
 ```
 
-Expect a `SecretGet` then a `SecretSet` 200 at the disconnect (the tombstone; two `SecretSet`s if the
-access token had expired and was refreshed first), **no** `SecretDelete` — a delete would block
+Expect a `SecretSet` 200 at the disconnect (the tombstone; two `SecretSet`s if the access token had
+expired and was refreshed first), preceded by a `SecretGet` only if the grant was not already cached
+(a warm cache answers without Key Vault, so its absence there is not a failure); a `SecretGet` 200 at
+the sub-step 3 read, which is the uncached read of the tombstone; **no** `SecretDelete` — a delete would block
 reconnecting for the 90-day purge window — and no `Zendesk token revocation …` warning of either form. On 2026-11-04 this showed that a
 `read`-only token can revoke itself.
 
