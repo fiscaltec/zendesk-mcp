@@ -8,11 +8,10 @@ locals {
   # secret-backed and sensitive entries are separate `env` blocks in each app, because a sensitive
   # value cannot drive a dynamic block.
   app_env_shared = {
-    # Zendesk. One account, one OAuth client, one vault — the targets differ only in the token
-    # secret prefix and the feature switches.
-    "Zendesk__Subdomain"     = var.zendesk_subdomain
-    "Zendesk__KeyVaultUri"   = azurerm_key_vault.secret.vault_uri
-    "Zendesk__OAuthClientId" = var.zendesk_oauth_client_id
+    # Zendesk. One account and one vault. Each target has its own OAuth client (split on
+    # 2026-11-04), so the client id is per target, below and in containerapps-staging.tf.
+    "Zendesk__Subdomain"   = var.zendesk_subdomain
+    "Zendesk__KeyVaultUri" = azurerm_key_vault.secret.vault_uri
 
     # DefaultAzureCredential picks the user-assigned identity by this.
     "AZURE_CLIENT_ID" = azurerm_user_assigned_identity.app.client_id
@@ -40,6 +39,11 @@ locals {
     # Set explicitly although it is the application default, so the separation from staging's
     # prefix is visible here rather than implied.
     "Zendesk__TokenSecretPrefix" = "zendesk-user-"
+
+    # Production's own Zendesk OAuth client. Its secret is `zendesk-oauth-client-secret` (the
+    # application default for Zendesk__OAuthClientSecretRef) and it requests the default scopes,
+    # `read write`, which are also the client's allowed scopes in Admin Centre.
+    "Zendesk__OAuthClientId" = var.zendesk_oauth_client_id
 
     # Per-target: each target publishes its own origin. Resource differs from Audience by exactly
     # one trailing slash — see variables.tf; they must not be reunified.
