@@ -121,6 +121,27 @@ push deny 'git push origin $BRANCH'
 push deny 'git push origin $(git branch --show-current)'
 push deny 'git push origin "fix/a'
 
+# Refused: what the Claude review found (bash 3.2, unresolvable directories, heredocs, spellings).
+push deny 'git status && git push origin main'
+push deny 'git status || git push origin main'
+push deny 'cd ~/somewhere && git push'
+push deny 'cd $OLDPWD && git push'
+push deny "pushd $ON_MAIN && git push"
+push deny "GIT_DIR=$ON_MAIN/.git git push origin"
+push deny 'git push' /nonexistent
+push deny $'git commit -F - <<EOF\nfix: don\'t break\nEOF\ngit push origin main && echo \'pushed\''
+push deny 'git pu\sh origin main'
+push deny 'git push origin ma\in'
+push deny "git p''ush origin main"
+push deny '/usr/bin/git push origin main'
+push deny '\git push origin main'
+push deny 'git push origin {main,x}'
+push deny 'git push origin HEAD:heads/main'
+push deny 'git -c alias.p=push p origin main'
+push allow "pushd $ON_FEATURE && git push"
+push allow 'git status && git push -u origin fix/thing'
+push allow $'git commit -F - <<EOF\nfix: a message\nEOF\ngit push -u origin fix/thing'
+
 # Allowed: everyday pushes from a feature branch, redirected, piped and chained.
 push allow 'git push -u origin fix/thing 2>&1 | tail -2'
 push allow 'timeout 90 git push -q -u origin fix/thing 2>&1 | grep -v remote'
@@ -150,8 +171,8 @@ push allow 'ls'
 
 # Fails closed on a payload that mentions push but cannot be read.
 check deny "push: unreadable payload" "$PUSH_HOOK" 'not json, git push origin main'
-check deny "push: payload with no command" "$PUSH_HOOK" '{"tool_input":{"description":"push"}}'
-# ...but never reads (or needs jq for) a payload that does not mention push.
+check deny "push: payload with no command" "$PUSH_HOOK" '{"tool_input":{"description":"git push"}}'
+# ...but never reads (or needs jq for) a payload that does not mention git.
 check allow "push: unreadable payload without push" "$PUSH_HOOK" 'not json at all'
 
 file_payload() { # $1 = tool, $2 = path
