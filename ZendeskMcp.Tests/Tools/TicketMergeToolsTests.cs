@@ -554,6 +554,31 @@ public class TicketMergeToolsTests
         result["next_step"]!.GetValue<string>().Should().Contain("'unknown'");
     }
 
+    [Theory]
+    [InlineData(HttpStatusCode.BadGateway, """{"error":"Bad gateway"}""")]
+    [InlineData(HttpStatusCode.OK, "<html>not json</html>")]
+    public async Task MergeTickets_AmbiguousAnswerToTheMergeRequest_IsNotConfirmedNotAnError(HttpStatusCode status, string body)
+    {
+        // Zendesk may already have queued the merge behind a gateway error or an unreadable answer, so
+        // an error here would invite a second, irreversible merge.
+        var reads = 0;
+        using var fake = TestHelpers.CreateFakeZendesk(r => (r.Method.Method, r.Path) switch
+        {
+            ("GET", ShowManyPath) => FakeResponse.Json(Interlocked.Increment(ref reads) == 1 ? ShowMany(Ticket(101), Ticket(102)) : ShowMany()),
+            ("POST", MergePath) => new FakeResponse(status, body),
+            _ => FakeResponse.NotFound(),
+        });
+
+        var result = JsonNode.Parse(await Merge(TestHelpers.BuildZendeskService(fake.Client), [102]))!;
+
+        result["merged"]!.GetValue<bool>().Should().BeFalse();
+        result["result"]!.GetValue<string>().Should().Be("not_confirmed");
+        var nextStep = result["next_step"]!.GetValue<string>();
+        nextStep.Should().Contain("answer was lost or unreadable").And.Contain("Do not call Merge_tickets again");
+        nextStep.Should().Contain("ask them to check the tickets in Zendesk").And.NotContain("unless");
+        fake.Requests.Count(r => r.Path == MergePath).Should().Be(1);
+    }
+
     [Fact]
     public async Task MergeTickets_ZendeskRefusal_SurfacesItsBody()
     {
