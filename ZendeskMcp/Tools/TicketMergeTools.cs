@@ -16,18 +16,18 @@ public static class TicketMergeTools
 {
     [Authorize(Policy = "zendesk:write")]
     [McpServerTool(Name = "Merge_tickets", Title = "Merge tickets", ReadOnly = false, Destructive = true, Idempotent = false, OpenWorld = false),
-     Description("Merge one to five duplicate tickets (source_ticket_ids) into a target ticket. Zendesk closes each source ticket for good, tags it closed_by_merge and adds a comment to it and to the target; a merge cannot be undone. Before calling, show the person the tickets (subject, requester, status) and get their agreement: to find duplicates, use Search_tickets with exclude_tags ['closed_by_merge'] and read candidates with Get_ticket. Closed tickets, tickets already merged and tickets the agent cannot see are refused before anything changes. Comments are private notes unless target_comment_is_public or source_comment_is_public is true; a public merge comment emails that ticket's requester and CCs. Returns the tickets as read before the merge, the job's final status and, once the job has completed, each source ticket's state afterwards; if the job is still running when the tool stops waiting, or its progress cannot be read, the result says the merge is unconfirmed (merged: false) and must be checked with Get_ticket before any retry; a failed job is returned as an error that also says to check the tickets first, as some may have been merged. " + TicketWriteHelpers.UntrustedContentWarning)]
+     Description("Merge one to five duplicate tickets (source_ticket_ids) into a target ticket. Zendesk closes each source ticket for good, tags it closed_by_merge and adds a comment to it and to the target; a merge cannot be undone. Before calling, show the person the tickets (subject, requester, status) and get their agreement: to find duplicates, use Search_tickets with exclude_tags ['closed_by_merge'] and read candidates with Get_ticket. Every source must have the same requester as the target. Closed tickets, solved sources, tickets already merged, tickets the agent cannot see and sources with a different requester are refused, naming each, before anything changes. Comments are private notes unless target_comment_public or source_comment_public is true; a public merge comment emails that ticket's requester and CCs. Returns result ('merged', 'partially_merged', or 'not_confirmed' when Zendesk had not finished or its progress could not be read: check with Get_ticket before any retry), the tickets as read before the merge, the job's final status and, once the job has completed, each source with its own result; a failed job is returned as an error that also says to check the tickets first, as some may have been merged. " + TicketWriteHelpers.UntrustedContentWarning)]
     public static Task<string> MergeTickets(
         ZendeskService zendesk,
         [Description("Id of the ticket to keep; the sources are merged into it.")] long target_ticket_id,
         [Description("Ids of 1 to 5 tickets to merge into the target and close. Distinct, and not the target.")] long[] source_ticket_ids,
         [Description("Comment added to the target ticket, at most 10,000 characters. Default: a note naming the merged tickets.")] string? target_comment = null,
         [Description("Comment added to each source ticket, at most 10,000 characters. Default: a note naming the target ticket.")] string? source_comment = null,
-        [Description("true to make the target comment public, emailing the target's requester and CCs. Default false (private note).")] bool? target_comment_is_public = null,
-        [Description("true to make the source comment public, emailing each source ticket's requester and CCs. Default false (private note).")] bool? source_comment_is_public = null,
+        [Description("true to make the target comment public, emailing the target's requester and CCs. Default false (private note).")] bool? target_comment_public = null,
+        [Description("true to make the source comment public, emailing each source ticket's requester and CCs. Default false (private note).")] bool? source_comment_public = null,
         CancellationToken cancellationToken = default) =>
         TicketMerge.MergeAsync(zendesk, target_ticket_id, source_ticket_ids, target_comment, source_comment,
-            target_comment_is_public, source_comment_is_public, TicketMerge.DefaultPollDelays, Task.Delay, cancellationToken);
+            target_comment_public, source_comment_public, TicketMerge.DefaultPollDelays, Task.Delay, cancellationToken);
 }
 
 /// <summary>
@@ -131,9 +131,22 @@ public static class TicketMerge
                 continue;
             }
 
-            if (ToolJson.String(ticket["status"]) == "closed")
+            var status = ToolJson.String(ticket["status"]);
+            if (status == "closed")
             {
                 problems.Add($"Ticket {id} ({role}) is closed, and closed tickets cannot be merged.");
+            }
+            else if (status == "solved" && role == "source")
+            {
+                problems.Add($"Ticket {id} (source) is solved, and solved tickets cannot be merged into another.");
+            }
+
+            // Merging tickets from different people would put one requester's conversation in front of
+            // another, so a requester mismatch is refused outright, as Swifteq's merge_tickets does.
+            if (role == "source" && before.Tickets.TryGetValue(targetTicketId, out var target)
+                && ToolJson.Long(ticket["requester_id"]) != ToolJson.Long(target["requester_id"]))
+            {
+                problems.Add($"Ticket {id} (source) has a different requester from target ticket {targetTicketId}; only one person's tickets can be merged together.");
             }
 
             if (HasTag(ticket, "closed_by_merge"))
@@ -231,11 +244,16 @@ public static class TicketMerge
 
         var sourcesAfter = new JsonArray();
         var unconfirmed = new List<long>();
+        var confirmed = 0;
         foreach (var id in sources)
         {
             after.Tickets.TryGetValue(id, out var ticket);
             var closedByMerge = ticket is not null && ToolJson.String(ticket["status"]) == "closed" && HasTag(ticket, "closed_by_merge");
-            if (!closedByMerge)
+            if (closedByMerge)
+            {
+                confirmed++;
+            }
+            else
             {
                 unconfirmed.Add(id);
             }
@@ -245,11 +263,12 @@ public static class TicketMerge
                 ["id"] = id,
                 ["status"] = ticket is null ? null : ToolJson.String(ticket["status"]),
                 ["closed_by_merge"] = closedByMerge,
+                ["result"] = closedByMerge ? "merged" : "not_confirmed",
             });
         }
 
         result["merged"] = unconfirmed.Count == 0;
-        result["outcome"] = unconfirmed.Count == 0 ? "completed" : "completed_unconfirmed";
+        result["result"] = unconfirmed.Count == 0 ? "merged" : confirmed > 0 ? "partially_merged" : "not_confirmed";
         result["sources_after"] = sourcesAfter;
         result["target_agent_url"] = $"{zendesk.BaseUrl}/agent/tickets/{Id(targetTicketId)}";
         if (unconfirmed.Count > 0)
@@ -262,7 +281,7 @@ public static class TicketMerge
     }
 
     /// <summary>
-    /// The answer when the merge was accepted but its outcome is not known: never reported as merged,
+    /// The answer when the merge was accepted but its result is not known: never reported as merged,
     /// and never as nothing having happened, because the job may still finish after this call returns.
     /// </summary>
     private static string NotConfirmed(JsonObject result, JsonObject? job, int polls, string reason)
@@ -270,7 +289,7 @@ public static class TicketMerge
         result["job"] = job is null ? null : JobSummary(job);
         result["polls"] = polls;
         result["merged"] = false;
-        result["outcome"] = "unconfirmed";
+        result["result"] = "not_confirmed";
         result["next_step"] = $"{reason} The merge may still happen or may already have happened. Wait a few minutes, then check the source tickets with Get_ticket: a merged source is closed and tagged closed_by_merge. Do not call Merge_tickets again unless, after that wait, they are still open and untagged and the person still wants them merged.";
         return result.ToJsonString();
     }

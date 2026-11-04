@@ -122,7 +122,7 @@ Compared with Swifteq's server: the same tools and parameters (snake_case, so pr
 
 - `get_usage` and `submit_mcp_feedback` are dropped: they are about Swifteq's billing and support.
 - The connection tools are added.
-- `Merge_tickets` was implemented from the Zendesk API, not from Swifteq's `merge_tickets` schema, which was not available; its parameter names may differ from Swifteq's (#22).
+- `Merge_tickets` takes Swifteq's `merge_tickets` parameters and result values (`merged`, `partially_merged`, `not_confirmed`), and like it refuses sources with a different requester and solved sources. It differs in three ways. Its default target comment names the merged tickets but does not quote their latest public comments. A source already merged into this target is refused rather than reported as `already_merged`. It does not relay the CC, assignment and comment-visibility warnings (#22).
 - Tool names use the Vitally capitalisation (`Search_tickets`).
 - Two Help Center tools are renamed for clarity: `create_article` → `Create_help_center_article` and `get_help_center_article_content` → `Get_help_center_article`.
 - Swifteq's "MCP Server settings" toggles are the `Zendesk:Features:*` switches.

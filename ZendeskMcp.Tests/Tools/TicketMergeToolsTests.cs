@@ -73,7 +73,7 @@ public class TicketMergeToolsTests
         fake.Requests.Should().NotContain(r => r.Method == HttpMethod.Delete, "a write tool must never issue DELETE");
 
         result["merged"]!.GetValue<bool>().Should().BeTrue();
-        result["outcome"]!.GetValue<string>().Should().Be("completed");
+        result["result"]!.GetValue<string>().Should().Be("merged");
         result["job"]!["status"]!.GetValue<string>().Should().Be("completed");
         result["polls"]!.GetValue<int>().Should().Be(1);
         result["sources_after"]!.AsArray().Select(s => s!["closed_by_merge"]!.GetValue<bool>()).Should().AllSatisfy(b => b.Should().BeTrue());
@@ -238,6 +238,71 @@ public class TicketMergeToolsTests
     }
 
     [Fact]
+    public async Task MergeTickets_SolvedSource_IsRefused_ButASolvedTargetIsNot()
+    {
+        using var refused = TestHelpers.CreateFakeZendesk(r => r.Path switch
+        {
+            ShowManyPath => FakeResponse.Json(ShowMany(Ticket(101), Ticket(102, "solved"))),
+            _ => FakeResponse.NotFound(),
+        });
+
+        var act = () => Merge(TestHelpers.BuildZendeskService(refused.Client), [102]);
+
+        await act.Should().ThrowAsync<ArgumentException>().WithMessage("*Ticket 102 (source) is solved*");
+        refused.Requests.Should().NotContain(r => r.Path == MergePath);
+
+        // Negative control: the same tickets with the target solved instead go through.
+        var reads = 0;
+        using var allowed = TestHelpers.CreateFakeZendesk(r => (r.Method.Method, r.Path) switch
+        {
+            ("GET", ShowManyPath) => FakeResponse.Json(Interlocked.Increment(ref reads) == 1
+                ? ShowMany(Ticket(101, "solved"), Ticket(102))
+                : ShowMany(Ticket(102, "closed", "\"closed_by_merge\""))),
+            ("POST", MergePath) => FakeResponse.Json(Job("completed")),
+            _ => FakeResponse.NotFound(),
+        });
+
+        var result = JsonNode.Parse(await Merge(TestHelpers.BuildZendeskService(allowed.Client), [102]))!;
+        result["result"]!.GetValue<string>().Should().Be("merged");
+    }
+
+    [Fact]
+    public async Task MergeTickets_DifferentRequester_IsRefusedNamingTheTicket()
+    {
+        using var fake = TestHelpers.CreateFakeZendesk(r => r.Path switch
+        {
+            ShowManyPath => FakeResponse.Json(ShowMany(Ticket(101, requester: 501), Ticket(102, requester: 501), Ticket(103, requester: 502))),
+            _ => FakeResponse.NotFound(),
+        });
+
+        var act = () => Merge(TestHelpers.BuildZendeskService(fake.Client), [102, 103]);
+
+        var thrown = await act.Should().ThrowAsync<ArgumentException>();
+        thrown.Which.Message.Should().Contain("Ticket 103 (source) has a different requester").And.NotContain("Ticket 102");
+        fake.Requests.Should().NotContain(r => r.Path == MergePath);
+    }
+
+    [Fact]
+    public async Task MergeTickets_SomeSourcesConfirmed_IsPartiallyMerged()
+    {
+        var reads = 0;
+        using var fake = TestHelpers.CreateFakeZendesk(r => (r.Method.Method, r.Path) switch
+        {
+            ("GET", ShowManyPath) => FakeResponse.Json(Interlocked.Increment(ref reads) == 1
+                ? ShowMany(Ticket(101), Ticket(102), Ticket(103))
+                : ShowMany(Ticket(102, "closed", "\"closed_by_merge\""), Ticket(103))),
+            ("POST", MergePath) => FakeResponse.Json(Job("completed")),
+            _ => FakeResponse.NotFound(),
+        });
+
+        var result = JsonNode.Parse(await Merge(TestHelpers.BuildZendeskService(fake.Client), [102, 103]))!;
+
+        result["merged"]!.GetValue<bool>().Should().BeFalse();
+        result["result"]!.GetValue<string>().Should().Be("partially_merged");
+        result["sources_after"]!.AsArray().Select(x => x!["result"]!.GetValue<string>()).Should().Equal("merged", "not_confirmed");
+    }
+
+    [Fact]
     public async Task MergeTickets_ClosedTarget_IsRefused()
     {
         using var fake = TestHelpers.CreateFakeZendesk(r => r.Path switch
@@ -282,7 +347,7 @@ public class TicketMergeToolsTests
         waits.Should().Equal(delays);
         fake.Requests.Count(r => r.Path == JobPath).Should().Be(3);
         result["merged"]!.GetValue<bool>().Should().BeFalse();
-        result["outcome"]!.GetValue<string>().Should().Be("unconfirmed");
+        result["result"]!.GetValue<string>().Should().Be("not_confirmed");
         result["job"]!["status"]!.GetValue<string>().Should().Be("working");
         result["next_step"]!.GetValue<string>().Should().Contain("Do not call Merge_tickets again");
 
@@ -327,7 +392,7 @@ public class TicketMergeToolsTests
         var result = JsonNode.Parse(await Merge(TestHelpers.BuildZendeskService(fake.Client), [102, 103]))!;
 
         result["merged"]!.GetValue<bool>().Should().BeFalse();
-        result["outcome"]!.GetValue<string>().Should().Be("completed_unconfirmed");
+        result["result"]!.GetValue<string>().Should().Be("not_confirmed");
         result["warning"]!.GetValue<string>().Should().Contain("102, 103");
         result["next_step"]!.GetValue<string>().Should().Contain("Do not call Merge_tickets again");
     }
@@ -346,7 +411,7 @@ public class TicketMergeToolsTests
         var result = JsonNode.Parse(await Merge(TestHelpers.BuildZendeskService(fake.Client), [102]))!;
 
         result["merged"]!.GetValue<bool>().Should().BeFalse();
-        result["outcome"]!.GetValue<string>().Should().Be("unconfirmed");
+        result["result"]!.GetValue<string>().Should().Be("not_confirmed");
         result["next_step"]!.GetValue<string>().Should().Contain("no job status").And.Contain("Do not call Merge_tickets again");
         fake.Requests.Should().NotContain(r => r.Path.StartsWith("/api/v2/job_statuses/", StringComparison.Ordinal));
         fake.Requests.Count(r => r.Path == ShowManyPath).Should().Be(1, "nothing is read back as though the merge had finished");
@@ -364,7 +429,7 @@ public class TicketMergeToolsTests
         var result = JsonNode.Parse(await Merge(TestHelpers.BuildZendeskService(fake.Client), [102, 103]))!;
 
         result["merged"]!.GetValue<bool>().Should().BeFalse();
-        result["outcome"]!.GetValue<string>().Should().Be("unconfirmed");
+        result["result"]!.GetValue<string>().Should().Be("not_confirmed");
         result["job"]!["id"]!.GetValue<string>().Should().Be("job1");
         result["next_step"]!.GetValue<string>().Should().Contain("Checking the merge job failed").And.Contain("Do not call Merge_tickets again");
         fake.Requests.Count(r => r.Path == MergePath).Should().Be(1);
@@ -382,7 +447,7 @@ public class TicketMergeToolsTests
         var result = JsonNode.Parse(await Merge(zendesk, [102, 103]))!;
 
         result["merged"]!.GetValue<bool>().Should().BeFalse();
-        result["outcome"]!.GetValue<string>().Should().Be("unconfirmed");
+        result["result"]!.GetValue<string>().Should().Be("not_confirmed");
         result["next_step"]!.GetValue<string>().Should().Contain("/zendesk/connect?ticket=").And.Contain("Do not call Merge_tickets again");
     }
 
@@ -402,7 +467,7 @@ public class TicketMergeToolsTests
 
         var result = JsonNode.Parse(await Merge(TestHelpers.BuildZendeskService(fake.Client), [102]))!;
 
-        result["outcome"]!.GetValue<string>().Should().Be("unconfirmed");
+        result["result"]!.GetValue<string>().Should().Be("not_confirmed");
         result["next_step"]!.GetValue<string>().Should().Contain("UnauthorizedAccessException");
     }
 
@@ -434,7 +499,7 @@ public class TicketMergeToolsTests
         var result = JsonNode.Parse(await Merge(TestHelpers.BuildZendeskService(fake.Client), [102]))!;
 
         result["merged"]!.GetValue<bool>().Should().BeFalse();
-        result["outcome"]!.GetValue<string>().Should().Be("unconfirmed");
+        result["result"]!.GetValue<string>().Should().Be("not_confirmed");
         result["job"]!["status"]!.GetValue<string>().Should().Be("completed");
         result["next_step"]!.GetValue<string>().Should().Contain("reading the source tickets back failed");
     }
@@ -454,7 +519,7 @@ public class TicketMergeToolsTests
 
         fake.Requests.Should().NotContain(r => r.Path.StartsWith("/api/v2/job_statuses/", StringComparison.Ordinal));
         result["merged"]!.GetValue<bool>().Should().BeFalse();
-        result["outcome"]!.GetValue<string>().Should().Be("unconfirmed");
+        result["result"]!.GetValue<string>().Should().Be("not_confirmed");
         result["next_step"]!.GetValue<string>().Should().Contain("carried no id");
     }
 
@@ -485,7 +550,7 @@ public class TicketMergeToolsTests
 
         fake.Requests.Count(r => r.Path == JobPath).Should().Be(2, "a job with no status is not terminal, so it is polled to the bound");
         result["merged"]!.GetValue<bool>().Should().BeFalse();
-        result["outcome"]!.GetValue<string>().Should().Be("unconfirmed");
+        result["result"]!.GetValue<string>().Should().Be("not_confirmed");
         result["next_step"]!.GetValue<string>().Should().Contain("'unknown'");
     }
 
