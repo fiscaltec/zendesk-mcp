@@ -81,12 +81,13 @@ client: stop and check `Zendesk__OAuthClientId` on `zendesk-staging-ca-uksouth`.
 Verify (the refusal is a Warning; the revoke logs only if it fails):
 
 ```bash
-q 'AppTraces | where TimeGenerated > ago(1h) and AppRoleName == "zendesk-staging-ca-uksouth" and (Message has "Refused a Zendesk connection" or Message has "revocation returned" or Message has "Setting HTTP status code 403") | project TimeGenerated, SeverityLevel, Message'
+q 'AppTraces | where TimeGenerated > ago(1h) and AppRoleName == "zendesk-staging-ca-uksouth" and (Message has "Refused a Zendesk connection" or Message has "Zendesk token revocation" or Message has "Setting HTTP status code 403") | project TimeGenerated, SeverityLevel, Message'
 ```
 
 Expect `Refused a Zendesk connection for <oid>: <reason> (Zendesk user <other id>)` and a `403`, and
-**no** `Zendesk token revocation returned …` (that line means the refused token was left live: revoke
-it in Admin Centre → APIs → OAuth tokens).
+**no** `Zendesk token revocation …` line. Either form — `… returned <status>` (Zendesk refused) or
+`… failed: <type>` (the request never got an answer) — means the refused token may still be live:
+revoke it in Admin Centre → APIs → OAuth tokens.
 
 ⚠️ A **400** page (*Connection not completed*, *Access was not granted*, *This link has expired*)
 means the flow stopped **before** the identity check: the sign-in finished in another window, took
@@ -111,8 +112,11 @@ a few minutes. To move yourself (needs a role that can change group membership),
 
 ```bash
 ME=$(az ad user show --id <you>@fiscaltec.com --query id -o tsv)
-for g in sg-zendesk-editors sg-zendesk-admins; do [ "$(az ad group member check -g $g --member-id $ME --query value -o tsv)" = true ] && echo $g; done > ~/zendesk-tier-groups.txt
+for g in sg-zendesk-editors sg-zendesk-admins; do [ "$(az ad group member list -g $g --query "length([?id=='$ME'])" -o tsv)" = 1 ] && echo $g; done > ~/zendesk-tier-groups.txt
 cat ~/zendesk-tier-groups.txt   # the groups you are a DIRECT member of; only these are removed and restored
+# `az ad group member list` returns DIRECT members only. Not `az ad group member check`: that is
+# transitive (Graph checkMemberGroups), so an inherited membership would be recorded and later
+# "restored" as direct access you never had.
 while read -r g; do az ad group member remove -g "$g" --member-id "$ME" && echo "removed from $g"; done < ~/zendesk-tier-groups.txt
 ```
 
@@ -139,7 +143,8 @@ q 'AppEvents | where TimeGenerated > ago(1h) and Name == "ZendeskToolCall" and t
 **Restore** exactly the groups you removed:
 
 ```bash
-while read -r g; do az ad group member add -g "$g" --member-id "$ME" && echo "restored to $g"; done < ~/zendesk-tier-groups.txt && rm ~/zendesk-tier-groups.txt
+FAILED=""; while read -r g; do az ad group member add -g "$g" --member-id "$ME" && echo "restored to $g" || { FAILED=1; echo "!!! could not restore $g" >&2; }; done < ~/zendesk-tier-groups.txt
+[ -z "$FAILED" ] && rm ~/zendesk-tier-groups.txt && echo "all restored" || echo "!!! NOT all restored: ~/zendesk-tier-groups.txt kept; add the missing groups by hand"
 ```
 
 Zendesk's **own** restrictions (an agent limited to some groups sees only their tickets) are a
@@ -178,19 +183,23 @@ records and a negative control are still open in #5.
 1. Call `Disconnect_zendesk` on staging and note the time. Expect `result: disconnected`.
    `forgotten_not_revoked` means Zendesk did not confirm the revoke: remove the token in Admin Centre
    → APIs → OAuth tokens.
-2. `List_brands` now answers with a connect link.
-3. Reconnect through it; `List_brands` works again.
+2. `List_brands` now answers with a connect link. That answer comes from the server's cache, which
+   the disconnect updated first, so it does not prove the stored grant has gone.
+3. **Wait at least 5 minutes** (`Zendesk:TokenCacheDuration`), then call `Get_zendesk_connection`:
+   it reads the store without refreshing or revoking anything, and must answer `connected: false`.
+   That is the persisted tombstone talking.
+4. Only then reconnect through the link; `List_brands` works again.
 
 Verify (Key Vault: wait 10 minutes):
 
 ```bash
 q 'AzureDiagnostics | where ResourceProvider == "MICROSOFT.KEYVAULT" and TimeGenerated > ago(1h) and id_s has "zendesk-staging-user-<oid>" | project TimeGenerated, OperationName, httpStatusCode_d | order by TimeGenerated asc'
-q 'AppTraces | where TimeGenerated > ago(1h) and AppRoleName == "zendesk-staging-ca-uksouth" and Message has "revocation returned" | project TimeGenerated, Message'
+q 'AppTraces | where TimeGenerated > ago(1h) and AppRoleName == "zendesk-staging-ca-uksouth" and Message has "Zendesk token revocation" | project TimeGenerated, Message'
 ```
 
 Expect a `SecretGet` then a `SecretSet` 200 at the disconnect (the tombstone; two `SecretSet`s if the
 access token had expired and was refreshed first), **no** `SecretDelete` — a delete would block
-reconnecting for the 90-day purge window — and no revocation warning. On 2026-11-04 this showed that a
+reconnecting for the 90-day purge window — and no `Zendesk token revocation …` warning of either form. On 2026-11-04 this showed that a
 `read`-only token can revoke itself.
 
 ## If something fails
