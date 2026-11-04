@@ -58,15 +58,23 @@ enc() { jq -rn --arg s "$1" '$s | @uri'; }
 # Status labels of an issue, lower-cased prefix match; one per line.
 STATUS_LABELS='.labels[].name | select(ascii_downcase | startswith("status: "))'
 
+# Name the repository first: it proves the repository is visible, so a 404 on the label below
+# means the label is missing, and every message can say which repository was reached.
+nwo=$(gh api "$repo" --jq .full_name) && [ -n "$nwo" ] \
+	|| die "could not read the repository gh resolved for {owner}/{repo} (set GH_REPO=owner/name to choose it)"
+
 # The label must already exist, spelt exactly so (see the header). GitHub's lookup is
 # case-insensitive, so compare the name it returns. "Could not check" is never reported as "missing".
-if ! got=$(gh api "$repo/labels/$(enc "$target")" --jq .name 2>&1); then
-	case "$got" in
-	*"HTTP 404"*) die "the label '$target' does not exist in this repository; refusing to add it, which would create it" ;;
-	*) die "could not check whether the label '$target' exists: $got" ;;
-	esac
+# stderr goes to a file, so a notice gh prints on a successful call cannot pollute the name.
+errf=$(mktemp) || die "could not create a temporary file"
+trap 'rm -f "$errf"' EXIT
+if ! got=$(gh api "$repo/labels/$(enc "$target")" --jq .name 2>"$errf"); then
+	if grep -q "HTTP 404" "$errf"; then
+		die "the label '$target' does not exist in $nwo; refusing to add it, which would create it"
+	fi
+	die "could not check whether the label '$target' exists in $nwo: $(tr '\n' ' ' < "$errf")"
 fi
-[ "$got" = "$target" ] || die "the repository's label is spelt '$got', not '$target'; refusing to continue"
+[ "$got" = "$target" ] || die "$nwo's label is spelt '$got', not '$target'; refusing to continue"
 
 current=$(gh api "$repo/issues/$issue" --jq "$STATUS_LABELS") \
 	|| die "could not read issue #$issue"
@@ -106,6 +114,6 @@ verdict=$(jq -r --arg t "$target" --arg a "$assignee" --arg s "$status" '
 	  end' <<< "$issue_json") \
 	|| die "updated #$issue but could not interpret the read-back"
 case "$verdict" in
-ok\ *) echo "#$issue -> $target (assignees: ${verdict#ok })" ;;
+ok\ *) echo "$nwo#$issue -> $target (assignees: ${verdict#ok })" ;;
 *) die "#$issue $verdict" ;;
 esac

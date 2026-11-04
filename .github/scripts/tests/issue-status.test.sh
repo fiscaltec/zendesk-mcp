@@ -223,5 +223,22 @@ run 11 blocked
 check "a differently-spelt repository label is refused before any write" \
 	'[ "$RC" = 1 ] && grep -q "spelt" <<< "$OUT" && ! calls | grep -q "^POST"'
 
+# A notice gh prints on stderr during a successful call must not be mistaken for the label name.
+new_case $'bug\nstatus: ready' ''
+touch "$FAKE_GH_DIR/stderr-notice"
+run 11 in-progress
+check "a stderr notice on success does not break the label check" '[ "$RC" = 0 ] && [ "$(labels)" = "bug,status: in-progress" ]'
+
+# The repository itself cannot be read: no claim about labels, and no write.
+new_case $'bug\nstatus: ready' ''
+touch "$FAKE_GH_DIR/no-repo"
+run 11 in-progress
+check "an unreadable repository fails before any write, without blaming the label" \
+	'[ "$RC" = 1 ] && grep -q "could not read the repository" <<< "$OUT" && ! grep -q "does not exist" <<< "$OUT" && ! calls | grep -q "^POST"'
+
+new_case $'bug\nstatus: ready' ''
+run 11 in-progress
+check "the result names the repository reached" 'grep -q "^example/repo#11 -> status: in-progress" <<< "$OUT"'
+
 echo "issue-status: $pass passed, $fail failed"
 [ "$fail" = 0 ]
