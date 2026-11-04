@@ -22,6 +22,8 @@ namespace ZendeskMcp.Tools;
 [McpServerToolType]
 public static class TicketConversationsTools
 {
+    private const string ToolName = "Bulk_get_ticket_conversations";
+
     /// <summary>The most ticket ids one call takes.</summary>
     public const int MaxTickets = 10;
 
@@ -161,7 +163,7 @@ public static class TicketConversationsTools
         // audit record captures: comment ids would otherwise fill its 100-id cap after one long
         // ticket, and the record is the only trace of who read which ticket.
         var tickets = await AnalyticsSupport.ForEachBoundedAsync(ids, (id, _) =>
-            Attempt(id, Expired, cancellationToken, async token =>
+            Attempt(zendesk, id, Expired, cancellationToken, async token =>
             {
                 var body = await zendesk.GetAsync($"/api/v2/tickets/{Id(id)}", cancellationToken: token);
                 return Parse(() => body["ticket"] as JsonObject ?? throw new FormatException("no ticket object"));
@@ -176,7 +178,7 @@ public static class TicketConversationsTools
             }
 
             var ticket = tickets[index].Value!;
-            var read = await Attempt(ids[index], Expired, cancellationToken,
+            var read = await Attempt(zendesk, ids[index], Expired, cancellationToken,
                 token => ReadMessagesAsync(zendesk, ids[index], ticket, Expired, token));
             return read.Failure ?? Shape(zendesk, ids[index], ticket, read.Value!, request, asOf);
         }, cancellationToken);
@@ -213,7 +215,7 @@ public static class TicketConversationsTools
     // Runs one ticket's step, turning the failures that belong to that ticket into a not_read entry.
     // A missing connection, an RBAC or read-only denial and the caller's own cancellation are not
     // caught: they fail the whole call, as they do for every tool.
-    private static async Task<Outcome<T>> Attempt<T>(long id, Func<bool> expired, CancellationToken cancellationToken, Func<CancellationToken, Task<T>> step)
+    private static async Task<Outcome<T>> Attempt<T>(ZendeskService zendesk, long id, Func<bool> expired, CancellationToken cancellationToken, Func<CancellationToken, Task<T>> step)
     {
         if (expired())
         {
@@ -228,13 +230,16 @@ public static class TicketConversationsTools
         {
             return new(default, NotRead(id, "time", null));
         }
-        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+        catch (OperationCanceledException ex) when (!cancellationToken.IsCancellationRequested)
         {
-            // The HTTP client's own timeout, not the caller cancelling: this ticket ran out of time.
-            return new(default, NotRead(id, "time", "Zendesk did not answer in time."));
+            // A client's own timeout (Zendesk's, or a token refresh or Key Vault read on the way),
+            // not the caller cancelling: this ticket ran out of time.
+            zendesk.LogAbsorbedFailure(ToolName, ex);
+            return new(default, NotRead(id, "time", "A request timed out."));
         }
         catch (ZendeskResponseFormatException ex)
         {
+            zendesk.LogAbsorbedFailure(ToolName, ex);
             return new(default, NotRead(id, "error", ex.Message));
         }
         catch (HttpRequestException ex)
@@ -252,6 +257,7 @@ public static class TicketConversationsTools
         catch (UnreadableResponseException ex)
         {
             // A response this server could not read. Retrying would read the same thing.
+            zendesk.LogAbsorbedFailure(ToolName, ex);
             return new(default, NotRead(id, "error", ex.Message));
         }
     }
@@ -341,6 +347,12 @@ public static class TicketConversationsTools
                     }).ToList();
                     return new Conversation(messages, "conversation_log", log.HasMore, log.Items.Count, null);
                 }
+            }
+            catch (ZendeskResponseFormatException ex)
+            {
+                // A malformed log page: the comments may still be readable, so fall back and say so.
+                zendesk.LogAbsorbedFailure(ToolName, ex);
+                sourceNote = "The messaging conversation log could not be read, so these are the ticket's comments, which can miss messaging content.";
             }
             catch (HttpRequestException ex) when (ex.StatusCode is not (HttpStatusCode.TooManyRequests))
             {

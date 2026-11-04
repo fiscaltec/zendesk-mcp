@@ -143,6 +143,7 @@ public partial class ZendeskService
 
             var page = await GetAsync(path, pageQuery, brandUrl, cancellationToken) as JsonObject
                 ?? throw new ZendeskResponseFormatException($"A page of {ResourceTypeOf(BuildUrl(path, null, null))} was not a JSON object.");
+            var resource = ResourceTypeOf(BuildUrl(path, null, null));
             pages++;
 
             if (page[arrayProperty] is JsonArray array)
@@ -193,19 +194,19 @@ public partial class ZendeskService
                 {
                     null => null,
                     JsonObject metaObject => metaObject,
-                    _ => throw new ZendeskResponseFormatException("A page's meta was not a JSON object."),
+                    _ => throw new ZendeskResponseFormatException($"A page of {resource}: meta was not a JSON object."),
                 };
                 hasMore = meta?["has_more"] switch
                 {
                     null => false,
                     JsonValue more when more.TryGetValue<bool>(out var flag) => flag,
-                    _ => throw new ZendeskResponseFormatException("A page's meta.has_more was not true or false."),
+                    _ => throw new ZendeskResponseFormatException($"A page of {resource}: meta.has_more was not true or false."),
                 };
                 after = meta?["after_cursor"] switch
                 {
                     null => null,
                     JsonValue cursor when cursor.TryGetValue<string>(out var text) => text,
-                    _ => throw new ZendeskResponseFormatException("A page's meta.after_cursor was not a string."),
+                    _ => throw new ZendeskResponseFormatException($"A page of {resource}: meta.after_cursor was not a string."),
                 };
             }
 
@@ -683,6 +684,16 @@ public partial class ZendeskService
 
     // A failure log must never change what the call returns: it sits just before the exception that
     // carries Zendesk's explanation to the client.
+    /// <summary>
+    /// Records a failure a tool absorbed into its result rather than threw (Bulk_get_ticket_conversations
+    /// reports a timed-out or unreadable ticket per ticket), so it still reaches the failure records.
+    /// The exception TYPE and the correlation id only, never its message, as for every failure log.
+    /// </summary>
+    public void LogAbsorbedFailure(string tool, Exception exception) =>
+        LogBestEffort(() => _logger.LogError(
+            "Tool call partly failed: {Tool} absorbed {ExceptionType} into its result correlation={CorrelationId}",
+            tool, exception.GetType().Name, _auditContext?.CorrelationId ?? "none"));
+
     private static void LogBestEffort(Action write)
     {
         try

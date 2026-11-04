@@ -251,10 +251,15 @@ public class TicketConversationsToolsTests
     public async Task AnHttpTimeout_IsReportedOnItsTicket_AndTheOthersAreKept()
     {
         using var fake = TestHelpers.CreateFakeZendesk(r => r.Path == "/api/v2/tickets/102/comments"
-            ? throw new TaskCanceledException("timed out", new TimeoutException())
+            ? throw new TaskCanceledException("secret detail", new TimeoutException())
             : Simple(r));
+        var logger = new CapturingLogger<ZendeskService>();
 
-        var result = await Bulk(TestHelpers.BuildZendeskService(fake.Client), [101, 102]);
+        var result = await Bulk(TestHelpers.BuildZendeskService(fake.Client, logger: logger), [101, 102]);
+
+        // Absorbed into the result, so it must still reach the failure records: type and correlation, no message.
+        logger.Entries.Should().ContainSingle(e => e.Level == Microsoft.Extensions.Logging.LogLevel.Error && e.Message.Contains("partly failed"))
+            .Which.Message.Should().Contain("TaskCanceledException").And.NotContain("secret detail");
 
         var tickets = result["tickets"]!.AsArray();
         tickets[0]!["read"]!.GetValue<string>().Should().Be("complete");
@@ -465,6 +470,24 @@ public class TicketConversationsToolsTests
         tickets[0]!["note"]!.GetValue<string>().Should().Contain("conversation log could not be read");
         tickets[1]!["reason"]!.GetValue<string>().Should().Be("rate_limited", "a 429 is not an absent log");
         fake.Requests.Should().NotContain(r => r.Path == "/api/v2/tickets/6/comments");
+    }
+
+    [Fact]
+    public async Task AMalformedMessagingLog_FallsBackToComments_AndSaysSo()
+    {
+        using var fake = TestHelpers.CreateFakeZendesk(r => r.Path switch
+        {
+            "/api/v2/tickets/5" => Json(Ticket(5, "whatsapp")),
+            "/api/v2/tickets/5/conversation_log" => Json("""{"events":[],"meta":{"has_more":"yes"}}"""),
+            "/api/v2/tickets/5/comments" => Json(Comments(Comment(1, 501, "Hi"))),
+            _ => FakeResponse.NotFound(),
+        });
+
+        var ticket = (await Bulk(TestHelpers.BuildZendeskService(fake.Client), [5]))["tickets"]![0]!;
+
+        ticket["read"]!.GetValue<string>().Should().Be("complete");
+        ticket["source"]!.GetValue<string>().Should().Be("comments");
+        ticket["note"]!.GetValue<string>().Should().Contain("conversation log could not be read");
     }
 
     [Fact]

@@ -508,7 +508,8 @@ here, in `ZendeskMetrics`):
 - **Calls that fail before a response have no duration.** A timeout, a DNS failure or a refused
   connection never reaches `LogAction`, so there is no `ZendeskUpstreamCall` row. (A non-2xx
   response is different: `SendAsync` logs it, with its duration, before throwing.) Timeouts are the slowest calls of
-  all; look for them in the failure records. The clock also starts *after* the caller's credential
+  all; look for them in the failure records (`Bulk_get_ticket_conversations` reports a timed-out
+  ticket in its result, and logs it as `Tool call partly failed` with the correlation id). The clock also starts *after* the caller's credential
   is resolved, so a cold Key Vault read of the person's token, or a token refresh, shows in the
   tool-call duration and in no upstream one. The same goes for recovery after a `401`: the rejected
   call and its retry each get a row, and the `OnTokenRejectedAsync` refresh between them is in
@@ -655,7 +656,7 @@ Zendesk ──302──> /zendesk/callback?code&state ──> exchange code ─�
 
 **`AuditRecordIds` for Zendesk shapes:** ids are numbers (rendered as raw text); the primary collection is the first array of objects in the body (`tickets`, `results`, `articles` — Zendesk serialises it before sideloads such as `users`), `meta`/`links` ignored; a single record is bare or wrapped (`{"ticket":{…}}`). The mutation-URL fallback accepts only a **numeric** last segment — Zendesk paths also end in locales and collection names, and recording `en-gb` as a record id would be a fabricated identifier.
 
-**Paging.** Tools that page for the caller pass Zendesk's cursor through (`after_cursor` → `page[after]`, `pagination_info {has_more, next_cursor, page_size}`). `GetAllPagesAsync` pages on the server's behalf (sideloads merged) up to `MaxAutoPageFetches`, marking the audit record truncated when it stops early. Analytics tools read at most `MaxAnalyticsTickets` tickets and refuse beyond it, saying how to split the range.
+**Paging.** Tools that page for the caller pass Zendesk's cursor through (`after_cursor` → `page[after]`, `pagination_info {has_more, next_cursor, page_size}`). `GetAllPagesAsync` pages on the server's behalf (sideloads merged) up to `MaxAutoPageFetches`, marking the audit record truncated when it stops early. A page envelope it cannot read (not an object, or a `meta` of the wrong shape) throws `ZendeskResponseFormatException` rather than returning a silently short result; an optional `beforeNextPage` callback runs before each later page and may throw to stop paging (`Bulk_get_ticket_conversations` stops at its deadline that way, never cancelling a request in flight). Analytics tools read at most `MaxAnalyticsTickets` tickets and refuse beyond it, saying how to split the range.
 
 **Rate limits.** Zendesk's budget is per *account* (200–2,500 requests a minute by plan) and shared with every other integration. The handler retries `429` on `Retry-After` and warns as `X-Rate-Limit-Remaining` runs low; analytics tools bound their own concurrency.
 
