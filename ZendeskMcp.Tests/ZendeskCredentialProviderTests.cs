@@ -452,27 +452,70 @@ public class ZendeskCredentialProviderTests
         handler.Seen.Should().Equal("DELETE Bearer rejected", "POST", "DELETE Bearer renewed");
     }
 
+    [Fact]
+    public async Task Disconnect_WhenTheCallerCancelsDuringCleanup_StillForgetsTheGrant()
+    {
+        // RevokeGrantAsync finishes on its own token once the refresh is sent; the removal that follows
+        // must too. On the caller's cancelled token, a store that honours it (Key Vault does) would
+        // leave the now-revoked grant stored and cached (#13).
+        using var cts = new CancellationTokenSource();
+        using var http = new HttpClient(new CancelOnRefreshHandler(cts));
+        var store = new CancellationHonouringStore();
+        await store.SaveAsync(TestHelpers.TestObjectId, TestHelpers.SampleToken("rejected", refreshToken: "r1"), TestContext.Current.CancellationToken);
+        var service = TestHelpers.BuildZendeskService(http, tokenStore: store, user: TestHelpers.UserPrincipal(),
+            oauthHttpClientFactory: new TestHelpers.SingleClientFactory(http));
+
+        var outcome = await service.Credentials.DisconnectAsync(cts.Token);
+
+        cts.IsCancellationRequested.Should().BeTrue("the caller cancelled while the refresh was in flight");
+        outcome.Should().Be(DisconnectOutcome.Disconnected);
+        (await store.GetAsync(TestHelpers.TestObjectId, TestContext.Current.CancellationToken)).Should().BeNull();
+    }
+
+    // An in-memory store that, like Key Vault, refuses to write on a cancelled token.
+    private sealed class CancellationHonouringStore : IZendeskTokenStore
+    {
+        private readonly InMemoryZendeskTokenStore _inner = new();
+
+        public Task<ZendeskUserToken?> GetAsync(string objectId, CancellationToken cancellationToken = default) =>
+            _inner.GetAsync(objectId, cancellationToken);
+
+        public Task SaveAsync(string objectId, ZendeskUserToken token, CancellationToken cancellationToken = default)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            return _inner.SaveAsync(objectId, token, cancellationToken);
+        }
+
+        public Task RemoveAsync(string objectId, CancellationToken cancellationToken = default)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            return _inner.RemoveAsync(objectId, cancellationToken);
+        }
+    }
+
     // Refuses the first revocation, cancels the caller's token when the refresh arrives, then answers it.
     private sealed class CancelOnRefreshHandler(CancellationTokenSource caller) : HttpMessageHandler
     {
         public List<string> Seen { get; } = [];
 
-        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+        // Async and returning the response directly, so ownership visibly passes to HttpClient.
+        protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
         {
+            await Task.Yield();
             if (request.Method == HttpMethod.Post)
             {
                 Seen.Add("POST");
-                caller.Cancel();
-                return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)
+                await caller.CancelAsync();
+                return new HttpResponseMessage(HttpStatusCode.OK)
                 {
                     Content = new StringContent("{\"access_token\":\"renewed\",\"refresh_token\":\"r2\",\"expires_in\":7200,\"token_type\":\"bearer\"}",
                         System.Text.Encoding.UTF8, "application/json"),
-                });
+                };
             }
 
             var bearer = request.Headers.Authorization!.Parameter;
             Seen.Add($"DELETE Bearer {bearer}");
-            return Task.FromResult(new HttpResponseMessage(bearer == "rejected" ? HttpStatusCode.Unauthorized : HttpStatusCode.NoContent));
+            return new HttpResponseMessage(bearer == "rejected" ? HttpStatusCode.Unauthorized : HttpStatusCode.NoContent);
         }
     }
 

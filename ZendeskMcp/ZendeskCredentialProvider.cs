@@ -38,6 +38,9 @@ public sealed class ZendeskCredentialProvider(
     // Refresh this long before expiry, so a token never expires between being read and being used.
     private static readonly TimeSpan RefreshSkew = TimeSpan.FromMinutes(2);
 
+    // How long a disconnect may take to write its tombstone after the revocation, whatever the caller does.
+    private static readonly TimeSpan RemovalTimeout = TimeSpan.FromSeconds(30);
+
     // One refresh per person at a time. Zendesk rotates the refresh token on use, so two concurrent
     // refreshes would have the loser present a spent token, fail with invalid_grant, and disconnect a
     // person who did nothing wrong.
@@ -274,7 +277,13 @@ public sealed class ZendeskCredentialProvider(
             // The whole grant, not just the access token: Zendesk can refuse an access token before its
             // recorded expiry while the refresh token behind it is still live.
             var revoked = await oauthClient.RevokeGrantAsync(token.AccessToken, token.RefreshToken, cancellationToken);
-            await store.RemoveAsync(objectId, cancellationToken);
+
+            // Forgotten on a bounded token of its own, not the caller's. Once the revocation has been
+            // attempted — and RevokeGrantAsync may have finished it after the caller cancelled — the
+            // grant must not be left stored: Key Vault honours a cancelled token, so the tombstone
+            // could be skipped, or written with the cache left holding the revoked grant.
+            using var removal = new CancellationTokenSource(RemovalTimeout);
+            await store.RemoveAsync(objectId, removal.Token);
             return revoked ? DisconnectOutcome.Disconnected : DisconnectOutcome.ForgottenButNotRevoked;
         }
         finally

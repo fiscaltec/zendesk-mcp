@@ -124,15 +124,24 @@ public sealed class ZendeskOAuthClient(
     /// there is no refresh token (a legacy non-expiring token is the whole grant). Anything else —
     /// a refresh that fails otherwise, or a renewed token that still is not revoked — is reported as
     /// false, so the caller says the revocation is unconfirmed rather than claiming it.
-    /// Whether Zendesk revokes the refresh token along with its access token is not documented
-    /// (developer.zendesk.com, "Revoke Token" and "Revoking an OAuth access token", read 2026-11-04);
-    /// this does not rely on it either way.
+    /// <para>
+    /// <b>Unverified against the live API: a successful DELETE is taken to end the whole grant.</b>
+    /// Both success paths — the first revocation, and the renewed token's after a 401 — return true
+    /// without testing the refresh token, and the renewed refresh token the exchange returns is
+    /// discarded. That holds only if revoking an access token also invalidates its refresh token,
+    /// which Zendesk neither states nor denies ("Revoke Token", "Revoking an OAuth access token" and
+    /// "OAuth Tokens for Grant Types" on developer.zendesk.com, read 2026-11-04). Confirming it means
+    /// presenting the refresh token after a revocation, which needs a live grant this code cannot
+    /// test; until then, "revoked" here means Zendesk accepted the revocation of the access token.
+    /// </para>
     /// </remarks>
     public async Task<bool> RevokeGrantAsync(string accessToken, string? refreshToken, CancellationToken cancellationToken)
     {
         var first = await SendRevocationAsync(accessToken, cancellationToken);
         if (first != RevocationResult.Rejected)
         {
+            // Unverified against the live API: a revoked access token is taken to end its refresh
+            // token too (see remarks).
             return first == RevocationResult.Revoked;
         }
 
