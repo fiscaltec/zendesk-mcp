@@ -107,6 +107,15 @@ public class ZendeskServerOptions
     public long MaxAttachmentBytes { get; set; } = 20 * 1024 * 1024;
 
     /// <summary>
+    /// How long to wait between reads of a Zendesk background job (Bulk_update_tickets). With
+    /// <see cref="MaxJobStatusPolls"/> it bounds how long a tool call waits for a job to finish.
+    /// </summary>
+    public TimeSpan JobStatusPollInterval { get; set; } = TimeSpan.FromSeconds(2);
+
+    /// <summary>Most reads of a background job's status in one tool call; a job still running then is reported as running.</summary>
+    public int MaxJobStatusPolls { get; set; } = 10;
+
+    /// <summary>
     /// Account-level switches for the actions with the widest reach. These apply to everyone, on
     /// top of each person's Entra tier and Zendesk role, and mirror the settings a hosted Zendesk
     /// MCP exposes. All default to off.
@@ -210,6 +219,18 @@ public class ZendeskServerOptions
                 $"Zendesk:MaxAnalyticsTickets must be >= 1 (got {MaxAnalyticsTickets}).");
         }
 
+        if (JobStatusPollInterval < TimeSpan.Zero || JobStatusPollInterval > TimeSpan.FromSeconds(10))
+        {
+            throw new InvalidOperationException(
+                $"Zendesk:JobStatusPollInterval must be between 0 and 10 seconds (got {JobStatusPollInterval}).");
+        }
+
+        if (MaxJobStatusPolls is < 1 or > 30)
+        {
+            throw new InvalidOperationException(
+                $"Zendesk:MaxJobStatusPolls must be between 1 and 30 (got {MaxJobStatusPolls}).");
+        }
+
         if (ConnectLinkLifetime <= TimeSpan.Zero || ConnectLinkLifetime > TimeSpan.FromHours(1))
         {
             throw new InvalidOperationException(
@@ -225,7 +246,7 @@ public class ZendeskServerOptions
 /// </summary>
 public class ZendeskFeatureOptions
 {
-    /// <summary>Allow public ticket comments, CCs and public macro replies (they email customers).</summary>
+    /// <summary>Allow public ticket comments, CCs, public macro replies and public merge comments (they email customers).</summary>
     public bool AllowPublicReplies { get; set; }
 
     /// <summary>Allow publishing Help Center articles and translations rather than saving drafts.</summary>

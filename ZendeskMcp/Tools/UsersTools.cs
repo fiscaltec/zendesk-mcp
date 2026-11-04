@@ -171,16 +171,22 @@ public static class UsersTools
 
         var wanted = full_name.Trim();
         var agents = new Dictionary<long, JsonObject>();
+        var truncated = false;
 
         // Two searches rather than one with -role:end-user: a role: term is the documented way to
-        // narrow a user search, and both agent roles must be covered.
+        // narrow a user search, and both agent roles must be covered. Every page is read (up to a
+        // bound), through the cursor-paginated export search Search_users uses: the ordering below is
+        // done here, so an exact match on a later page would otherwise be missed and exact_match
+        // reported false.
         foreach (var role in new[] { "agent", "admin" })
         {
             var query = $"type:user role:{role} name:{PeopleSupport.Quoted(wanted)}";
-            var page = await zendesk.GetAsync("/api/v2/search", ToolJson.Query(("query", query)), cancellationToken: cancellationToken);
-            foreach (var user in page["results"] as JsonArray ?? [])
+            var pages = await zendesk.GetAllPagesAsync("/api/v2/search/export", ToolJson.Query(("query", query), ("filter[type]", "user")), "results",
+                maxItems: MaxAgentMatchesPerRole, cancellationToken: cancellationToken);
+            truncated |= pages.HasMore;
+            foreach (var user in pages.Items)
             {
-                if (user is not null && ToolJson.Long(user["id"]) is { } id && ToolJson.String(user["role"]) is "agent" or "admin")
+                if (ToolJson.Long(user["id"]) is { } id && ToolJson.String(user["role"]) is "agent" or "admin")
                 {
                     agents.TryAdd(id, ToolJson.Pick(user, "id", "name", "email", "role", "active", "suspended"));
                 }
@@ -192,13 +198,23 @@ public static class UsersTools
             .ThenBy(a => ToolJson.String(a["name"]), StringComparer.OrdinalIgnoreCase)
             .ToList();
 
-        return new JsonObject
+        var result = new JsonObject
         {
             ["agents"] = new JsonArray(ordered.Select(a => (JsonNode)a).ToArray()),
             ["count"] = ordered.Count,
             ["exact_match"] = ordered.Any(a => string.Equals(ToolJson.String(a["name"])?.Trim(), wanted, StringComparison.OrdinalIgnoreCase)),
-        }.ToJsonString();
+            ["truncated"] = truncated,
+        };
+        if (truncated)
+        {
+            result["note"] = "More agents match than were read, so not all matches are listed and exact_match may be false even though an agent has exactly this name. Search with a fuller or more distinctive name.";
+        }
+
+        return result.ToJsonString();
     }
+
+    /// <summary>The most search results read for each agent role; each page is a search request made as the caller.</summary>
+    public const int MaxAgentMatchesPerRole = 1000;
 
     // Each user's organisation memberships, with each organisation's name and external id (one
     // memberships read per user, then one organisations read for all of them).

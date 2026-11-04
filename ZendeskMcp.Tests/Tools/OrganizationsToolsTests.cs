@@ -249,4 +249,26 @@ public class OrganizationsToolsTests
         Parse(put.Body!).ToJsonString().Should().Be("""{"user":{"organization_id":7}}""");
         fake.Requests.Should().NotContain(r => r.Method == HttpMethod.Delete);
     }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData(true)]
+    public async Task AddUserToOrganization_MultipleOrganizationAccount_ValidationErrorIsSurfaced_AndNothingIsMoved(bool? replaceExisting)
+    {
+        // The account setting says users may hold several organisations, so a 422 here is some other
+        // validation failure, not a one-organisation limit. replace_existing is documented as ignored on
+        // such accounts: it must not turn the refusal into a move that changes the default organisation
+        // and re-files the user's tickets.
+        var memberships = """{"organization_memberships":[{"id":1,"organization_id":3,"default":true}],"meta":{"has_more":false}}""";
+        var (fake, zendesk) = Build(Routes(memberships,
+                post: _ => new FakeResponse(HttpStatusCode.UnprocessableEntity, """{"error":"RecordInvalid","description":"Record validation errors"}"""),
+                multipleOrganizations: true),
+            allowChanges: true);
+        using var _ = fake;
+
+        var act = () => OrganizationsTools.AddUserToOrganization(zendesk, 500, 7, replace_existing: replaceExisting);
+
+        (await act.Should().ThrowAsync<HttpRequestException>()).Which.StatusCode.Should().Be(HttpStatusCode.UnprocessableEntity);
+        fake.Requests.Should().NotContain(r => r.Method == HttpMethod.Put, "nothing may be moved on an account that allows several organisations");
+    }
 }

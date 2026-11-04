@@ -1094,6 +1094,7 @@ the vault instead, through the same window, with this block on its own:
 ```bash
 ( set -euo pipefail; source ~/zendesk-estate.env; assert_context
 umask 077
+mkdir -p "$SECRET_DIR"                                # the restart that lost the file took the directory too
 KVW_ME=$(az ad signed-in-user show --query id -o tsv)
 KVW_ID=$(az keyvault show -g "$RG" -n "$KV" --query id -o tsv)
 KVW_PREV=$(az keyvault show -g "$RG" -n "$KV" --query "properties.networkAcls.defaultAction" -o tsv)
@@ -1459,14 +1460,18 @@ source ~/zendesk-estate.env; capture_secret teams-webhook
 
 Neither scanner posts unless a secret is within 30 days of expiry (Vitally's logged `none within 30
 days` on every run for 90 days before this build), so a run of the Job does not prove the webhook.
-This does — one test card to the channel, the URL again piped and never printed; expect `HTTP 202`
-**and** the card in the channel (Power Automate accepts with 202 even when the flow cannot post):
+This does — one test card to the channel, read from the captured `$SECRET_DIR/teams-webhook` (the
+value the Job below is given, whichever channel it names) and never printed; expect `HTTP 202`
+**and** the card in the channel (Power Automate accepts with 202 even when the flow cannot post).
+Run it **before** the Job block below, which deletes the captured file. To re-test later, feed the
+same command from the Job's own secret instead: replace the `< "$SECRET_DIR/teams-webhook"` at the
+end with `< <(az containerapp job secret show -g "$RG" -n "$JOB" --secret-name teams-webhook --query value -o tsv)`:
 
 ```bash
-az containerapp job secret show -g vitally-prod-rg-uksouth -n vitally-prod-secscan-uksouth --secret-name teams-webhook --query value -o tsv | python3 -c 'import json,sys,urllib.request
+source ~/zendesk-estate.env; python3 -c 'import json,sys,urllib.request
 u = sys.stdin.read().strip()
 card = {"type": "message", "attachments": [{"contentType": "application/vnd.microsoft.card.adaptive", "content": {"type": "AdaptiveCard", "$schema": "http://adaptivecards.io/schemas/adaptive-card.json", "version": "1.4", "body": [{"type": "TextBlock", "weight": "Bolder", "text": "Test: Key Vault secret-expiry webhook"}, {"type": "TextBlock", "wrap": True, "text": "Sent by hand to check the secret-expiry webhook still posts. Please ignore."}]}}]}
-print("HTTP", urllib.request.urlopen(urllib.request.Request(u, json.dumps(card).encode(), {"Content-Type": "application/json"}), timeout=30).status)'
+print("HTTP", urllib.request.urlopen(urllib.request.Request(u, json.dumps(card).encode(), {"Content-Type": "application/json"}), timeout=30).status)' < "$SECRET_DIR/teams-webhook"
 ```
 
 ```bash
@@ -1660,9 +1665,21 @@ grants=$(az rest --method get --url "$G/oauth2PermissionGrants?\$filter=clientId
 scopes_for() { printf '%s' "$grants" | python3 -c 'import json,sys; g=json.load(sys.stdin)["value"]; print(" ".join(sorted(set(" ".join(x["scope"] for x in g if x["consentType"]=="AllPrincipals" and x["resourceId"]==sys.argv[1]).split()))))' "$1"; }
 expect "admin consent on Graph" "email offline_access openid profile" "$(scopes_for "$GRAPH_SP")"
 expect "admin consent on own API" "mcp.access" "$(scopes_for "$SP_ID")"
+# Consent must not have widened Gate 1: still the department group alone, as Phase 6's Verify found.
+expect "Gate 1: $GATE1_GROUP_NAME assigned directly, after consent" 1 \
+  "$(az rest --method get --url "$G/servicePrincipals/$SP_ID/appRoleAssignedTo?\$top=999" --query "length(value[?principalId=='$GATE1_GROUP_ID' && appRoleId=='$DEFAULT_APP_ROLE'])" -o tsv)"
+expect "Gate 1: nothing else assigned, after consent" 1 \
+  "$(az rest --method get --url "$G/servicePrincipals/$SP_ID/appRoleAssignedTo?\$top=999" --query "length(value)" -o tsv)"
 echo "Phase 10 verified"
 )
 ```
+
+If the last check fails, list what was added (`az rest --method get --url
+"https://graph.microsoft.com/v1.0/servicePrincipals/<SP_ID>/appRoleAssignedTo" --query
+"value[].{id:id, who:principalDisplayName, type:principalType}"`) and remove anything other than the
+department group with `az rest --method delete --url
+"https://graph.microsoft.com/v1.0/servicePrincipals/<SP_ID>/appRoleAssignedTo/<id>"`: a direct
+assignment to a person lets them sign in whatever their department.
 
 ---
 
