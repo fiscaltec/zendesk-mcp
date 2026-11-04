@@ -647,7 +647,7 @@ a green no-op. Train-driven deploys run inside `release.yml`'s run, so they neve
 
 ### Staging validation
 
-Before production, on staging against the real Zendesk account, with `Authorization__ReadOnly=true` except while deliberately testing writes on a test ticket:
+Steps 1, 4, 5 and 6 are written out, with the log queries that verify them, in `docs/runbooks/zendesk-oauth-staging-validation.md`. Before production, on staging against the real Zendesk account, with `Authorization__ReadOnly=true` except while deliberately testing writes on a test ticket:
 
 1. Sign in (Entra), then connect a Zendesk agent; confirm a mismatched Zendesk login is refused and its token revoked.
 2. Run every read tool once, and every write tool against a test ticket, test macro (inactive) and draft article, with the feature switches as production will have them.
@@ -661,7 +661,7 @@ Where each step stands, mapped to its issue (updated 2026-11-04):
 | Step | State | Issue |
 |---|---|---|
 | Staging itself | **built** 2026-10-28/29, read-only, at `https://zendesk-mcp-staging.fiscaltec.com` | #3 |
-| 1 — sign-in, connect, mismatched login refused and revoked | **sign-in and connect done** on both origins (2026-10-29, Phase 14); **an end-user login refused and revoked** on staging (2026-11-04); the email-mismatch branch not exercised live (no spare agent login; accepted); becomes a standing runbook, `docs/runbooks/zendesk-oauth-staging-validation.md`, modelled on vitally-mcp's `entra-cutover-staging-validation.md` | #4 |
+| 1 — sign-in, connect, mismatched login refused and revoked | **sign-in and connect done** on both origins (2026-10-29, Phase 14); **an end-user login refused and revoked** on staging (2026-11-04); the email-mismatch branch not exercised live (no spare agent login; accepted); the standing runbook is `docs/runbooks/zendesk-oauth-staging-validation.md` (every step and log check, as run on 2026-11-04) | #4 |
 | 2 — every read and write tool | **done live** with a development token (PR #1), as an **admin**; repeating the reads as an ordinary agent is open | #6 |
 | 3 — `Unverified` markers | read-side settled; eight remain that need data the account lacks | #7 |
 | 4 — refresh | **done** on production 2026-11-04: a six-day-old grant refreshed, the rotated token persisted (Key Vault `SecretSet`), across the `v1.1.1` deploy | #4 |
