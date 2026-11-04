@@ -8,8 +8,10 @@ Entra group tiers from its first deploy.
 
 When `Authorization__ReadOnly=true` is set on the Container App revision:
 
-- Every non-GET Zendesk call is denied for everyone (`ToolAuthorizer`, before the tier check), and the
-  denial is audited.
+- Every non-GET call a tool makes through `ZendeskService` is denied for everyone (`ToolAuthorizer`,
+  before the tier check), and the denial is audited when `Audit:Enabled` is on. The OAuth calls
+  `ZendeskOAuthClient` makes (connect, refresh, revoke) are POSTs outside it and still work, which is
+  what keeps connecting, refreshing and `Disconnect_zendesk` working in a lock-down.
 - `tools/list` shows only tools annotated read-only, plus `Disconnect_zendesk`
   (`ReadOnlyToolFilter.OwnConnectionTools`). That tool touches only the caller's own connection, and
   a lock-down is when someone most needs to cut it.
@@ -24,13 +26,14 @@ see the same list even with it off.)
 
 Staging acts on the one live Zendesk account. There is no sandbox. `Authorization__ReadOnly=true`
 is staging's standing setting (`var.staging_read_only`, default `true`, in
-`infra/terraform/containerapps-staging.tf`). Lift it only for a deliberate check that needs the
-write tools to be visible, such as proving a reader is denied one.
+`infra/terraform/containerapps-staging.tf`).
 
-PR #27 gives staging its own Zendesk OAuth client, which may request only the `read` scope. Once
-that is merged, Zendesk itself refuses a staging write even with this switch lifted, so the switch
-becomes the second layer rather than the only one. vitally-mcp could not do the same, because Vitally
-offers no read-scoped key.
+It is the second layer there, not the only one. Since 2026-11-04 (#27) staging's Zendesk OAuth client,
+`fiscal_zendesk_mcp_staging`, allows only `read`, so Zendesk itself refuses a staging write even with
+this switch lifted. vitally-mcp could not do the same, because Vitally offers no read-scoped key. So
+there is no reason to lift it on staging: write checks run through production on throwaway records
+(`CLAUDE.md`, *Staging validation*). If staging's client is ever widened and a lift is needed, use
+the two independent restores that section requires (a shell trap plus a detached failsafe).
 
 ⚠️ **A recreate does NOT bring staging up guarded.** `containerapps-staging.tf` records the setting,
 but nothing applies the file: the Terraform here is a record and is never applied. An app created
@@ -53,6 +56,7 @@ estate was built (#3), with `true` written in. Only exit **0** with `PASS` is a 
 | exit 1 | An assertion definitely failed; `<unset>` there means **unguarded**, not "defaulted to safe" |
 | `NOT ASSESSED` (exit 2) | You do not know, which is not a pass |
 | exit 3 | `az` says the app does not exist |
+| exit 64 | The command line was wrong (usage error) |
 
 A `secretRef`-backed variable counts as set; the script's header says why a `.value` query would
 get that wrong. `ApplicationInsights__ConnectionString` being set means **configured, not
@@ -63,12 +67,14 @@ answering requests.
 Toggling the switch rolls a new revision, and a new revision is a new process. That empties
 everything held in memory:
 
-- the Graph permission cache;
-- the cached tokens;
+- the Graph permission cache, **including the last-known-good tiers** that cover a Graph outage;
+- the cached copies of people's Zendesk tokens (the tokens themselves are in Key Vault, so nobody has
+  to reconnect);
+- the `/oauth/*` proxy's in-flight sign-in state;
 - every outstanding connect link and connect attempt, and every upload slot (single replica, in
   memory; see `CLAUDE.md`).
 
-Anyone part-way through connecting Zendesk, or uploading, starts again.
+Anyone part-way through signing in with Microsoft, connecting Zendesk or uploading starts again.
 
 ## What it is not for
 
@@ -104,11 +110,17 @@ tier from the running process. A restart throws that away. To stop the server, u
 - **A Zendesk role is checked too.** Every call is made as the person's own Zendesk agent, so Zendesk
   can still refuse what the tier allows.
 
-**To check the tiers on a live revision** (needs a real sign-in per tier; #4's runbook carries the
-steps): a reader calling a write tool is denied; an editor's writes succeed. Look for the denial in
+**To check the tiers on a live revision** (needs a real sign-in per tier; PR #30 adds the standing
+runbook for it under #4):
+
+- A reader never sees a write tool (tier filtering hides it), and a raw `tools/call` to one is refused
+  at the per-tool `[Authorize]` check (`ZendeskPermissionHandler`) whatever `ReadOnly` says. So this
+  check runs on staging as it stands, with no lift.
+- An editor's write succeeds. That needs a write-capable Zendesk token, so it runs on production
+  against a throwaway record. Look for the denial in
 `AppEvents` keyed by the caller's Entra **object id**, and expect a **`ZendeskToolCallDenied`**
 record (`LogToolCallDenied`), not `ZendeskUpstreamDenied` (`LogDenied`). The SDK's authorisation filter rejects an out-of-tier call at the per-tool `[Authorize]`
 check, before `ZendeskService.SendAsync` runs, and `LogDenied` is reached only from inside
 `SendAsync`. If you look for the wrong event, you cannot tell it apart from the denial not being
-audited at all. (A read-only refusal is the other way round: the tool is allowed, its non-GET call
-is refused inside `SendAsync`, so it is a `ZendeskUpstreamDenied`.)
+audited at all. (A read-only refusal for a caller whose tier allows the tool is the other way round: its
+non-GET call is refused inside `SendAsync`, so it is a `ZendeskUpstreamDenied`.)
