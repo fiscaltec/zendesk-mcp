@@ -88,9 +88,36 @@ public static class AuditRecordIds
             last = last[..^5];
         }
 
+        if (last == "update_many")
+        {
+            return FromIdsQuery(uri);
+        }
+
         return !string.IsNullOrEmpty(last) && last.All(char.IsAsciiDigit)
             ? new AuditedRecords([last], 1, IdsAvailable: true)
             : Unavailable;
+    }
+
+    /// <summary>
+    /// The records a bulk update names in its own <c>ids=</c> query. Zendesk answers
+    /// <c>PUT …/update_many?ids=…</c> with a background job, not the records, so the request is the
+    /// only place the touched ids appear at the moment of the write.
+    /// </summary>
+    /// <remarks>
+    /// All or nothing: one entry that is not a whole number means the query is not the list this
+    /// expects, and recording the rest would present part of it as the whole.
+    /// </remarks>
+    private static AuditedRecords FromIdsQuery(Uri uri)
+    {
+        var ids = Microsoft.AspNetCore.WebUtilities.QueryHelpers.ParseQuery(uri.Query).TryGetValue("ids", out var values)
+            ? values.ToString().Split(',')
+            : [];
+        if (ids.Length == 0 || ids.Any(id => id.Length == 0 || !id.All(char.IsAsciiDigit)))
+        {
+            return Unavailable;
+        }
+
+        return new AuditedRecords(ids.Take(MaxIds).ToList(), ids.Length, IdsAvailable: true);
     }
 
     public static AuditedRecords Extract(string rawJson)
@@ -116,6 +143,18 @@ public static class AuditRecordIds
 
     private static AuditedRecords ExtractFrom(JsonElement root)
     {
+        // A background job is not a record: its own id is a job token, so reading it as one would put
+        // a fabricated record id in the trail. A finished job lists the records it touched in
+        // `results`; until then the job names none, and the request has to (FromMutationUrl).
+        if (root.ValueKind == JsonValueKind.Object
+            && root.TryGetProperty("job_status", out var job)
+            && job.ValueKind == JsonValueKind.Object)
+        {
+            return job.TryGetProperty("results", out var results) && results.ValueKind == JsonValueKind.Array && results.GetArrayLength() > 0
+                ? ExtractFrom(results)
+                : Unavailable;
+        }
+
         if (!TryFindRecordArray(root, out var records))
         {
             return TryReadSingleRecord(root);

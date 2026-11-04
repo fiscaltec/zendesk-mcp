@@ -506,7 +506,7 @@ public static class TicketsTools
             throw new ArgumentException("problem_id links the ticket as an incident, so type must be 'incident' or left out.");
         }
 
-        var tagArray = Tags(tags, "tags");
+        var tagArray = TicketWriteHelpers.Tags(tags, "tags");
         var ccList = ccs ?? [];
         if (ccList.Length > 0 && !isPublic)
         {
@@ -737,8 +737,8 @@ public static class TicketsTools
             ToolJson.RequireFeature(zendesk.Options.Features.AllowPublicReplies, "AllowPublicReplies", "Copying people (additional_ccs) on a ticket");
         }
 
-        var addTags = Tags(additional_tags, "additional_tags");
-        var dropTags = Tags(remove_tags, "remove_tags");
+        var addTags = TicketWriteHelpers.Tags(additional_tags, "additional_tags");
+        var dropTags = TicketWriteHelpers.Tags(remove_tags, "remove_tags");
 
         // Tag changes send the ticket's whole tag list (see below), and drop-down, multi-select and
         // checkbox values are tags too: sent with custom_fields, that list would still carry each
@@ -760,12 +760,7 @@ public static class TicketsTools
             throw new ArgumentException($"Ticket {ticket_id} is not linked to a problem ticket, so there is nothing to unlink.");
         }
 
-        var solving = normalisedStatus == "solved";
-        if (custom_status_id is { } customStatusId)
-        {
-            var customStatus = await zendesk.GetAsync($"/api/v2/custom_statuses/{Id(customStatusId)}", cancellationToken: cancellationToken);
-            solving = ToolJson.String(customStatus["custom_status"]?["status_category"]) == "solved";
-        }
+        var solving = await TicketWriteHelpers.IsSolvingAsync(zendesk, normalisedStatus, custom_status_id, cancellationToken);
 
         var resultingType = problem_id is not null ? "incident" : normalisedType ?? currentType;
         if (solving && resultingType == "problem" && ToolJson.String(current["status"]) is not ("solved" or "closed"))
@@ -888,33 +883,5 @@ public static class TicketsTools
         {
             target[name] = value;
         }
-    }
-
-    // Zendesk tags are single words; a space would silently split one tag into two.
-    private static JsonArray? Tags(string[]? tags, string parameter)
-    {
-        if (tags is null || tags.Length == 0)
-        {
-            return null;
-        }
-
-        if (tags.Length > 100)
-        {
-            throw new ArgumentException($"{parameter} takes at most 100 tags.");
-        }
-
-        var array = new JsonArray();
-        foreach (var tag in tags)
-        {
-            var trimmed = (tag ?? string.Empty).Trim();
-            if (trimmed.Length == 0 || trimmed.Length > 255 || trimmed.Any(c => char.IsWhiteSpace(c) || c == ','))
-            {
-                throw new ArgumentException($"{parameter} entries must be single words without spaces or commas (got '{tag}').");
-            }
-
-            array.Add(trimmed);
-        }
-
-        return array;
     }
 }

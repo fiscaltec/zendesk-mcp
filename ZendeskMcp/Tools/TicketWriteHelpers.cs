@@ -15,7 +15,7 @@ public sealed record TicketCustomFieldInput(
     [property: JsonPropertyName("value")] string? Value);
 
 /// <summary>
-/// Validation and request-building shared by Create_ticket and Update_ticket: the rules about who a
+/// Validation and request-building shared by Create_ticket, Update_ticket and Bulk_update_tickets: the rules about who a
 /// ticket may email (public comments and CCs), linking incidents to problems, and copying or
 /// attaching files.
 /// </summary>
@@ -118,6 +118,52 @@ public static partial class TicketWriteHelpers
         }
 
         return entries;
+    }
+
+    /// <summary>
+    /// Validated tags, or null when none were given. Zendesk tags are single words; a space would
+    /// silently split one tag into two.
+    /// </summary>
+    public static JsonArray? Tags(string[]? tags, string parameter)
+    {
+        if (tags is null || tags.Length == 0)
+        {
+            return null;
+        }
+
+        if (tags.Length > 100)
+        {
+            throw new ArgumentException($"{parameter} takes at most 100 tags.");
+        }
+
+        var array = new JsonArray();
+        foreach (var tag in tags)
+        {
+            var trimmed = (tag ?? string.Empty).Trim();
+            if (trimmed.Length == 0 || trimmed.Length > 255 || trimmed.Any(c => char.IsWhiteSpace(c) || c == ','))
+            {
+                throw new ArgumentException($"{parameter} entries must be single words without spaces or commas (got '{tag}').");
+            }
+
+            array.Add(trimmed);
+        }
+
+        return array;
+    }
+
+    /// <summary>
+    /// Whether a change solves the ticket: <c>status</c> solved, or a custom status in the solved
+    /// category (read from Zendesk, as a custom status's name says nothing reliable about it).
+    /// </summary>
+    public static async Task<bool> IsSolvingAsync(ZendeskService zendesk, string? normalisedStatus, long? customStatusId, CancellationToken cancellationToken)
+    {
+        if (customStatusId is not { } id)
+        {
+            return normalisedStatus == "solved";
+        }
+
+        var customStatus = await zendesk.GetAsync($"/api/v2/custom_statuses/{id.ToString(CultureInfo.InvariantCulture)}", cancellationToken: cancellationToken);
+        return ToolJson.String(customStatus["custom_status"]?["status_category"]) == "solved";
     }
 
     /// <summary>Checks that a ticket can take incidents: it exists, is a problem, and is not closed.</summary>

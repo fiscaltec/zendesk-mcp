@@ -11,7 +11,7 @@ A Model Context Protocol (MCP) server in C# giving FISCAL staff access to Zendes
 **Provenance.** Issue references written `vitally-mcp#NNN` point at fiscaltec/vitally-mcp, where the lesson was learnt; the design and the code that carries it came across together. vitally-mcp's own `CLAUDE.md` holds the full history — dates, measurements, incident write-ups — behind the rules stated here more briefly. When this file and that one disagree about a shared component, check the code here.
 
 **Key characteristics:**
-- 45 tools over tickets, KPI/SLA/CSAT reporting, macros, users and organisations, configuration and the Help Center — see *Tools*.
+- 46 tools over tickets, KPI/SLA/CSAT reporting, macros, users and organisations, configuration and the Help Center — see *Tools*.
 - **Per-user Zendesk OAuth.** Every Zendesk call is made with the signed-in person's own Zendesk token. There is no shared Zendesk credential in a deployed target, so Zendesk attributes every change to the agent and applies their role, group and brand restrictions. This is the main architectural difference from vitally-mcp, which calls Vitally with one shared key.
 - **Two OAuth relationships, never mixed:** Entra signs people in to *this server* (`/oauth/*`, unchanged from vitally-mcp); Zendesk OAuth lets the server act *as them* (`/zendesk/connect`, `/zendesk/callback`).
 - **Streamable HTTP transport** (MCP 2026-07-28), stateless, on `ModelContextProtocol.AspNetCore`.
@@ -522,7 +522,7 @@ Zendesk ──302──> /zendesk/callback?code&state ──> exchange code ─�
 
 1. **RBAC backstop** — `ToolAuthorizer.EnsureAuthorizedAsync(verb)`: GET → read, POST/PUT/PATCH → write, DELETE → delete. Tools keep that mapping faithful: reads (macro preview included) are GETs, and **a write tool never issues a DELETE** — `Add_user_to_organization` moves a user with a `PUT`, for instance — so the write tier never needs the delete tier.
 2. **Credential** — the caller's own `Authorization` header from `ZendeskCredentialProvider`, per request; the shared `HttpClient` is never mutated.
-3. **Audit** — `LogAction` per upstream call; record ids captured from the **raw** body by `AuditRecordIds` before any tool reshapes it.
+3. **Audit** — `LogAction` per upstream call; record ids captured from the **raw** body by `AuditRecordIds` before any tool reshapes it, or, when the body names none, from the request URL (below).
 4. **Errors** — a non-2xx becomes `HttpRequestException` carrying Zendesk's body (truncated to 1 KB), which `ToolErrorResult` surfaces: `{"error":"RecordInvalid","details":…}` is what the model needs to correct its call. The server-side record logs status and resource type only.
 
 **Credential boundaries.** The base URL decides where the caller's token goes, and tool arguments can come from a model that has just read untrusted ticket content:
@@ -532,7 +532,9 @@ Zendesk ──302──> /zendesk/callback?code&state ──> exchange code ─�
 - Inlined article images are capped at 2 MB each and 8 MB per call, and only in the main body — a base64 copy per translation per image could otherwise cost gigabytes on the single replica.
 - `ZendeskService.Segment()` escapes caller strings used in paths; `BuildUrl` escapes every query value.
 
-**`AuditRecordIds` for Zendesk shapes:** ids are numbers (rendered as raw text); the primary collection is the first array of objects in the body (`tickets`, `results`, `articles` — Zendesk serialises it before sideloads such as `users`), `meta`/`links` ignored; a single record is bare or wrapped (`{"ticket":{…}}`). The mutation-URL fallback accepts only a **numeric** last segment — Zendesk paths also end in locales and collection names, and recording `en-gb` as a record id would be a fabricated identifier.
+**`AuditRecordIds` for Zendesk shapes:** ids are numbers (rendered as raw text); the primary collection is the first array of objects in the body (`tickets`, `results`, `articles` — Zendesk serialises it before sideloads such as `users`), `meta`/`links` ignored; a single record is bare or wrapped (`{"ticket":{…}}`). The mutation-URL fallback accepts only a **numeric** last segment — Zendesk paths also end in locales and collection names, and recording `en-gb` as a record id would be a fabricated identifier — except `…/update_many`, whose `ids=` query it reads (all whole numbers or nothing), because a bulk update answers with a background job rather than the records. A `job_status` is never read as a record: its own id is a job token, so only a finished job's `results[].id` count.
+
+**Bulk updates.** `Bulk_update_tickets` previews by default (`dry_run` true: one `show_many` read, current values beside proposed, no write) and refuses missing, hidden or closed tickets before writing. It sends `PUT /api/v2/tickets/update_many?ids=` with tag deltas (`additional_tags`/`remove_tags`, never a replacing `tags`), then polls `job_statuses/{id}` every `JobStatusPollInterval` up to `MaxJobStatusPolls` times. Only a ticket the job's results name as a success is reported updated; a job still running at the bound is reported as running. Solving any open problem ticket in the set needs `solve_incidents` (it does not count incidents per ticket, unlike `Update_ticket`).
 
 **Paging.** Tools that page for the caller pass Zendesk's cursor through (`after_cursor` → `page[after]`, `pagination_info {has_more, next_cursor, page_size}`). `GetAllPagesAsync` pages on the server's behalf (sideloads merged) up to `MaxAutoPageFetches`, marking the audit record truncated when it stops early. Analytics tools read at most `MaxAnalyticsTickets` tickets and refuse beyond it, saying how to split the range.
 
@@ -565,7 +567,7 @@ Ticket comments, article bodies and user fields are written by customers and can
 | Area | File | Tools |
 |---|---|---|
 | Connection | `ConnectionTools.cs` | `Get_zendesk_connection`, `Get_zendesk_connect_link`, `Disconnect_zendesk` |
-| Tickets | `TicketsTools.cs`, `TicketAttachmentsTools.cs` | `Search_tickets`, `Count_tickets`, `Get_ticket`, `Get_ticket_conversation`, `Create_ticket`, `Update_ticket`, `Get_ticket_attachment`, `Request_ticket_attachment_upload` |
+| Tickets | `TicketsTools.cs`, `TicketsBulkTools.cs`, `TicketAttachmentsTools.cs` | `Search_tickets`, `Count_tickets`, `Get_ticket`, `Get_ticket_conversation`, `Create_ticket`, `Update_ticket`, `Bulk_update_tickets`, `Get_ticket_attachment`, `Request_ticket_attachment_upload` |
 | Reporting | `AnalyticsTools.cs`, `SatisfactionTools.cs`, `TicketSla.cs` | `Get_ticket_metrics_summary`, `Get_sla_summary`, `Get_sla_queue`, `Get_satisfaction_ratings` |
 | Macros | `MacrosTools.cs` | `Search_macros`, `Preview_macro`, `Apply_macro`, `Create_macro`, `Update_macro`, `Set_macros_active` |
 | People | `UsersTools.cs`, `OrganizationsTools.cs` | `Search_users`, `Find_agent_by_name`, `Search_organizations`, `Add_user_to_organization` |

@@ -240,4 +240,58 @@ public class AuditRecordIdsTests
         result.IdsAvailable.Should().BeFalse();
         result.Ids.Should().BeEmpty();
     }
+
+    [Fact]
+    public void Extract_NeverReadsAJobsOwnIdAsARecord()
+    {
+        // A job_status is not a record: its id is a job token. Read as a wrapped single record it
+        // would put a fabricated record id in the trail (the shape Bulk_update_tickets gets back).
+        var result = AuditRecordIds.Extract("""{"job_status":{"id":"8b726e606741012ffc2d782bcb7848fe","status":"queued","results":null}}""");
+
+        result.IdsAvailable.Should().BeFalse();
+        result.Ids.Should().BeEmpty();
+    }
+
+    [Fact]
+    public void Extract_NamesTheRecordsAFinishedJobReports()
+    {
+        var result = AuditRecordIds.Extract("""{"job_status":{"id":"8b72","status":"completed","results":[{"id":101,"success":true},{"id":102,"error":"TicketUpdateFailed"}]}}""");
+
+        result.Ids.Should().Equal("101", "102");
+        result.Ids.Should().NotContain("8b72");
+    }
+
+    [Fact]
+    public void FromMutationUrl_NamesTheTicketsABulkUpdateLists()
+    {
+        // update_many answers with a job, so the ids= query is the only place the touched tickets
+        // appear at the moment of the write.
+        var result = AuditRecordIds.FromMutationUrl(HttpMethod.Put, "https://acme.zendesk.com/api/v2/tickets/update_many?ids=101%2C102,103");
+
+        result.IdsAvailable.Should().BeTrue();
+        result.Ids.Should().Equal("101", "102", "103");
+        result.RecordsFetched.Should().Be(3);
+    }
+
+    [Theory]
+    [InlineData("https://acme.zendesk.com/api/v2/tickets/update_many?ids=101,abc")]  // one entry not an id
+    [InlineData("https://acme.zendesk.com/api/v2/tickets/update_many?ids=101,,102")] // an empty entry
+    [InlineData("https://acme.zendesk.com/api/v2/tickets/update_many?ids=")]
+    [InlineData("https://acme.zendesk.com/api/v2/tickets/update_many?external_ids=a,b")]
+    public void FromMutationUrl_ReadsABulkIdsListAllOrNothing(string url)
+    {
+        var result = AuditRecordIds.FromMutationUrl(HttpMethod.Put, url);
+
+        result.IdsAvailable.Should().BeFalse();
+        result.Ids.Should().BeEmpty();
+    }
+
+    [Fact]
+    public void FromMutationUrl_IgnoresAnIdsQueryOnAnythingButABulkUpdate()
+    {
+        // Negative control for the above: the ids= rule is specific to update_many, so a collection
+        // path carrying the same query still names nobody.
+        AuditRecordIds.FromMutationUrl(HttpMethod.Put, "https://acme.zendesk.com/api/v2/tickets?ids=101,102")
+            .IdsAvailable.Should().BeFalse();
+    }
 }
