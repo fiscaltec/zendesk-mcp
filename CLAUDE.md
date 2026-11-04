@@ -758,8 +758,8 @@ configuration. There is no other provider to revert to.
   That is deliberately not among the errors that forget a grant (`ZendeskCredentialProvider`), so
   the call fails with the SDK's generic error, nobody is disconnected, and fixing the secret recovers
   everyone, once the app's cached copy expires (`TokenCacheDuration`, 5 minutes) or the revision
-  restarts. New connections fail at once. See `docs/runbooks/entra-and-zendesk-oauth.md`, *Rotate the
-  client secret*.
+  restarts. New connections fail at once. Each target has its own client and vault secret since #27.
+  See `docs/runbooks/entra-and-zendesk-oauth.md`, *Rotate a client secret*.
 
 Verify a secret change by signing in and connecting, never by a health probe.
 
