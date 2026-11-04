@@ -3,7 +3,8 @@ data "azurerm_client_config" "current" {}
 # ---- Secret vault: fully private (private endpoint only) ----
 #
 # Holds, and is the only store for:
-#   zendesk-oauth-client-secret     the Zendesk OAuth client's secret (Zendesk__OAuthClientSecretRef)
+#   zendesk-oauth-client-secret     production's Zendesk OAuth client secret (Zendesk__OAuthClientSecretRef)
+#   zendesk-staging-oauth-client-secret  staging's own Zendesk OAuth client secret
 #   entra-mcp-client-secret         the Entra app's client secret — the record of what is COPIED onto
 #                                   both Container Apps as `entra-oauth-client-secret`
 #   zendesk-user-{objectId}         one per person connected through production, written by the app

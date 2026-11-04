@@ -1,14 +1,15 @@
-# Entra app and Zendesk OAuth client — set-up, rotation and user tokens
+# Entra app and Zendesk OAuth clients — set-up, rotation and user tokens
 
 This server has **two OAuth clients**, and they are easy to confuse:
 
-| | Entra app **Zendesk MCP** | Zendesk OAuth client |
+| | Entra app **Zendesk MCP** | Zendesk OAuth clients (one per target since 2026-11-04) |
 |---|---|---|
 | Signs people in to | this server (MCP clients → `/oauth/*` façade → Entra) | Zendesk, so the server can call it **as them** (`/zendesk/connect` → Zendesk → `/zendesk/callback`) |
 | Defined in | `infra/terraform/entra.tf` | Zendesk Admin Centre → Apps and integrations → APIs → OAuth clients (not Terraform — Zendesk has no supported provider for it) |
-| Client id lives in | `OAuth__SharedClientId` (Terraform reference) | `Zendesk__OAuthClientId` (Terraform variable `zendesk_oauth_client_id`) |
-| Secret lives in | Key Vault `entra-mcp-client-secret`, **copied** into Container App secret `entra-oauth-client-secret` | Key Vault `zendesk-oauth-client-secret`, **read from the vault** by the app (cached 5 minutes) |
-| Callback(s) | `https://zendesk-mcp.fiscaltec.com/oauth/callback`, `https://zendesk-mcp-staging.fiscaltec.com/oauth/callback` | `https://zendesk-mcp.fiscaltec.com/zendesk/callback`, `https://zendesk-mcp-staging.fiscaltec.com/zendesk/callback` |
+| Client id lives in | `OAuth__SharedClientId` (Terraform reference) | `Zendesk__OAuthClientId`: production `fiscal_zendesk_mcp` (`zendesk_oauth_client_id`), staging `fiscal_zendesk_mcp_staging` (`staging_zendesk_oauth_client_id`) |
+| Secret lives in | Key Vault `entra-mcp-client-secret`, **copied** into Container App secret `entra-oauth-client-secret` | Key Vault `zendesk-oauth-client-secret` (production) and `zendesk-staging-oauth-client-secret` (staging, via `Zendesk__OAuthClientSecretRef`), **read from the vault** by the app (cached 5 minutes) |
+| Callback(s) | `https://zendesk-mcp.fiscaltec.com/oauth/callback`, `https://zendesk-mcp-staging.fiscaltec.com/oauth/callback` | one per client: production `https://zendesk-mcp.fiscaltec.com/zendesk/callback`; staging `https://zendesk-mcp-staging.fiscaltec.com/zendesk/callback` |
+| Scopes | `openid profile email offline_access` + the API scope | allowed on the client and requested by the server: production `read write`; staging `read` (`Zendesk__OAuthScopes`) |
 
 The Entra side is a straight port of vitally-mcp's. Its runbook,
 [`docs/runbooks/entra-app-registration.md` in fiscaltec/vitally-mcp](https://github.com/fiscaltec/vitally-mcp/blob/main/docs/runbooks/entra-app-registration.md),
@@ -41,53 +42,122 @@ does not change.
     value until you restart it.
   - Staging (scale-to-zero) cannot rehearse that step.
 
-## Zendesk OAuth client
+## Zendesk OAuth clients
 
-### Create
+Each target has its **own** client (split on 2026-11-04; the build created one shared client). Each
+lists only its own callback and has **allowed scopes** equal to what its target requests, so the
+client caps what any token minted through it can do:
 
-> The production client exists: `fiscal_zendesk_mcp`, created on 2026-10-28 and set as
-> `zendesk_oauth_client_id`'s default. These steps are for recreating it, or for a separate
-> development client; `docs/runbooks/build-the-estate.md` Phase 0 lists what to change on the existing
-> one before the build.
+| | Production | Staging |
+|---|---|---|
+| Name (shown on the consent screen) | `FISCAL Zendesk MCP` | `FISCAL Zendesk MCP (staging)` |
+| Unique identifier | `fiscal_zendesk_mcp` | `fiscal_zendesk_mcp_staging` |
+| Redirect URL (only this) | `https://zendesk-mcp.fiscaltec.com/zendesk/callback` | `https://zendesk-mcp-staging.fiscaltec.com/zendesk/callback` |
+| Allowed scopes = requested scopes | `read write` | `read` |
+| Vault secret | `zendesk-oauth-client-secret` | `zendesk-staging-oauth-client-secret` |
 
-1. Admin Centre → Apps and integrations → APIs → **OAuth clients** → Add OAuth client.
-   - **Name**: `FISCAL Zendesk MCP`. Agents see this name on the consent screen and in their
-     authorised apps list.
-   - **Unique identifier**: for example `fiscal_zendesk_mcp`. This value becomes `zendesk_oauth_client_id`.
-   - **Client kind**: *Confidential*. The server holds the secret and uses PKCE as well.
-   - **Redirect URLs**: both `/zendesk/callback` URLs in the table above, one per line.
-2. Copy the secret, which is shown once, straight into the vault. Do it from a host with a path to the
-   private endpoint, and never echo the value:
+Why: staging runs unreleased code against the one live Zendesk account. With a `read`-only client,
+Zendesk itself refuses a write made with a staging token, even if `Authorization__ReadOnly` is lifted,
+and a production connection can never be made through staging's callback. The cost: write checks
+cannot run through staging; they are done on throwaway records through production.
 
-   ```bash
-   read -rs SECRET   # paste the secret; nothing is echoed
-   printf %s "$SECRET" | az keyvault secret set --vault-name zendesk-prod-kv-uksouth \
-     --name zendesk-oauth-client-secret --file /dev/stdin \
-     --expires "$(date -u -d '+180 days' +%Y-%m-%dT%H:%M:%SZ)"
-   unset SECRET
-   ```
+Allowed scopes were checked against Zendesk's documentation on 2026-11-04 ([OAuth Clients API](https://developer.zendesk.com/api-reference/ticketing/oauth/oauth_clients/),
+[granular scopes announcement](https://support.zendesk.com/hc/en-us/articles/11093380955674-Announcing-more-granular-OAuth-client-scopes)):
+a request outside the list fails with `400 invalid_scope`, and the list applies to **new** tokens only.
+`read` and `write` are Zendesk's broad scopes. Requesting granular scopes instead (`tickets:read`, …)
+would be tighter still, but Zendesk does not document which scope each endpoint needs, so it would need
+every tool re-validated live; not done.
 
-   `printf %s`, not a `<<<` here-string: a here-string appends a newline, `--file` stores it, and
-   the app sends the secret as stored, so every connect, refresh and revoke would fail with
-   `invalid_client`.
+### Create a client
 
-3. Set `zendesk_oauth_client_id` and apply. Then open `/zendesk/connect` through a tool's link and
-   connect a test agent. A successful connect proves the client id, the secret, the redirect URL and
+1. Admin Centre → Apps and integrations → APIs → **OAuth clients** → Add OAuth client, with the
+   values in the table above. **Client kind**: *Confidential* (the server holds the secret and uses
+   PKCE as well). Set **allowed scopes** to exactly the target's row.
+2. Copy the secret, shown once, and store it with *Writing a secret to the vault* below.
+3. Point the target at it (`Zendesk__OAuthClientId`, and for staging `Zendesk__OAuthClientSecretRef`
+   and `Zendesk__OAuthScopes`) with `az containerapp update --set-env-vars …`, then record it in
+   `infra/terraform/` in the same PR. Existing connections on that target were made with the old
+   client: their next refresh fails `invalid_grant` and each person gets a connect link.
+4. Open a tool's connect link and connect a test agent. The consent screen should name the client and
+   list only its scopes. A successful connect proves the client id, the secret, the redirect URL and
    the token endpoint together.
 
-The scopes requested are `read write` (`Zendesk:OAuthScopes`). Tokens are requested as expiring
-(two-hour access tokens, 90-day refresh tokens) and are refreshed automatically. ⚠️ Unverified until
-staging: that this Zendesk account issues refresh tokens for the requested `expires_in`. If it
-returns a non-expiring token instead, the server stores it without an expiry, and nothing breaks.
+Tokens are requested as expiring (two-hour access tokens, 90-day refresh tokens) and refreshed
+automatically; refresh and rotation were confirmed live on 2026-11-04 (#4).
 
-### Rotate the client secret
+### Writing a secret to the vault
 
-The app reads `zendesk-oauth-client-secret` from the vault on demand and caches it for five minutes.
-Unlike the Entra secret, rotating the vault value **is** the rotation.
+The vault's data plane is private-endpoint only, and **no workstation has a working path to it**:
+on the corporate VPN its DNS has no record for the private endpoint (`NXDOMAIN`), and off the VPN the
+name resolves publicly and the vault refuses (`ForbiddenByConnection`, *"Public network access is
+disabled"*). Found again on 2026-11-04, when a bare `az keyvault secret set` from WSL failed both
+ways. So every write is a short, self-closing window, as `build-the-estate.md` Phase 7.2 does:
+a temporary **Key Vault Secrets Officer** assignment for you (created only if you lack one, and
+removed only if the block created it), `defaultAction: Deny`, an IP rule for your egress address,
+public access on; a `trap` undoes all of it however the block ends. The role is an ordinary
+assignment, not a PIM timer: if the shell is killed outright the trap cannot run, so check
+afterwards (*Notes*).
+
+Run it **off the VPN**, in WSL or a Linux shell, as one paste. Set `NAME` to the secret:
+
+```bash
+( set -euo pipefail
+KV=zendesk-prod-kv-uksouth; RG=zendesk-prod-rg-uksouth; NAME=zendesk-staging-oauth-client-secret
+ME=$(az ad signed-in-user show --query id -o tsv); KV_ID=$(az keyvault show -g "$RG" -n "$KV" --query id -o tsv)
+PREV=$(az keyvault show -g "$RG" -n "$KV" --query "properties.networkAcls.defaultAction" -o tsv); IP=""; CREATED=""
+close_window() { set +e; unset SECRET; BAD=""
+  # Public access off FIRST; the default action is restored only once that has succeeded, so a
+  # failure here can never leave the vault open to every address (it stays Deny instead).
+  if az keyvault update -g "$RG" -n "$KV" --public-network-access Disabled -o none; then OFF=1; else OFF=""; BAD=1; echo "!!! could not disable public access: default action left at Deny; disable public access by hand" >&2; fi
+  [ -n "$IP" ] && { az keyvault network-rule remove -g "$RG" -n "$KV" --ip-address "$IP/32" -o none || { BAD=1; echo "!!! could not remove IP rule $IP" >&2; }; }
+  [ -n "$OFF" ] && { az keyvault update -g "$RG" -n "$KV" --default-action "${PREV:-Allow}" -o none || { BAD=1; echo "!!! could not restore default action" >&2; }; }
+  [ -n "$CREATED" ] && { az role assignment delete --assignee "$ME" --role "Key Vault Secrets Officer" --scope "$KV_ID" -o none || { BAD=1; echo "!!! could not remove your Secrets Officer role" >&2; }; }
+  [ -z "$BAD" ] || { echo "!!! window NOT fully closed: fix the lines above by hand" >&2; exit 1; }
+  echo "window closed"; }
+trap close_window EXIT
+if [ "$(az role assignment list --scope "$KV_ID" --assignee-object-id "$ME" --query "length([?roleDefinitionName=='Key Vault Secrets Officer'])" -o tsv)" != 1 ]; then
+  az role assignment create --assignee-object-id "$ME" --assignee-principal-type User --role "Key Vault Secrets Officer" --scope "$KV_ID" -o none; CREATED=1; fi
+EGRESS=$(curl -4 -fsS https://api.ipify.org); case "$EGRESS" in *.*.*.*) echo "your egress IP: $EGRESS";; *) echo "bad IP '$EGRESS'" >&2; exit 1;; esac
+az keyvault update -g "$RG" -n "$KV" --default-action Deny -o none
+az keyvault network-rule add -g "$RG" -n "$KV" --ip-address "$EGRESS/32" -o none; IP=$EGRESS
+az keyvault update -g "$RG" -n "$KV" --public-network-access Enabled -o none
+ok=""; last=""
+for i in $(seq 1 20); do last=$(timeout 30 az keyvault secret list --vault-name "$KV" -o none 2>&1) && { ok=1; break; }; echo "  not reachable yet (attempt $i): ${last:0:120}"; sleep 15; done
+[ -n "$ok" ] || { echo "vault unreachable after 5 minutes: nothing stored" >&2; exit 1; }
+read -rsp "Paste the secret (hidden): " SECRET; echo
+[ -n "$SECRET" ] || { echo "empty: nothing stored" >&2; exit 1; }
+printf %s "$SECRET" | az keyvault secret set --vault-name "$KV" --name "$NAME" --file /dev/stdin --expires "$(date -u -d '+180 days' +%Y-%m-%dT%H:%M:%SZ)" -o none
+want=${#SECRET}; got=$(az keyvault secret show --vault-name "$KV" -n "$NAME" --query "length(value)" -o tsv)
+[ "$want" = "$got" ] && echo "stored: length $got matches" || { echo "!!! stored length $got, pasted $want" >&2; exit 1; } )
+```
+
+Run on 2026-11-04 to store `zendesk-staging-oauth-client-secret` (Key Vault `SecretSet` 200, and
+afterwards public access `Disabled`, no IP rule, no role left behind). Since then it removes the role
+only if it created it, and records the IP rule only once it is added. Notes:
+
+- `printf %s`, never a `<<<` here-string: a here-string appends a newline, `--file` stores it, and
+  every connect, refresh and revoke then fails with `invalid_client`. The length check catches it.
+- If clean-up fails part-way, the block says which step failed, prints *window NOT fully closed* and
+  exits non-zero. Public access is switched off **before** the default action is restored, so a
+  failure there leaves the vault on `Deny`, never open to every address.
+- Each probe is capped with `timeout 30` and prints its error, so a network refusal, a DNS failure
+  and a role still propagating can be told apart. An earlier version hid the errors and appeared to
+  hang.
+- You need rights to create role assignments on the vault (the PIM role used for the build).
+- Check afterwards, from anywhere (management plane): `az keyvault show -g zendesk-prod-rg-uksouth -n
+  zendesk-prod-kv-uksouth --query "{public:properties.publicNetworkAccess, ips:properties.networkAcls.ipRules}"`
+  must show `Disabled` and no rules, and `az role assignment list --scope <vault id>` only the
+  managed identity's Secrets Officer.
+
+### Rotate a client secret
+
+The app reads its client secret from the vault on demand and caches it for five minutes. Unlike the
+Entra secret, rotating the vault value **is** the rotation. Per client:
 
 1. In Admin Centre, regenerate the client's secret. The old one stops working at once, so do steps 1
    and 2 together, out of hours.
-2. Set the new value in the vault, as above. Within five minutes every replica uses it.
+2. Store the new value under that client's vault secret (table above) with *Writing a secret to the
+   vault*. Within five minutes every replica of that target uses it.
 3. Restart the revision if you cannot wait five minutes. Connect, refresh and revoke fail with
    `invalid_client` until the cache expires.
 
@@ -121,8 +191,8 @@ hold the old token, which is why revoking at Zendesk comes first.
 
 - `Authorization__ReadOnly=true` denies every create and update for everyone and hides the write
   tools, except *Disconnect_zendesk*: people can still cut their own connection during a lock-down.
-  Use it on staging whenever it is pointed at production Zendesk data and nobody is deliberately
-  testing writes. See vitally-mcp's `read-only-and-rbac-rollout.md` for why this was
+  Staging always runs with it on. Since 2026-11-04 it is the server's guard behind Zendesk's own:
+  staging's client allows only `read`, so lifting it alone no longer makes staging write. See vitally-mcp's `read-only-and-rbac-rollout.md` for why this was
   the safest staging posture there.
 - `Zendesk__Features__AllowPublicReplies`, `AllowArticlePublishing`, `AllowHelpCenterStructureChanges`, `AllowMacroChanges` and
   `AllowUserAndOrganizationChanges` are account-wide. The application defaults them off; FISCAL's
