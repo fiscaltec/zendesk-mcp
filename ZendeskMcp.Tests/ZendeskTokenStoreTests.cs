@@ -141,7 +141,8 @@ public class ZendeskTokenStoreTests
         secrets.Setup(s => s.GetSecretAsync($"zendesk-user-{ObjectId}", null, It.IsAny<SecretContentType?>(), It.IsAny<CancellationToken>()))
             .ReturnsAsync(Response.FromValue(secret, Mock.Of<Response>()));
         var logger = new CapturingLogger<KeyVaultZendeskTokenStore>();
-        var store = new KeyVaultZendeskTokenStore(secrets.Object, new MemoryCache(new MemoryCacheOptions()),
+        using var cache = new MemoryCache(new MemoryCacheOptions());
+        var store = new KeyVaultZendeskTokenStore(secrets.Object, cache,
             Options.Create(new ZendeskServerOptions { Subdomain = "acme" }), logger);
 
         var first = () => store.GetAsync(ObjectId);

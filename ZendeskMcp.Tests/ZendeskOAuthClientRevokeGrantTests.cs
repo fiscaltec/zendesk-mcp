@@ -11,8 +11,10 @@ namespace ZendeskMcp.Tests;
 /// refresh token is, so a 401 to revoking an access token is not taken as proof while a refresh token
 /// could still renew it (#12).
 /// </summary>
-public class ZendeskOAuthClientRevokeGrantTests
+public sealed class ZendeskOAuthClientRevokeGrantTests : IDisposable
 {
+    private readonly MemoryCache _cache = new(new MemoryCacheOptions());
+
     private const string Revoke = "/api/v2/oauth/tokens/current.json";
     private const string TokenEndpoint = "/oauth/tokens";
     private static readonly DateTimeOffset Expired = DateTimeOffset.UtcNow.AddHours(-1);
@@ -81,7 +83,7 @@ public class ZendeskOAuthClientRevokeGrantTests
         zendesk.Requests.Should().ContainSingle();
     }
 
-    private static ZendeskOAuthClient Build(HttpClient client) =>
+    private ZendeskOAuthClient Build(HttpClient client) =>
         new(new TestHelpers.SingleClientFactory(client),
             Options.Create(new ZendeskServerOptions
             {
@@ -89,5 +91,7 @@ public class ZendeskOAuthClientRevokeGrantTests
                 OAuthClientId = "zendesk-test-client",
                 DevelopmentOAuthClientSecret = "zendesk-test-secret",
             }),
-            new MemoryCache(new MemoryCacheOptions()), NullLogger<ZendeskOAuthClient>.Instance);
+            _cache, NullLogger<ZendeskOAuthClient>.Instance);
+
+    public void Dispose() => _cache.Dispose();
 }
