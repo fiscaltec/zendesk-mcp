@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 A Model Context Protocol (MCP) server in C# giving FISCAL staff access to Zendesk Support and the Help Center. It is built to the standard of [fiscaltec/vitally-mcp](https://github.com/fiscaltec/vitally-mcp) — the same host, OAuth façade, RBAC, audit, telemetry, CI/CD and Azure shape, ported rather than reinvented — and reproduces the functionality of Swifteq's hosted Zendesk MCP server.
 
-**Status: built and deployed; validation partly done.** The Azure and Entra estate was built on 2026-10-28/29 with `az` CLI by `docs/runbooks/build-the-estate.md` (#3; the runbook fixes it needed are in PR #16), as the Vitally estate is, and serves at `https://zendesk-mcp.fiscaltec.com` and `https://zendesk-mcp-staging.fiscaltec.com` (image `sha-d5528c7`). The secret-expiry scanner Job (9.4) followed the same day; it posts to the Teams channel Vitally's scanner uses, its card titled "Zendesk MCP:". Phase 14 passed: on both origins the owner signed in with Microsoft, connected their own Zendesk agent account, called `List_brands`, and the `ZendeskToolCall` audit records reached `AppEvents`. `infra/terraform/` describes the same estate as a record and is **never applied** (it passes `terraform validate`). The Zendesk endpoints were written from the API documentation; on 2026-10-28 every **read** tool was run against the live account with a development token in read-only mode, and what that showed was fixed (PR #1). The same day every write tool was exercised against throwaway records (all since deleted): test tickets, an inactive personal macro, draft articles, a test category and section, and a test end user and organisations; every feature-switch refusal was confirmed. That found and fixed `Update_ticket` silently dropping tag changes, `Add_user_to_organization` moving people out of their organisation without `replace_existing`, and a rename reporting the old name. A public reply on an existing ticket was sent too, notifying only the test agent. On 2026-11-04 the rest of per-user OAuth was exercised live and checked against the server's own logs (#4): refresh past expiry, persisted to Key Vault and surviving a deploy; disconnect, tombstone and reconnect; and a refused login (an end user) revoked; the contents of a tool-call record and its upstream record were confirmed too (#5). Not yet exercised: the rest of #5 (multi-record searches, denial records, the negative control), the email-mismatch refusal (no spare agent login; accepted, as it shares the refuse-and-revoke code), reads as an ordinary agent rather than an admin (#6), and eight shapes the account could not show, among them a reused idempotency key with a different body (#7). Read the open issues rather than trusting this paragraph: it describes 2026-11-04. Code marks each remaining uncertainty `// Unverified against the live API` — writes checked against the documentation only say "docs-checked, not live-tested". See *Staging validation* before trusting any tool against production.
+**Status: built and deployed; validation partly done.** The Azure and Entra estate was built on 2026-10-28/29 with `az` CLI by `docs/runbooks/build-the-estate.md` (#3; the runbook fixes it needed are in PR #16), as the Vitally estate is, and serves at `https://zendesk-mcp.fiscaltec.com` and `https://zendesk-mcp-staging.fiscaltec.com` (image `sha-d5528c7`). The secret-expiry scanner Job (9.4) followed the same day; it posts to the Teams channel Vitally's scanner uses, its card titled "Zendesk MCP:". Phase 14 passed: on both origins the owner signed in with Microsoft, connected their own Zendesk agent account, called `List_brands`, and the `ZendeskToolCall` audit records reached `AppEvents`. `infra/terraform/` describes the same estate as a record and is **never applied** (it passes `terraform validate`). The Zendesk endpoints were written from the API documentation; on 2026-10-28 every **read** tool was run against the live account with a development token in read-only mode, and what that showed was fixed (PR #1). The same day every write tool was exercised against throwaway records (all since deleted): test tickets, an inactive personal macro, draft articles, a test category and section, and a test end user and organisations; every feature-switch refusal was confirmed. That found and fixed `Update_ticket` silently dropping tag changes, `Add_user_to_organization` moving people out of their organisation without `replace_existing`, and a rename reporting the old name. A public reply on an existing ticket was sent too, notifying only the test agent. On 2026-11-04 staging was given its own **read-only** Zendesk OAuth client (`fiscal_zendesk_mcp_staging`, allowed and requested scope `read`), and production's client trimmed to `read write` with only its own callback; staging reconnected through it live. The same day the rest of per-user OAuth was exercised live and checked against the server's own logs (#4): refresh past expiry, persisted to Key Vault and surviving a deploy; disconnect, tombstone and reconnect; and a refused login (an end user) revoked; the contents of a tool-call record and its upstream record were confirmed too (#5). Not yet exercised: the rest of #5 (multi-record searches, denial records, the negative control), the email-mismatch refusal (no spare agent login; accepted, as it shares the refuse-and-revoke code), reads as an ordinary agent rather than an admin (#6), and eight shapes the account could not show, among them a reused idempotency key with a different body (#7). Read the open issues rather than trusting this paragraph: it describes 2026-11-04. Code marks each remaining uncertainty `// Unverified against the live API` — writes checked against the documentation only say "docs-checked, not live-tested". See *Staging validation* before trusting any tool against production.
 
 **Provenance.** Issue references written `vitally-mcp#NNN` point at fiscaltec/vitally-mcp, where the lesson was learnt; the design and the code that carries it came across together. vitally-mcp's own `CLAUDE.md` holds the full history — dates, measurements, incident write-ups — behind the rules stated here more briefly. When this file and that one disagree about a shared component, check the code here.
 
@@ -41,7 +41,7 @@ dotnet run --project ZendeskMcp/ZendeskMcp.csproj
 
 `StartupGuards.EnsureDevelopmentTokenIsLocal` refuses the development token unless `OAuth:NoAuth=true`, no `Zendesk:KeyVaultUri` is set **and** the host runs in the `Development` environment (there is no `launchSettings.json`, so `dotnet run` alone starts in Production and refuses). Behind real sign-in it would turn a per-user server back into a shared service account, attributing everyone's changes to the token's owner. Do not weaken that guard.
 
-To exercise per-user OAuth locally instead, leave `NoAuth` off, set `Zendesk:OAuthClientId` and `Zendesk:DevelopmentOAuthClientSecret` (in-memory token store; nothing survives a restart), and add `http://localhost:5099/zendesk/callback` to the redirect URLs of a **separate development** Zendesk OAuth client — not `fiscal_zendesk_mcp`, which serves production and must list only the two deployed callbacks (`docs/runbooks/build-the-estate.md`, Phase 0).
+To exercise per-user OAuth locally instead, leave `NoAuth` off, set `Zendesk:OAuthClientId` and `Zendesk:DevelopmentOAuthClientSecret` (in-memory token store; nothing survives a restart), and add `http://localhost:5099/zendesk/callback` to the redirect URLs of a **separate development** Zendesk OAuth client — not `fiscal_zendesk_mcp` (production) or `fiscal_zendesk_mcp_staging` (staging), each of which lists only its own deployed callback (`docs/runbooks/build-the-estate.md`, Phase 0.2).
 
 ### Smoke-testing the server
 
@@ -488,6 +488,126 @@ These components are ported without behavioural change, and their rules hold her
 
 What changed in porting them: the policy names (`zendesk:*`), the default custom-permissions claim, the Graph tier groups (`sg-zendesk-*`), the meter and counter names (`ZendeskMcp`, `zendesk.*`), and `AuditRecordIds` (below). `IncludeReads` matters more here than in vitally-mcp: Zendesk's own audit log records changes, not reads, so this trail is the only record of who read which ticket.
 
+### Metrics and tracing (as vitally-mcp#94, phase 6)
+
+These are exported to Application Insights only when `ApplicationInsights__ConnectionString` is set,
+like the audit records. Without it, the upstream duration goes to stdout with the rest of its audit
+record.
+
+| Signal | Name | What it answers |
+|---|---|---|
+| Upstream call duration | `durationMs` on the `ZendeskUpstreamCall` record (`AuditDurationMs` in `AppEvents`) | Which of a composite tool's upstream calls was slow, joined to the `ZendeskToolCall` record by correlation id. `SendAsync` times from send to body read, including any 429 waits. `DownloadAsync` times each hop to its response headers only, so an attachment's body is not in it |
+| 429 retries / exhaustion | `zendesk.ratelimit.retries`, `zendesk.ratelimit.exhausted` | How often the server exceeds the **account's** Zendesk budget, which every other integration shares |
+| Pager truncations | `zendesk.autopager.truncations`, tag `resource` | Whether `Zendesk:MaxAutoPageFetches` is set where people hit it |
+| Cache hit/miss | `zendesk.cache.lookups`, tags `cache` = `user_token` / `group_membership` / `oidc_discovery`, `result` = `hit` / `miss` | Per *lookup*. A miss means the cache did not answer, so an external lookup was needed. It is counted before the call, so a cancelled request is still a miss, and so is a stale Graph serve after a failed call |
+| MCP spans | activity source `Experimental.ModelContextProtocol` | A span per request, tool calls included. Sampled, and sanitised (below) |
+
+Three caveats on reading them, each of which would otherwise send a query wrong (the code cites them
+here, in `ZendeskMetrics`):
+
+- **Calls that fail before a response have no duration.** A timeout, a DNS failure or a refused
+  connection never reaches `LogAction`, so there is no `ZendeskUpstreamCall` row. (A non-2xx
+  response is different: `SendAsync` logs it, with its duration, before throwing.) Timeouts are the slowest calls of
+  all; look for them in the failure records. The clock also starts *after* the caller's credential
+  is resolved, so a cold Key Vault read of the person's token, or a token refresh, shows in the
+  tool-call duration and in no upstream one. The same goes for recovery after a `401`: the rejected
+  call and its retry each get a row, and the `OnTokenRejectedAsync` refresh between them is in
+  neither. `Audit:Enabled` and `Audit:IncludeReads` gate it too,
+  so turning reads off to cut ingest cost removes every GET's duration as well. `AuditDurationMs`
+  is the same property name on `ZendeskToolCall`, so filter on `Name`. Values are truncated to whole
+  milliseconds: `0` is a real measurement, and only `-1` means unmeasured.
+- **The `group_membership` hit rate counts lookups, and is inflated by design.** `ToolAuthorizer`
+  does not memoise, and each `tools/call` runs several checks: vitally-mcp counted at least three on
+  SDK 2.2.0, and that has not been re-counted on 2.3.0 here. A `tools/list` checks every tool. Read
+  the rate as "how often Graph was spared", never as "how well `LiveGroupCacheSeconds` is tuned".
+  `user_token` is inflated the same way: every upstream call resolves the caller's credential, and
+  the provider reads the store again near expiry and after a `401`, so a composite tool records one
+  lookup per upstream call. It is counted only by the Key Vault store, where a cached "not connected"
+  is a hit. Read it as "how often Key Vault was spared", not as tuning for `TokenCacheDuration`.
+- **The `oidc_discovery` hit rate looks healthy during a provider outage.** After a failed refresh,
+  the last-known-good copy is re-cached for a minute (`FailedRefreshRetryInterval`), and reads in
+  that minute are hits.
+
+The counters live on one `Meter`, `ZendeskMcp` (`ZendeskMetrics`, created through `IMeterFactory`).
+Every consumer takes it as an **optional** constructor parameter, so a registration that never
+resolved would record nothing while every unit test passed.
+`TheComposedHost_InjectsTheCounters_IntoTheComponentsThatRecordThem` proves the real wiring for
+`ZendeskService` (a truncation) and the Graph resolver. The OIDC resolver, the Key Vault token store
+and the rate limiter are not reachable from that harness, so only their unit tests cover them. Names
+live in `TelemetrySources`, which `Program.cs` and the tests share.
+
+⚠️ **The SDK's activity source is `Experimental.ModelContextProtocol`, not the bare
+`ModelContextProtocol`.** A source registered under a name nothing publishes is accepted silently and
+captures nothing. `TheMcpSdk_PublishesTheSourceWeRegister_AndNoSanitisedSpanCarriesCallerText` fails
+if it stops being published, so an SDK bump that drops the prefix shows up as a red test.
+
+⚠️ **The SDK's meter (same name) is deliberately NOT registered.** Its
+`mcp.server.operation.duration` histogram has `gen_ai.tool.name` as a dimension. A `tools/call`
+naming a tool that does not exist puts the invented name there: caller text, unbounded cardinality,
+and every one recorded, because metrics are never sampled. A span processor cannot rewrite metric
+tags. Per-tool latency is already queryable, unsampled, from `AuditDurationMs` on `ZendeskToolCall`.
+The exporter test pins the meter as unregistered. If per-method failure rates are ever wanted,
+register it behind a view that drops `gen_ai.tool.name`. Never register it as-is.
+
+⚠️ **Metric tags carry only values this code fixes.** A caller-controlled tag value is a cardinality
+explosion, and it puts customer text in a metrics store. The pager's `resource` tag comes from
+`ZendeskService.ResourceTypeOf`: the first segment after `/api/v2/`, checked against the
+`KnownResourceTypes` allowlist that the failure log uses. So the tag is `/api/v2/tickets` or
+`/api/v2/tickets/…`, never a ticket id, and anything else reads `/api/v2/(unrecognised)`. Every Help
+Center path collapses to `/api/v2/help_center…`, so the tag cannot tell articles from sections.
+
+**Sampling: 10% head sampling of traces.** It needs `SamplingRatio = 0.1F` **and**
+`TracesPerSecond = null`, because `TracesPerSecond` (default 5) overrides the ratio whenever it is
+set. It is safe only because `EnableTraceBasedLogsSampler = false` (vitally-mcp#178): logs, the audit
+records among them, are exported whatever the trace sampling, and metrics are never sampled. When
+querying:
+
+- **Count the sampled tables with `sum(ItemCount)`, not `count()`.** Each `AppRequests` and
+  `AppDependencies` row stands for about ten. `AppEvents` and `AppTraces` are logs and stay exact, so
+  `count()` is right there.
+- **"Errors at 100%" is not available.** Head sampling decides before the outcome is known. Failures
+  stay visible, unsampled, through the failure records. The counters do not cover them: the only
+  failure they count is rate-limit exhaustion.
+
+**Spans are sanitised before export by `SpanSanitisingProcessor`**, because they go to
+`AppRequests` / `AppDependencies`. Those tables have their own retention, and tool arguments may not
+go there. They share a workspace with the audit records. Table-level RBAC can grant a narrow reader one
+table, but Azure RBAC only ever grants: it cannot remove `AppEvents` from anyone holding inherited
+workspace-wide read, which is how most readers get access. So in practice it does not keep the tables
+apart. vitally-mcp reviewed who holds that read on its workspace (vitally-mcp#146); this workspace has
+not been reviewed the same way. The MCP branch works from an **allowlist**, not a list of known leaks. vitally-mcp's probes
+of the SDK found caller text reaching spans by seven routes:
+
+| Where | What the SDK does | The processor |
+|---|---|---|
+| `StatusDescription`, any span | Copies a failed tool call's whole error text there: the caller's input and Zendesk's response body | Clears it. The status code stays |
+| `mcp.method.name`, MCP spans | Records whatever method the caller named | Keeps it only if the SDK defines it (`RequestMethods` / `NotificationMethods`); otherwise `unrecognised` |
+| `gen_ai.tool.name`, MCP spans | Records an invented tool name verbatim | Keeps it only if it is in `KnownToolNames`; otherwise `unrecognised` |
+| Every other MCP tag | `jsonrpc.request.id`, `mcp.resource.uri` and `gen_ai.prompt.name` carry caller values | Dropped unless on `AllowedMcpTags`, so a future SDK tag is dropped by default |
+| The span name, MCP spans | `<method>` or `<method> <target>`, where the target is the caller's tool, prompt or resource | **Rebuilt** from the cleaned method and tool, never patched |
+
+`QueryStringRedactingProcessor` replaces the query string on `HttpClient` dependency spans with `?*`.
+The search, count and analytics tools send free text as `?query=` (for example `Search_tickets`,
+`Search_users`, `Search_organizations`), often a customer's name or email.
+The .NET runtime already redacts it the same way, but a process-wide switch turns that off; the
+processor keeps the guarantee in this repository.
+
+⚠️ **Paths are not redacted.** `AppDependencies` still carries caller-typed **path segments**: ids,
+locales and custom-object keys. That gap is open. The PII test
+(`TheMcpSdk_PublishesTheSourceWeRegister_AndNoSanitisedSpanCarriesCallerText`) covers MCP SDK and
+ASP.NET Core server spans only, because its harness stubs the primary HTTP handler and so creates no
+dependency span. `jsonrpc.request.id` is covered by a unit test only, because the harness sends a
+constant id.
+
+**Processor order is pinned.** OpenTelemetry runs processors in the order they were added. The
+exporter test asserts that both processors run before the distro's Live Metrics and batch exporter.
+
+⚠️ **The exporter test disposes its `TracerProvider` and `MeterProvider` explicitly** (`LoggingFilterTests`). Inside the
+suite, disposing the `WebApplicationFactory` did not dispose it. A leaked provider stayed subscribed
+to the MCP source and sanitised later tests' spans. A post-dispose guard catches a recurrence, and
+`TelemetryRedactionTests` is in the serialised collection so that guard cannot flake. vitally-mcp
+did not establish the cause, so do not generalise from it.
+
 ### Per-user Zendesk OAuth
 
 ```
@@ -513,7 +633,8 @@ Zendesk ──302──> /zendesk/callback?code&state ──> exchange code ─�
 | `ZendeskConnectionRequiredException` | Surfaced verbatim by `ToolErrorResult` — its message *is* the link. `ZendeskServerInstructions` tells the model to hand it over unchanged. |
 | Refresh persistence | The store caches **before** it writes to Key Vault, and a failed write after a refresh is logged, not thrown: Zendesk has already spent the old refresh token, so losing the new one would disconnect the person. The connect callback stores under the person's lock, so an in-flight refresh cannot overwrite a fresh connection. |
 | `KeyVaultZendeskTokenStore` | One secret per person, `{TokenSecretPrefix}{oid}` (`zendesk-user-` in production, `zendesk-staging-user-` in staging, so the targets never share a token), JSON, tagged `kind=zendesk-user-token`, `ExpiresOn` = refresh expiry. Reads cached `TokenCacheDuration`, including "not connected". **Removal writes a tombstone version, never a delete**: soft delete is on, and a soft-deleted name cannot be set again until purged, so a delete would make reconnecting fail for the whole retention window. Older versions keep the old token, which is why disconnecting revokes at Zendesk first. |
-| Scopes and lifetimes | `read write`; access tokens requested at 2 h and refresh tokens at 90 days (`AccessTokenExpiresInSeconds` null requests Zendesk's legacy non-expiring token instead). |
+| Clients and scopes | **One Zendesk OAuth client per target** (split 2026-11-04): production `fiscal_zendesk_mcp` requests `read write`; staging `fiscal_zendesk_mcp_staging` requests `read` (`Zendesk__OAuthScopes`) with its own secret (`Zendesk__OAuthClientSecretRef` = `zendesk-staging-oauth-client-secret`). Each client's **allowed scopes** in Admin Centre equal what its target requests, so a staging token cannot write to Zendesk even with `Authorization__ReadOnly` lifted, and each lists only its own callback. A `read`-only token **can** revoke itself (`DELETE /api/v2/oauth/tokens/current`): confirmed live on staging 2026-11-04 16:39Z — `Disconnect_zendesk` returned `disconnected`, Key Vault wrote the tombstone, and no revocation warning was logged — so the disconnect and refused-login revocations work on staging's client too. See `docs/runbooks/entra-and-zendesk-oauth.md`. |
+| Lifetimes | access tokens requested at 2 h and refresh tokens at 90 days (`AccessTokenExpiresInSeconds` null requests Zendesk's legacy non-expiring token instead). |
 | Managed identity | Needs **Key Vault Secrets Officer** on the vault (it writes), which also lets it overwrite `zendesk-oauth-client-secret`. Accepted: the identity already holds every person's token; see `infra/terraform/identity.tf`. |
 
 ### ZendeskService — the one path to Zendesk
@@ -596,7 +717,7 @@ Dropped from Swifteq's set: `get_usage` and `submit_mcp_feedback` (Swifteq billi
 
 xUnit v3 on **Microsoft.Testing.Platform** (not VSTest): `global.json` selects the runner, the test project is an `Exe`, and VSTest-only flags (`--filter "FullyQualifiedName~…"`, `--logger`, `--collect`) are rejected — use `--filter-class` / `--filter-method`, `--report-trx`, `--coverage`.
 
-⚠️ **Run the tests in a shell without the dev-mode variables.** The host-based tests build the app with `WebApplicationFactory`, which reads environment variables, so `OAuth__NoAuth`, `Authorization__ReadOnly`, `Zendesk__DevelopmentAccessToken` and friends left over from running the server locally override the tests' own configuration — about 100 tests fail for that reason alone. CI does not set them. Clear them first, e.g. `env -u OAuth__NoAuth -u Authorization__ReadOnly -u Zendesk__DevelopmentAccessToken -u Zendesk__Subdomain -u ASPNETCORE_ENVIRONMENT dotnet test --solution ZendeskMcp.sln -c Debug`. #8 makes the tests immune and removes this paragraph.
+The tests are immune to a shell set up to run the server locally: `AmbientConfiguration`, a module initialiser in the test assembly, clears any inherited variable under the sections `Program.cs` reads (`OAuth__`, `Authorization__`, `Zendesk__`, `Audit__`, `ToolsListCache__`, `ApplicationInsights__`, `Logging__`), plus `ASPNETCORE_ENVIRONMENT`, `AllowedHosts` and `OTEL_*`, before any test runs, so the variables used to run the server locally cannot change the results (#8). It changes only the test process's environment; fixtures set their own values afterwards.
 
 | Area | Tests |
 |---|---|
@@ -647,7 +768,7 @@ a green no-op. Train-driven deploys run inside `release.yml`'s run, so they neve
 
 ### Staging validation
 
-Before production, on staging against the real Zendesk account, with `Authorization__ReadOnly=true` except while deliberately testing writes on a test ticket:
+Before production, on staging against the real Zendesk account, with `Authorization__ReadOnly=true`. **Since 2026-11-04 staging's Zendesk OAuth client allows only `read`**, so write checks cannot run through staging at all — not even with the guard lifted: they run through production, on throwaway records, with the care below.
 
 1. Sign in (Entra), then connect a Zendesk agent; confirm a mismatched Zendesk login is refused and its token revoked.
 2. Run every read tool once, and every write tool against a test ticket, test macro (inactive) and draft article, with the feature switches as production will have them.
@@ -668,9 +789,11 @@ Where each step stands, mapped to its issue (updated 2026-11-04):
 | 5 — audit records in `AppEvents` | **partly done** 2026-11-04 on production: a tool-call record carries the caller `oid`, tool, arguments, record id, tier, client and outcome, and its correlation id joins the upstream record; multi-record searches, the denial records and the negative control are open | #5 |
 | 6 — disconnect, revoke, tombstone | **done** on production 2026-11-04 (staging could not, until `ReadOnlyToolFilter` kept `Disconnect_zendesk`): refresh, revoke, tombstone `SecretSet`, no delete, then reconnect | #4 |
 
-⚠️ **There is one Zendesk account and no sandbox**, as vitally-mcp has one Vitally tenant: staging
-writes reach real customers. Lift `Authorization__ReadOnly` only for the write checks, with
-vitally-mcp's two independent restores (a shell trap plus a detached failsafe that reads the guard back
-off the revision actually serving traffic). Creating a ticket also fires the *Notify all agents of
+⚠️ **There is one Zendesk account and no sandbox**, as vitally-mcp has one Vitally tenant: a write
+made for testing reaches real customers. Staging can no longer write (its client is `read`-only), so
+write checks happen through production on throwaway records. If staging's client is ever widened for a
+write test, lift `Authorization__ReadOnly` only for that test, with vitally-mcp's two independent
+restores (a shell trap plus a detached failsafe that reads the guard back off the revision actually
+serving traffic). Creating a ticket also fires the *Notify all agents of
 received request* trigger, which emails every agent. PR #1's write tests paused that trigger for the
 seconds around each create; #4 records how staging should handle it.
