@@ -119,7 +119,7 @@ check "a malformed ISSUE_ASSIGNEE is a usage error with no call" '[ "$RC" = 64 ]
 new_case $'bug\nstatus: ready' ''
 grep -vxF 'status: blocked' "$FAKE_GH_DIR/repo-labels" > "$FAKE_GH_DIR/x" && mv "$FAKE_GH_DIR/x" "$FAKE_GH_DIR/repo-labels"
 run 11 blocked
-check "a label the repository lacks fails" '[ "$RC" = 1 ]'
+check "a label the repository lacks fails, saying it does not exist" '[ "$RC" = 1 ] && grep -q "does not exist" <<< "$OUT"'
 check "a label the repository lacks is never added (would create it)" '! calls | grep -q "^POST"'
 check "a label the repository lacks leaves the issue untouched" '[ "$(labels)" = "bug,status: ready" ]'
 
@@ -165,8 +165,8 @@ check "a write that did not land fails on read-back" '[ "$RC" = 1 ] && grep -q "
 new_case $'bug\nstatus: ready' ''
 cat > "$CASE/bin/gh" <<EOF
 #!/usr/bin/env bash
-# Fails the second read of the issue (the read-back) and defers everything else to the stub.
-if [[ "\$*" == *"issues/11 --jq"*assignees* ]]; then
+# Fails the read-back (the only read of the issue without --jq) and defers everything else to the stub.
+if [ "\$*" = "api repos/{owner}/{repo}/issues/11" ]; then
   echo "gh: injected read-back failure" >&2; exit 1
 fi
 exec "$HERE/fake-gh-issues" "\$@"
@@ -174,6 +174,54 @@ EOF
 chmod +x "$CASE/bin/gh"
 run 11 in-progress
 check "a failed read-back fails rather than reporting success" '[ "$RC" = 1 ] && grep -q "could not read it back" <<< "$OUT"'
+
+# GitHub answers 201 to an assign it silently dropped: only the read-back can catch it.
+new_case $'bug\nstatus: ready' ''
+touch "$FAKE_GH_DIR/lose-assigns"
+run 11 in-progress
+check "an assign that did not land fails on read-back" '[ "$RC" = 1 ] && grep -q "reads back without searledan assigned" <<< "$OUT"'
+
+new_case $'bug\nstatus: in-progress' 'searledan'
+touch "$FAKE_GH_DIR/lose-unassigns"
+run 11 complete
+check "an unassign that did not land fails on read-back" '[ "$RC" = 1 ] && grep -q "still assigned" <<< "$OUT"'
+
+# Logins compare case-insensitively, as GitHub's do.
+new_case $'bug\nstatus: in-progress' 'SearleDan'
+run 11 complete
+check "a differently-cased login is still unassigned" '[ "$RC" = 0 ] && [ -z "$(assignees)" ]'
+new_case $'bug\nstatus: ready' 'SearleDan'
+run 11 in-progress
+check "a differently-cased login counts as assigned" '[ "$RC" = 0 ] && [ "$(assignees)" = SearleDan ]'
+
+# A hand-added, differently-cased status label is still a status label: removed, not ignored.
+new_case $'bug\nStatus: Blocked\nstatus: ready' ''
+run 11 in-progress
+check "a mixed-case status label is removed" '[ "$RC" = 0 ] && [ "$(labels)" = "bug,status: in-progress" ]'
+new_case $'bug\nStatus: Blocked\nstatus: ready' ''
+echo 'DELETE repos/{owner}/{repo}/issues/11/labels/Status' > "$FAKE_GH_DIR/fail"
+run 11 in-progress
+check "a mixed-case status label that cannot be removed fails" '[ "$RC" = 1 ]'
+
+# The per-call message for a refused removal, not only the read-back's.
+new_case $'bug\nstatus: ready' ''
+echo 'DELETE repos/{owner}/{repo}/issues/11/labels/' > "$FAKE_GH_DIR/fail"
+run 11 in-progress
+check "a refused removal says which label and to re-run" 'grep -q "could not remove .status: ready." <<< "$OUT" && grep -q "re-run" <<< "$OUT"'
+
+# A failed label lookup is "could not check", never "does not exist".
+new_case $'bug\nstatus: ready' ''
+echo 'GET repos/{owner}/{repo}/labels/' > "$FAKE_GH_DIR/fail"
+run 11 in-progress
+check "a failed label lookup fails without claiming the label is missing" \
+	'[ "$RC" = 1 ] && grep -q "could not check" <<< "$OUT" && ! grep -q "does not exist" <<< "$OUT" && ! calls | grep -q "^POST"'
+
+# The repository's label exists but is spelt differently: GitHub's lookup would still find it.
+new_case $'bug\nstatus: ready' ''
+sed 's/^status: blocked$/Status: Blocked/' "$FAKE_GH_DIR/repo-labels" > "$FAKE_GH_DIR/x" && mv "$FAKE_GH_DIR/x" "$FAKE_GH_DIR/repo-labels"
+run 11 blocked
+check "a differently-spelt repository label is refused before any write" \
+	'[ "$RC" = 1 ] && grep -q "spelt" <<< "$OUT" && ! calls | grep -q "^POST"'
 
 echo "issue-status: $pass passed, $fail failed"
 [ "$fail" = 0 ]

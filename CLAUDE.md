@@ -124,9 +124,10 @@ that assumes prior conversation is an issue that cannot be worked.
 **Lifecycle** — one `status:` label at a time:
 
 1. Pick a `status: ready` issue respecting priority, or raise one with `/create-issue` (type +
-   priority + `status: ready`, nobody assigned).
+   priority + `status: ready`, or `status: blocked` with a comment saying what it waits for; nobody
+   assigned).
 2. Flip to in-progress: `bash .claude/scripts/issue-status.sh <n> in-progress`. That also **assigns
-   `searledan`**, the owner, who is assigned to an issue only while it is actively worked; every
+   `searledan`**, the maintainer, who asked on 2026-11-04 to be assigned to an issue only while it is actively worked; every
    other status unassigns them (`ISSUE_ASSIGNEE` overrides the login, and `ISSUE_ASSIGNEE=` leaves
    assignees alone). The script adds the new label before removing the old, refuses a label the
    repository lacks — adding an unknown label silently *creates* it — and reads the issue back, exiting
@@ -433,12 +434,13 @@ the current head (58afb2b…)"* — which is the mistake that prompted the port.
 `feature.yml`, `tech-debt.yml`, `security.yml`, `ops.yml`, `documentation.yml`, `content.yml`.
 Filenames match the label they preset, and the shared four match the sibling repos. Each form
 presets its type label plus `status: ready`, and its title with the matching Conventional-Commits
-prefix; add a `priority:` label after creating. Blank issues stay enabled for quick notes and for
+prefix; add a `priority:` label after creating one through the web form (`/create-issue` sets it
+at creation). Blank issues stay enabled for quick notes and for
 `ux`. Bug and Feature carry server-specific fields (MCP client, server URL, a failure
 timestamp for correlating with Application Insights) — keep those if you edit the forms.
 
 `documentation` and `content` both map to `docs/…` branches but cover different audiences:
-**Documentation** is prose for humans (`CLAUDE.md`, `README.md`, `docs/`), whereas **Content** is the
+**Documentation** is prose for humans (`CLAUDE.md`, `README.md`, `ACCESS.md`, `docs/`), whereas **Content** is the
 copy an *LLM* reads — tool `[Description]` and `Title` values and `ZendeskServerInstructions.Text`.
 Content wording changes model behaviour (which tool gets picked, how it's called), so they are
 defects rather than cosmetics; the form asks for the observed effect to keep that distinction sharp.

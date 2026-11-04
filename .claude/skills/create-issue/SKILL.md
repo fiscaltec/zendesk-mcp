@@ -28,7 +28,8 @@ Hard rules, each learnt the hard way:
   before posting — drafts of #2–#9 had a wrong marker count and wrong test class names until
   checked.
 - **UK English** throughout ("behaviour", "organisation", "authorise").
-- **End the body with the attribution footer** every GitHub post from Claude Code carries:
+- **End the body with the attribution footer** that issues and issue comments from Claude Code carry
+  here (pull-request descriptions carry a different one):
 
   ```markdown
 
@@ -95,9 +96,11 @@ gh api --paginate 'repos/{owner}/{repo}/issues?state=all&per_page=100' \
         | "\(.state) #\(.number) \(.title)"'
 ```
 
-This lists and filters rather than calling the search API: it matches whole bodies exactly and has
-no indexing delay, so an issue raised minutes ago is found. (`gh api -X GET search/issues` does work
-in this repository's cloud sessions — checked 2026-11-04 — but its index lags.)
+This lists and filters rather than calling the search API, so the match is exact over whole titles
+and bodies and depends on no search index. (Unlike in spendy, where the skill says the search API is
+refused, `gh api -X GET search/issues -f q='repo:{owner}/{repo} is:issue <keyword>'` works in this
+repository's cloud sessions — checked 2026-11-04 — but only with `is:issue` in `q`; without it GitHub
+answers `HTTP 422: Query must include 'is:issue' or 'is:pull-request'`.)
 
 If something similar exists, show it to the person and ask whether to proceed, cite it, or update
 it instead. A closed issue that covered the same ground is a `## Dependencies` entry at least.
@@ -108,12 +111,12 @@ Take the sections from the matching form, so the issue and the form cannot drift
 field's `label:` becomes a `##` heading, in the form's order:
 
 ```bash
-sed -n 's/^ *label: *//p' .github/ISSUE_TEMPLATE/<type>.yml
+sed -n 's/^ *label: *//p' .github/ISSUE_TEMPLATE/<type label>.yml   # for ux, use tech-debt.yml
 ```
 
 Then apply `CLAUDE.md` → *Writing issues* over the top:
 
-- **Title** — the form's Conventional-Commits prefix, then the scope at a glance:
+- **Title** — the Step 0 table's *Title prefix* (`chore:`, not the label `tech-debt:`), then the scope at a glance:
   `fix: Update_ticket drops tag changes when tags are passed with other fields`.
 - **Lead paragraph** before the first heading — what and why, and how it was discovered if that
   matters. Someone reading only this paragraph should know whether the issue is theirs.
@@ -146,7 +149,7 @@ Write the body to a file in the scratchpad (never inline: quoting breaks on back
 
 ```bash
 gh api 'repos/{owner}/{repo}/issues' \
-  -f title='<type>: <title>' \
+  -f title='<prefix>: <title>' \
   -F body=@<body-file> \
   -f 'labels[]=<type label>' \
   -f 'labels[]=priority: <high|medium|low>' \

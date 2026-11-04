@@ -8,6 +8,12 @@
 #   calls.log     every call, appended as "METHOD path [field=value ...]"
 #   fail          optional; lines "METHOD path-prefix" -- a matching call fails (as a refused call would)
 #   lose-adds     optional; if present, POST .../labels reports success but changes nothing
+#   lose-assigns  optional; POST .../assignees reports success but changes nothing (as GitHub does
+#                 for a login it cannot assign)
+#   lose-unassigns optional; DELETE .../assignees reports success but changes nothing
+#
+# Like real gh, -f with no -X means POST. Label and login lookups are case-insensitive, as GitHub's
+# are. Empty arrays are expanded with ${a[@]+...} so the stub also runs on macOS's bash 3.2.
 #
 # Supported: gh api [-X METHOD] <path> [-f key=value ...] [--jq expr]. Paths keep gh's literal
 # `repos/{owner}/{repo}/` prefix. Anything else fails, so an unexpected call is never a silent pass.
@@ -15,7 +21,7 @@ set -uo pipefail
 shopt -s extglob
 [ "${1:-}" = "api" ] || { echo "fake-gh-issues: only 'gh api' is supported (got: $*)" >&2; exit 2; }
 shift
-method=GET path="" expr="." fields=()
+method="" path="" expr="." fields=()
 while [ $# -gt 0 ]; do
 	case "$1" in
 	-X | --method) method=$2; shift ;;
@@ -26,9 +32,12 @@ while [ $# -gt 0 ]; do
 	esac
 	shift
 done
+if [ -z "$method" ]; then
+	if [ ${#fields[@]} -gt 0 ]; then method=POST; else method=GET; fi
+fi
 D=$FAKE_GH_DIR
 touch "$D/labels" "$D/assignees" "$D/repo-labels"
-echo "$method $path ${fields[*]}" >> "$D/calls.log"
+echo "$method $path ${fields[*]+${fields[*]}}" >> "$D/calls.log"
 
 if [ -f "$D/fail" ]; then
 	while read -r fm fp; do
@@ -38,7 +47,7 @@ if [ -f "$D/fail" ]; then
 fi
 
 urldecode() { local s=${1//+/ }; printf '%b' "${s//%/\\x}"; }
-field() { local f; for f in "${fields[@]}"; do [[ "$f" == "$1="* ]] && echo "${f#*=}"; done; }
+field() { local f; for f in ${fields[@]+"${fields[@]}"}; do [[ "$f" == "$1="* ]] && echo "${f#*=}"; done; }
 lines_json() { jq -Rn --arg k "$2" '[inputs | select(length > 0) | {($k): .}]' < "$1"; }
 issue_json() {
 	jq -n --argjson l "$(lines_json "$D/labels" name)" --argjson a "$(lines_json "$D/assignees" login)" \
@@ -54,8 +63,9 @@ rest=${path#"$prefix"}
 case "$method $rest" in
 "GET labels/"*)
 	name=$(urldecode "${rest#labels/}")
-	grep -qxF -- "$name" "$D/repo-labels" || { echo "gh: Not Found (HTTP 404)" >&2; exit 1; }
-	out "$(jq -n --arg n "$name" '{name: $n}')" ;;
+	stored=$(grep -ixF -- "$name" "$D/repo-labels" | head -1)
+	[ -n "$stored" ] || { echo "gh: Not Found (HTTP 404)" >&2; exit 1; }
+	out "$(jq -n --arg n "$stored" '{name: $n}')" ;;
 "GET issues/"+([0-9]))
 	out "$(issue_json)" ;;
 "POST issues/"+([0-9])"/labels")
@@ -71,12 +81,18 @@ case "$method $rest" in
 	remove_line "$D/labels" "$name"
 	out "$(lines_json "$D/labels" name)" ;;
 "POST issues/"+([0-9])"/assignees")
-	while IFS= read -r a; do
-		grep -qxF -- "$a" "$D/assignees" || echo "$a" >> "$D/assignees"
-	done < <(field 'assignees[]')
+	if [ ! -f "$D/lose-assigns" ]; then
+		while IFS= read -r a; do
+			grep -qixF -- "$a" "$D/assignees" || echo "$a" >> "$D/assignees"
+		done < <(field 'assignees[]')
+	fi
 	out "$(issue_json)" ;;
 "DELETE issues/"+([0-9])"/assignees")
-	while IFS= read -r a; do remove_line "$D/assignees" "$a"; done < <(field 'assignees[]')
+	if [ ! -f "$D/lose-unassigns" ]; then
+		while IFS= read -r a; do
+			grep -vixF -- "$a" "$D/assignees" > "$D/assignees.tmp"; mv "$D/assignees.tmp" "$D/assignees"
+		done < <(field 'assignees[]')
+	fi
 	out "$(issue_json)" ;;
 *)
 	echo "fake-gh-issues: unsupported call $method $path" >&2; exit 2 ;;

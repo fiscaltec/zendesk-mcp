@@ -10,9 +10,14 @@
 #   in-progress            adds the assignee (the issue is being actively worked)
 #   ready|blocked|complete removes the assignee (nobody is working it)
 #
-# The assignee is $ISSUE_ASSIGNEE, default `searledan` (the repository owner, who asked to be
-# assigned only while an issue is actively worked). ISSUE_ASSIGNEE= (empty) leaves assignees alone.
-# The repository is gh's `{owner}/{repo}`, resolved from the current checkout's `origin`.
+# The assignee is $ISSUE_ASSIGNEE, default `searledan` (the maintainer, who asked on 2026-11-04 to
+# be assigned to an issue only while it is actively worked). ISSUE_ASSIGNEE= (empty) leaves assignees alone.
+# The repository is gh's `{owner}/{repo}`: GH_REPO if set, else the checkout's default repository
+# (`gh repo set-default`, else its remotes -- `upstream` before `origin`). In a fork with an
+# `upstream` remote that is the upstream repository; set GH_REPO=owner/name to be explicit.
+#
+# Status labels are matched case-insensitively ("Status: Blocked" counts as a status label), and the
+# read-back verdict is computed in jq, so the script runs on macOS's bash 3.2 as well as bash 5.
 #
 # Exit codes:
 #   0  the issue now has exactly the requested status label, and the assignee rule holds
@@ -46,15 +51,24 @@ if [ -n "$assignee" ] && ! [[ "$assignee" =~ ^[A-Za-z0-9-]+$ ]]; then
 	usage
 fi
 command -v jq >/dev/null || die "jq is required"
+command -v gh >/dev/null || die "gh is required"
 
 target="status: $status"
 enc() { jq -rn --arg s "$1" '$s | @uri'; }
+# Status labels of an issue, lower-cased prefix match; one per line.
+STATUS_LABELS='.labels[].name | select(ascii_downcase | startswith("status: "))'
 
-# The label must already exist in the repository (see the header).
-gh api "$repo/labels/$(enc "$target")" --jq .name >/dev/null \
-	|| die "the label '$target' does not exist in this repository; refusing to create it by adding it"
+# The label must already exist, spelt exactly so (see the header). GitHub's lookup is
+# case-insensitive, so compare the name it returns. "Could not check" is never reported as "missing".
+if ! got=$(gh api "$repo/labels/$(enc "$target")" --jq .name 2>&1); then
+	case "$got" in
+	*"HTTP 404"*) die "the label '$target' does not exist in this repository; refusing to add it, which would create it" ;;
+	*) die "could not check whether the label '$target' exists: $got" ;;
+	esac
+fi
+[ "$got" = "$target" ] || die "the repository's label is spelt '$got', not '$target'; refusing to continue"
 
-current=$(gh api "$repo/issues/$issue" --jq '[.labels[].name | select(startswith("status: "))] | .[]') \
+current=$(gh api "$repo/issues/$issue" --jq "$STATUS_LABELS") \
 	|| die "could not read issue #$issue"
 
 gh api -X POST "$repo/issues/$issue/labels" -f "labels[]=$target" --jq '.[].name' >/dev/null \
@@ -76,23 +90,22 @@ if [ -n "$assignee" ]; then
 	fi
 fi
 
-# Read back rather than trusting the calls: the result is what the issue now says.
-after=$(gh api "$repo/issues/$issue" \
-	--jq '"\([.labels[].name | select(startswith("status: "))] | sort | join(","))|\([.assignees[].login] | join(","))"') \
+# Read back rather than trusting the calls (GitHub answers 201 to an assign it silently dropped).
+# The whole verdict is one jq expression over the issue JSON: "ok <assignees>" or the reason.
+issue_json=$(gh api "$repo/issues/$issue") \
 	|| die "updated #$issue but could not read it back to confirm"
-labels_after=${after%%|*} assignees_after=${after#*|}
-
-[ "$labels_after" = "$target" ] \
-	|| die "#$issue reads back with status label(s) '$labels_after', not '$target'"
-if [ -n "$assignee" ]; then
-	on=0
-	IFS=, read -ra logins <<< "$assignees_after"
-	for l in "${logins[@]}"; do [ "${l,,}" = "${assignee,,}" ] && on=1; done
-	if [ "$status" = in-progress ] && [ "$on" = 0 ]; then
-		die "#$issue reads back without $assignee assigned"
-	elif [ "$status" != in-progress ] && [ "$on" = 1 ]; then
-		die "#$issue reads back with $assignee still assigned"
-	fi
-fi
-
-echo "#$issue -> $target (assignees: ${assignees_after:-none})"
+verdict=$(jq -r --arg t "$target" --arg a "$assignee" --arg s "$status" '
+	[ '"$STATUS_LABELS"' ] as $labels
+	| [ .assignees[].login ] as $logins
+	| ($logins | map(ascii_downcase) | index($a | ascii_downcase) != null) as $on
+	| if $labels != [$t] then
+		"reads back with status label(s) \($labels | map("\u0027" + . + "\u0027") | join(" and ") | if . == "" then "none" else . end), not \u0027\($t)\u0027"
+	  elif $a != "" and $s == "in-progress" and ($on | not) then "reads back without \($a) assigned"
+	  elif $a != "" and $s != "in-progress" and $on then "reads back with \($a) still assigned"
+	  else "ok \($logins | join(",") | if . == "" then "none" else . end)"
+	  end' <<< "$issue_json") \
+	|| die "updated #$issue but could not interpret the read-back"
+case "$verdict" in
+ok\ *) echo "#$issue -> $target (assignees: ${verdict#ok })" ;;
+*) die "#$issue $verdict" ;;
+esac
