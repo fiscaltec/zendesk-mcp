@@ -133,7 +133,10 @@ public sealed class ZendeskOAuthClient(
             logger.LogWarning("Zendesk token revocation returned {StatusCode}", (int)response.StatusCode);
             return false;
         }
-        catch (Exception ex) when (ex is not OperationCanceledException)
+        // Only the CALLER's cancellation propagates. HttpClient.Timeout (15 s on this client) also
+        // surfaces as a TaskCanceledException, with the caller's token untouched; that is a revocation
+        // that failed, and letting it escape would stop DisconnectAsync before it forgets the grant.
+        catch (Exception ex) when (ex is not OperationCanceledException || !cancellationToken.IsCancellationRequested)
         {
             logger.LogWarning("Zendesk token revocation failed: {FailureType}", ex.GetType().Name);
             return false;
