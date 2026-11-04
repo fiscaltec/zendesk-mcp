@@ -321,9 +321,9 @@ public class GraphGroupPermissionResolverTests : IDisposable
     [InlineData(true)]
     public async Task FailureLog_CarriesTheStatus_ButNeverTheGraphResponseBody(bool retainedCopy)
     {
-        // Both failure branches attach the exception to a Warning, and the console and the OTel
-        // exporter both render its ToString() — message included. So the exception is held to the same
-        // rule as the log line itself (vitally-mcp#94): type and status, never an upstream body.
+        // The console and the OTel exporter render an attached exception's ToString(), message
+        // included, so neither failure branch attaches one (vitally-mcp#94): the line carries the
+        // failure's type and status, never an upstream body.
         var clock = new FakeClock(ClockStart);
         var logger = new CapturingLogger<GraphGroupPermissionResolver>();
         var handler = new RecordingHandler(new HashSet<string> { ReaderGroup });
@@ -340,11 +340,11 @@ public class GraphGroupPermissionResolverTests : IDisposable
 
         var index = logger.Entries.FindIndex(e => e.Level == LogLevel.Warning);
         index.Should().BeGreaterThanOrEqualTo(0, "the failure is logged");
-        var exception = logger.Exceptions[index];
-        exception.Should().BeOfType<HttpRequestException>();
-        exception!.Message.Should().Contain("403", "the status is what diagnoses a Graph failure");
-        exception.ToString().Should().NotContain(ErrorBodyMarker, "the upstream body must never reach a log");
-        logger.Entries[index].Message.Should().NotContain(ErrorBodyMarker);
+        logger.Exceptions[index].Should().BeNull("an attached exception is rendered in full, message and all");
+        logger.Entries[index].Message.Should().Contain("HttpRequestException").And.Contain("status 403", "the type and status are what diagnose a Graph failure")
+            .And.NotContain(ErrorBodyMarker, "the upstream body must never reach a log");
+        logger.Entries[index].Message.Should().Contain(retainedCopy ? "serving the last known-good" : "no usable retained set",
+            "each case must reach the branch it names");
     }
 
     [Fact]

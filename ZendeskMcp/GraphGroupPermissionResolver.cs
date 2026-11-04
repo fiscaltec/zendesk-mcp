@@ -157,10 +157,14 @@ public class GraphGroupPermissionResolver : IGroupPermissionResolver
 
                 // One warning, not two: an outage should read as a single line per call. Subject id
                 // only — never the caller's email, per the audit rules.
+                // The exception's type and status only, never the exception itself: its message can
+                // carry an upstream body (Azure.Identity's failures embed the response), and the
+                // console and OTel exporter render an attached exception in full (vitally-mcp#94).
                 _logger.LogWarning(
-                    ex,
-                    "Live group permission lookup failed for {UserObjectId}; serving the last known-good permission set, stale by {StaleSeconds}s (limit {StaleLimitSeconds}s).",
+                    "Live group permission lookup failed for {UserObjectId} ({FailureType}, status {StatusCode}); serving the last known-good permission set, stale by {StaleSeconds}s (limit {StaleLimitSeconds}s).",
                     userObjectId,
+                    ex.GetType().Name,
+                    (int?)(ex as HttpRequestException)?.StatusCode,
                     (long)age.TotalSeconds,
                     _options.LiveGroupStaleSeconds);
 
@@ -177,11 +181,12 @@ public class GraphGroupPermissionResolver : IGroupPermissionResolver
             // where it matters would send whoever is reading it looking for a tier that cannot engage.
             // The caller decides and logs the outcome; this line reports only what happened here.
             _logger.LogWarning(
-                ex,
-                "Live group permission lookup failed for {UserObjectId} and no usable retained set exists "
+                "Live group permission lookup failed for {UserObjectId} ({FailureType}, status {StatusCode}) and no usable retained set exists "
                 + "(stale window {StaleLimitSeconds}s). Returning no result; with Authorization:LiveGroupCheck "
                 + "enabled the caller will be denied.",
                 userObjectId,
+                ex.GetType().Name,
+                (int?)(ex as HttpRequestException)?.StatusCode,
                 _options.LiveGroupStaleSeconds);
             return null;
         }
