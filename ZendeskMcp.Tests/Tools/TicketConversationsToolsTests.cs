@@ -104,6 +104,9 @@ public class TicketConversationsToolsTests
         agentPublic["matching_messages"]!.GetValue<int>().Should().Be(2, "the internal note is left out");
         agentPublic["messages"]!.AsArray().Select(m => m!["text"]!.GetValue<string>()).Should().Equal(["a1", "a2"]);
 
+        var newestAgent = (await Bulk(zendesk, [101], lastN: 1, sides: ["agent"]))["tickets"]![0]!;
+        newestAgent["messages"]!.AsArray().Select(m => m!["text"]!.GetValue<string>()).Should().Equal(["a2"], "last_n_messages applies after the filters, not before");
+
         var newest = (await Bulk(zendesk, [101], lastN: 2))["tickets"]![0]!;
         newest["messages"]!.AsArray().Select(m => m!["text"]!.GetValue<string>()).Should().Equal(["a2", "c3"], "last_n_messages keeps the newest");
         newest["read"]!.GetValue<string>().Should().Be("complete", "messages the caller filtered out are not a cut");
@@ -180,18 +183,20 @@ public class TicketConversationsToolsTests
             "/api/v2/tickets/429" => FakeResponse.WithStatus(HttpStatusCode.TooManyRequests),
             "/api/v2/tickets/500/comments" => FakeResponse.WithStatus(HttpStatusCode.InternalServerError),
             "/api/v2/tickets/600/comments" => Json("""{"comments":[1],"meta":{"has_more":false}}"""),
+            "/api/v2/tickets/422/comments" => FakeResponse.WithStatus(HttpStatusCode.UnprocessableEntity),
             _ => Simple(r),
         });
 
-        var result = await Bulk(TestHelpers.BuildZendeskService(fake.Client), [101, 404, 403, 429, 500, 600]);
+        var result = await Bulk(TestHelpers.BuildZendeskService(fake.Client), [101, 404, 403, 429, 500, 600, 422]);
 
         var tickets = result["tickets"]!.AsArray();
-        tickets.Select(t => t!["ticket_id"]!.GetValue<long>()).Should().Equal([101L, 404L, 403L, 429L, 500L, 600L], "every ticket comes back once, in order");
+        tickets.Select(t => t!["ticket_id"]!.GetValue<long>()).Should().Equal([101L, 404L, 403L, 429L, 500L, 600L, 422L], "every ticket comes back once, in order");
         tickets[0]!["read"]!.GetValue<string>().Should().Be("complete", "the readable ticket is still returned");
         tickets.Skip(1).Select(t => t!["reason"]!.GetValue<string>())
-            .Should().Equal(["not_found", "not_found", "rate_limited", "zendesk_error", "error"]);
+            .Should().Equal(["not_found", "not_found", "rate_limited", "zendesk_error", "error", "error"], "a refusal such as 422 would be refused again");
         tickets.Skip(1).Should().OnlyContain(t => t!["read"]!.GetValue<string>() == "not_read" && t["messages"] == null);
         result["retry"]!.AsArray().Select(n => n!.GetValue<long>()).Should().Equal([429L, 500L], "not_found and error are not worth retrying");
+        tickets[5]!["detail"]!.GetValue<string>().Should().Contain("could not be read");
         result["after_seconds"]!.GetValue<int>().Should().Be(60);
         fake.Requests.Should().NotContain(r => r.Path == "/api/v2/tickets/404/comments", "an unreadable ticket's conversation is not requested");
     }
@@ -333,6 +338,7 @@ public class TicketConversationsToolsTests
         stats["internal_notes"]!.GetValue<int>().Should().Be(1, "stats are worked out before the last_n_messages filter");
         stats["messages"]!["agent"]!.GetValue<int>().Should().Be(2);
         stats["human_agent_replied"]!.GetValue<bool>().Should().BeTrue();
+        stats["human_agent_replies"]!.GetValue<int>().Should().Be(1, "an internal note is not a reply");
         stats["ai_agent"].Should().BeNull();
     }
 
@@ -345,6 +351,77 @@ public class TicketConversationsToolsTests
 
         result["ticket_count"]!.GetValue<int>().Should().Be(2);
         fake.Requests.Count(r => r.Path == "/api/v2/tickets/101").Should().Be(1);
+    }
+
+    [Fact]
+    public async Task OnAnEmailTicket_TheAiAgentIsInferred_AndAnInternalNoteIsNotTheHandover()
+    {
+        using var fake = TestHelpers.CreateFakeZendesk(r => r.Path switch
+        {
+            "/api/v2/tickets/101" => Json(Ticket(101)),
+            "/api/v2/tickets/101/comments" => Json(Comments(string.Join(",",
+                Comment(1, 501, "Question"), Comment(2, -1, "AI answer", via: "api"),
+                Comment(3, 701, "Looking into it", isPublic: false, via: "web"), Comment(4, 501, "Still stuck"),
+                Comment(5, 701, "Here is the fix", via: "web")))),
+            _ => FakeResponse.NotFound(),
+        });
+
+        var ticket = (await Bulk(TestHelpers.BuildZendeskService(fake.Client), [101]))["tickets"]![0]!;
+
+        var ai = ticket["ai_agent"]!;
+        ai["basis"]!.GetValue<string>().Should().Be("inferred", "comments carry no Zendesk AI flag");
+        ai["kind"]!.GetValue<string>().Should().Be("handed_over");
+        ai["handover"]!["at"]!.GetValue<string>().Should().Be("2026-01-01T00:00:05Z", "the public reply, not the internal note");
+        ai["handover"]!["after_message"]!["text"]!.GetValue<string>().Should().Be("Still stuck");
+        var messages = ticket["messages"]!.AsArray();
+        messages.Where(m => m!["handover"] is not null).Should().ContainSingle().Which!["text"]!.GetValue<string>().Should().Be("Still stuck");
+    }
+
+    [Fact]
+    public async Task AConversationLongerThanThePagerReads_IsCut_NotComplete()
+    {
+        using var fake = TestHelpers.CreateFakeZendesk(r => r.Path.EndsWith("/comments", StringComparison.Ordinal)
+            ? Json(Comments(Comment(1, 501, "Page one"), hasMore: true))
+            : Simple(r));
+
+        var ticket = (await Bulk(TestHelpers.BuildZendeskService(fake.Client, maxAutoPageFetches: 1), [101]))["tickets"]![0]!;
+
+        ticket["read"]!.GetValue<string>().Should().Be("cut", "messages exist beyond what was read");
+        ticket["cut"]!.GetValue<int>().Should().Be(0, "nothing read was left out");
+        ticket["note"]!.GetValue<string>().Should().Contain("earliest 1 comments");
+    }
+
+    [Fact]
+    public async Task AMessagingLogThatFails_FallsBackToComments_AndSaysSo_ButARateLimitIsReported()
+    {
+        using var fake = TestHelpers.CreateFakeZendesk(r => r.Path switch
+        {
+            "/api/v2/tickets/5" => Json(Ticket(5, "whatsapp")),
+            "/api/v2/tickets/5/conversation_log" => FakeResponse.WithStatus(HttpStatusCode.BadGateway),
+            "/api/v2/tickets/5/comments" => Json(Comments(Comment(1, 501, "Hi"))),
+            "/api/v2/tickets/6" => Json(Ticket(6, "whatsapp")),
+            "/api/v2/tickets/6/conversation_log" => FakeResponse.WithStatus(HttpStatusCode.TooManyRequests),
+            _ => FakeResponse.NotFound(),
+        });
+
+        var tickets = (await Bulk(TestHelpers.BuildZendeskService(fake.Client), [5, 6]))["tickets"]!.AsArray();
+
+        tickets[0]!["source"]!.GetValue<string>().Should().Be("comments");
+        tickets[0]!["note"]!.GetValue<string>().Should().Contain("conversation log could not be read");
+        tickets[1]!["reason"]!.GetValue<string>().Should().Be("rate_limited", "a 429 is not an absent log");
+        fake.Requests.Should().NotContain(r => r.Path == "/api/v2/tickets/6/comments");
+    }
+
+    [Fact]
+    public async Task AnRbacDenial_FailsTheCall_RatherThanReadingAsNotRead()
+    {
+        using var fake = TestHelpers.CreateFakeZendesk(r => Simple(r));
+        var zendesk = TestHelpers.BuildZendeskService(fake.Client, authorizer: TestHelpers.BuildEnabledAuthorizer());
+
+        var act = () => Bulk(zendesk, [101, 102]);
+
+        await act.Should().ThrowAsync<UnauthorizedAccessException>();
+        fake.Requests.Should().BeEmpty();
     }
 
     [Fact]

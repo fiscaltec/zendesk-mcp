@@ -469,7 +469,7 @@ Added for Zendesk:
 | `AddDistributedMemoryCache()` | backs the two above — **in-memory, so single replica** (below) |
 | `app.MapZendeskConnect()`, `app.MapZendeskUploads()` | `/zendesk/connect`, `/zendesk/callback`, `PUT /uploads/{slot}` — mapped before `UseAuthentication` and not behind the bearer requirement, because a browser or curl has no Entra token; each authenticates with a capability issued to a signed-in tool caller |
 
-⚠️ **Single replica is a correctness constraint, not a cost choice.** The `/oauth/*` proxy state (inherited from vitally-mcp), connect links, connect attempts and upload slots all live in process memory, and a token removed on one replica stays cached on another for up to `Zendesk:TokenCacheDuration`. `containerapps.tf` pins `max_replicas = 1`. Scaling out means registering a shared `IDistributedCache` (Redis) first and moving the OAuth proxy's `IMemoryCache` state onto it — a registration change for the Zendesk parts, a small code change for the proxy.
+⚠️ **Single replica is a correctness constraint, not a cost choice.** The `/oauth/*` proxy state (inherited from vitally-mcp), connect links, connect attempts, upload slots and `Bulk_get_ticket_conversations`'s two-calls-at-once gate (`TicketConversationsTools.Gate`, which is per account only because there is one process) all live in process memory, and a token removed on one replica stays cached on another for up to `Zendesk:TokenCacheDuration`. `containerapps.tf` pins `max_replicas = 1`. Scaling out means registering a shared `IDistributedCache` (Redis) first and moving the OAuth proxy's `IMemoryCache` state onto it — a registration change for the Zendesk parts, a small code change for the proxy.
 
 ### The Entra façade, RBAC, logging and audit — as vitally-mcp
 
