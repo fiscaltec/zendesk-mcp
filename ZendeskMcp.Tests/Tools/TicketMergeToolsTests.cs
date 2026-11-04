@@ -329,6 +329,7 @@ public class TicketMergeToolsTests
         result["merged"]!.GetValue<bool>().Should().BeFalse();
         result["outcome"]!.GetValue<string>().Should().Be("completed_unconfirmed");
         result["warning"]!.GetValue<string>().Should().Contain("102, 103");
+        result["next_step"]!.GetValue<string>().Should().Contain("Do not call Merge_tickets again");
     }
 
     [Fact]
@@ -367,6 +368,54 @@ public class TicketMergeToolsTests
         result["job"]!["id"]!.GetValue<string>().Should().Be("job1");
         result["next_step"]!.GetValue<string>().Should().Contain("Checking the merge job failed").And.Contain("Do not call Merge_tickets again");
         fake.Requests.Count(r => r.Path == MergePath).Should().Be(1);
+        fake.Requests.Count(r => r.Path == ShowManyPath).Should().Be(1, "nothing is read back after a failed poll");
+    }
+
+    [Fact]
+    public async Task MergeTickets_ConnectionDroppedDuringPoll_IsUnconfirmedAndKeepsTheConnectLink()
+    {
+        // A 401 on the poll forgets the grant and raises ZendeskConnectionRequiredException, whose own
+        // message says "then try again" — exactly the retry that could merge twice.
+        using var fake = MergingFake(job: _ => FakeResponse.WithStatus(HttpStatusCode.Unauthorized, """{"error":"invalid_token"}"""));
+        var (zendesk, _) = TestHelpers.BuildUserZendeskService(fake.Client, TestHelpers.SampleToken(refreshToken: null));
+
+        var result = JsonNode.Parse(await Merge(zendesk, [102, 103]))!;
+
+        result["merged"]!.GetValue<bool>().Should().BeFalse();
+        result["outcome"]!.GetValue<string>().Should().Be("unconfirmed");
+        result["next_step"]!.GetValue<string>().Should().Contain("/zendesk/connect?ticket=").And.Contain("Do not call Merge_tickets again");
+    }
+
+    [Fact]
+    public async Task MergeTickets_DevelopmentCredentialRejectedOnReadBack_IsUnconfirmed()
+    {
+        // The development token's 401 is an UnauthorizedAccessException: also not an HTTP error.
+        var reads = 0;
+        using var fake = TestHelpers.CreateFakeZendesk(r => (r.Method.Method, r.Path) switch
+        {
+            ("GET", ShowManyPath) => Interlocked.Increment(ref reads) == 1
+                ? FakeResponse.Json(ShowMany(Ticket(101), Ticket(102)))
+                : FakeResponse.WithStatus(HttpStatusCode.Unauthorized),
+            ("POST", MergePath) => FakeResponse.Json(Job("completed")),
+            _ => FakeResponse.NotFound(),
+        });
+
+        var result = JsonNode.Parse(await Merge(TestHelpers.BuildZendeskService(fake.Client), [102]))!;
+
+        result["outcome"]!.GetValue<string>().Should().Be("unconfirmed");
+        result["next_step"]!.GetValue<string>().Should().Contain("UnauthorizedAccessException");
+    }
+
+    [Fact]
+    public async Task MergeTickets_CallerCancellationAfterTheMerge_IsNotSwallowed()
+    {
+        using var cts = new CancellationTokenSource();
+        using var fake = MergingFake(job: _ => FakeResponse.Json(Job("working")));
+
+        var act = () => TicketMerge.MergeAsync(TestHelpers.BuildZendeskService(fake.Client), 101, [102, 103], null, null, null, null,
+            [TimeSpan.Zero], (_, ct) => { cts.Cancel(); ct.ThrowIfCancellationRequested(); return Task.CompletedTask; }, cts.Token);
+
+        await act.Should().ThrowAsync<OperationCanceledException>();
     }
 
     [Fact]
@@ -406,6 +455,24 @@ public class TicketMergeToolsTests
         fake.Requests.Should().NotContain(r => r.Path.StartsWith("/api/v2/job_statuses/", StringComparison.Ordinal));
         result["merged"]!.GetValue<bool>().Should().BeFalse();
         result["outcome"]!.GetValue<string>().Should().Be("unconfirmed");
+        result["next_step"]!.GetValue<string>().Should().Contain("carried no id");
+    }
+
+    [Fact]
+    public async Task MergeTickets_NumericJobId_IsStillPolled()
+    {
+        var reads = 0;
+        using var fake = TestHelpers.CreateFakeZendesk(r => (r.Method.Method, r.Path) switch
+        {
+            ("GET", ShowManyPath) => FakeResponse.Json(Interlocked.Increment(ref reads) == 1 ? ShowMany(Ticket(101), Ticket(102)) : ShowMany(Ticket(102, "closed", "\"closed_by_merge\""))),
+            ("POST", MergePath) => FakeResponse.Json("""{"job_status":{"id":42,"status":"queued"}}"""),
+            ("GET", "/api/v2/job_statuses/42") => FakeResponse.Json("""{"job_status":{"id":42,"status":"completed"}}"""),
+            _ => FakeResponse.NotFound(),
+        });
+
+        var result = JsonNode.Parse(await Merge(TestHelpers.BuildZendeskService(fake.Client), [102]))!;
+
+        result["merged"]!.GetValue<bool>().Should().BeTrue();
     }
 
     [Fact]

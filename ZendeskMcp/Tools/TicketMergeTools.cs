@@ -16,7 +16,7 @@ public static class TicketMergeTools
 {
     [Authorize(Policy = "zendesk:write")]
     [McpServerTool(Name = "Merge_tickets", Title = "Merge tickets", ReadOnly = false, Destructive = true, Idempotent = false, OpenWorld = false),
-     Description("Merge one to five duplicate tickets (source_ticket_ids) into a target ticket. Zendesk closes each source ticket for good, tags it closed_by_merge and adds a comment to it and to the target; a merge cannot be undone. Before calling, show the person the tickets (subject, requester, status) and get their agreement: to find duplicates, use Search_tickets with exclude_tags ['closed_by_merge'] and read candidates with Get_ticket. Closed tickets, tickets already merged and tickets the agent cannot see are refused before anything changes. Comments are private notes unless target_comment_is_public or source_comment_is_public is true; a public merge comment emails that ticket's requester and CCs. Returns the tickets as read before the merge, the job's final status and, once the job has completed, each source ticket's state afterwards; if the job is still running when the tool stops waiting, or its progress cannot be read, the result says the merge is unconfirmed (merged: false) and must be checked with Get_ticket before any retry. " + TicketWriteHelpers.UntrustedContentWarning)]
+     Description("Merge one to five duplicate tickets (source_ticket_ids) into a target ticket. Zendesk closes each source ticket for good, tags it closed_by_merge and adds a comment to it and to the target; a merge cannot be undone. Before calling, show the person the tickets (subject, requester, status) and get their agreement: to find duplicates, use Search_tickets with exclude_tags ['closed_by_merge'] and read candidates with Get_ticket. Closed tickets, tickets already merged and tickets the agent cannot see are refused before anything changes. Comments are private notes unless target_comment_is_public or source_comment_is_public is true; a public merge comment emails that ticket's requester and CCs. Returns the tickets as read before the merge, the job's final status and, once the job has completed, each source ticket's state afterwards; if the job is still running when the tool stops waiting, or its progress cannot be read, the result says the merge is unconfirmed (merged: false) and must be checked with Get_ticket before any retry; a failed job is returned as an error that also says to check the tickets first, as some may have been merged. " + TicketWriteHelpers.UntrustedContentWarning)]
     public static Task<string> MergeTickets(
         ZendeskService zendesk,
         [Description("Id of the ticket to keep; the sources are merged into it.")] long target_ticket_id,
@@ -171,14 +171,17 @@ public static class TicketMerge
         // From here on Zendesk has accepted the merge, so it may happen whatever goes wrong next. A
         // failure is therefore never surfaced as a plain error, which a model would read as "nothing
         // changed" and answer with a second merge: the pre-check above cannot refuse that retry while
-        // the first job is still queued, because the sources are not yet tagged closed_by_merge.
+        // the first job is still queued, because the sources are not yet tagged closed_by_merge. That
+        // covers every exception, not only HTTP ones: a dropped connection (whose connect link says
+        // "then try again"), a denial from a stale entitlement, a timeout. Only the caller's own
+        // cancellation escapes, since nobody is left to read the answer.
         var job = accepted["job_status"] as JsonObject;
         if (job is null)
         {
             return NotConfirmed(result, null, 0, "Zendesk accepted the merge request but returned no job status.");
         }
 
-        var jobId = ToolJson.String(job["id"]);
+        var jobId = JobId(job);
         var polls = 0;
         try
         {
@@ -190,9 +193,9 @@ public static class TicketMerge
                 job = polled["job_status"] as JsonObject ?? job;
             }
         }
-        catch (Exception ex) when (ex is HttpRequestException or OperationCanceledException && !cancellationToken.IsCancellationRequested)
+        catch (Exception ex) when (!cancellationToken.IsCancellationRequested)
         {
-            return NotConfirmed(result, job, polls, $"Checking the merge job failed ({ex.GetType().Name}).");
+            return NotConfirmed(result, job, polls, Failure("Checking the merge job failed", ex));
         }
 
         var jobStatus = ToolJson.String(job["status"]) ?? "unknown";
@@ -201,12 +204,14 @@ public static class TicketMerge
             // No status code: Zendesk answered every request with success; it is the job that failed.
             // A multi-ticket job may have merged some sources before failing, so this is not "unchanged".
             throw new HttpRequestException(
-                $"Zendesk's merge job {jobId} {jobStatus}. Some source tickets may still have been merged. Check each with Get_ticket (a merged source is closed and tagged closed_by_merge) before calling Merge_tickets again. Job: {Truncate(ToolJson.Pick(job, "id", "status", "total", "progress", "message", "results").ToJsonString(), 1024)}");
+                $"Zendesk's merge job{(string.IsNullOrEmpty(jobId) ? string.Empty : " " + jobId)} {jobStatus}. Some source tickets may still have been merged. Check each with Get_ticket (a merged source is closed and tagged closed_by_merge) before calling Merge_tickets again. Job: {Truncate(ToolJson.Pick(job, "id", "status", "total", "progress", "message", "results").ToJsonString(), 1024)}");
         }
 
         if (jobStatus != "completed")
         {
-            return NotConfirmed(result, job, polls, $"Zendesk had not finished the merge when this tool stopped waiting (job status '{jobStatus}').");
+            return NotConfirmed(result, job, polls, string.IsNullOrEmpty(jobId)
+                ? $"Zendesk accepted the merge but its job status carried no id, so the job could not be followed (job status '{jobStatus}')."
+                : $"Zendesk had not finished the merge when this tool stopped waiting (job status '{jobStatus}').");
         }
 
         result["job"] = JobSummary(job);
@@ -219,9 +224,9 @@ public static class TicketMerge
         {
             after = await ReadTicketsAsync(zendesk, sources, cancellationToken);
         }
-        catch (Exception ex) when (ex is HttpRequestException or OperationCanceledException && !cancellationToken.IsCancellationRequested)
+        catch (Exception ex) when (!cancellationToken.IsCancellationRequested)
         {
-            return NotConfirmed(result, job, polls, $"Zendesk reported the merge job completed, but reading the source tickets back failed ({ex.GetType().Name}).");
+            return NotConfirmed(result, job, polls, Failure("Zendesk reported the merge job completed, but reading the source tickets back failed", ex));
         }
 
         var sourcesAfter = new JsonArray();
@@ -249,7 +254,8 @@ public static class TicketMerge
         result["target_agent_url"] = $"{zendesk.BaseUrl}/agent/tickets/{Id(targetTicketId)}";
         if (unconfirmed.Count > 0)
         {
-            result["warning"] = $"Zendesk reported the job completed, but ticket(s) {string.Join(", ", unconfirmed.Select(Id))} do not yet read as closed and tagged closed_by_merge. Check them with Get_ticket before doing anything else with them.";
+            result["warning"] = $"Zendesk reported the job completed, but ticket(s) {string.Join(", ", unconfirmed.Select(Id))} do not yet read as closed and tagged closed_by_merge.";
+            result["next_step"] = "Check those tickets with Get_ticket in a few minutes. Do not call Merge_tickets again for them: the job completed, so they are most likely merged and only reading back late.";
         }
 
         return result.ToJsonString();
@@ -265,9 +271,21 @@ public static class TicketMerge
         result["polls"] = polls;
         result["merged"] = false;
         result["outcome"] = "unconfirmed";
-        result["next_step"] = $"{reason} The merge may still happen or may already have happened. Check the source tickets with Get_ticket in a minute: a merged source is closed and tagged closed_by_merge. Do not call Merge_tickets again until that shows the merge did not happen.";
+        result["next_step"] = $"{reason} The merge may still happen or may already have happened. Wait a few minutes, then check the source tickets with Get_ticket: a merged source is closed and tagged closed_by_merge. Do not call Merge_tickets again unless, after that wait, they are still open and untagged and the person still wants them merged.";
         return result.ToJsonString();
     }
+
+    // A dropped Zendesk connection's message is the connect link the person needs, so it is kept.
+    private static string Failure(string what, Exception ex) =>
+        ex is ZendeskConnectionRequiredException ? $"{what}: {ex.Message}" : $"{what} ({ex.GetType().Name}).";
+
+    // Zendesk's job ids are strings; a number is read as its text rather than lost.
+    private static string? JobId(JsonObject job) => job["id"] switch
+    {
+        JsonValue v when v.TryGetValue<string>(out var text) => text,
+        JsonValue v when ToolJson.Long(v) is { } number => number.ToString(CultureInfo.InvariantCulture),
+        _ => null,
+    };
 
     private static JsonObject JobSummary(JsonObject job) => ToolJson.Pick(job, "id", "status", "total", "progress", "message", "results");
 
