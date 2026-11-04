@@ -168,6 +168,44 @@ public class TicketsBulkToolsTests
     }
 
     [Fact]
+    public async Task AClosedTicketWhoseOnlyRealDifferenceIsTagsCanChange()
+    {
+        // The rule is about what would change, not what was asked: the priority already matches.
+        const string closed = """{"tickets":[{"id":101,"status":"closed","priority":"high","tags":[]}]}""";
+        using var fake = BulkFake(closed);
+
+        var result = JsonNode.Parse(await TicketsBulkTools.BulkUpdateTickets(Service(fake), [101],
+            new BulkTicketChange { Priority = "high", AdditionalTags = ["spam"] }))!;
+
+        result["cannot_change"]!.AsArray().Should().BeEmpty();
+        result["will_change"]![0]!["changes"]!.AsObject().Select(kv => kv.Key).Should().Equal("tags");
+    }
+
+    [Fact]
+    public async Task ACheckboxClearedAndAMultiSelectInAnyOrderAreAlreadyAsAsked()
+    {
+        const string fields = """{"tickets":[{"id":101,"status":"open","custom_fields":[{"id":1,"value":false},{"id":2,"value":["b","a"]}],"updated_at":"x"}]}""";
+        using var fake = BulkFake(fields);
+
+        var result = JsonNode.Parse(await TicketsBulkTools.BulkUpdateTickets(Service(fake), [101],
+            new BulkTicketChange { CustomFields = [new TicketCustomFieldInput(1, ""), new TicketCustomFieldInput(2, "a b")] }))!;
+
+        result["unchanged"]!.AsArray().Select(i => i!.GetValue<long>()).Should().Equal(101);
+    }
+
+    [Fact]
+    public async Task AMultiSelectIsWrittenAsAListOfOptionTags()
+    {
+        const string fields = """{"tickets":[{"id":101,"status":"open","custom_fields":[{"id":2,"value":["a"]}],"updated_at":"x"}]}""";
+        using var fake = BulkFake(fields);
+
+        await PreviewThenConfirm(c => TicketsBulkTools.BulkUpdateTickets(Service(fake), [101],
+            new BulkTicketChange { CustomFields = [new TicketCustomFieldInput(2, "a,b")] }, confirmation: c));
+
+        SentTickets(fake)[0]!["custom_fields"]!.ToJsonString().Should().Be("""[{"id":2,"value":["a","b"]}]""");
+    }
+
+    [Fact]
     public async Task NothingToChange_OffersNoConfirmation()
     {
         using var fake = BulkFake();
@@ -203,10 +241,12 @@ public class TicketsBulkToolsTests
         sent[1]!["tags"]!.AsArray().Select(t => t!.GetValue<string>()).Should().Equal("spam");
         fake.Requests.Should().NotContain(r => r.Method == HttpMethod.Delete);
 
-        // The re-read still shows the old values (the fake does not apply writes), so with steered
-        // re-reads covered below, here the outcome is not_confirmed rather than changed.
+        // The re-read still shows the old values (the fake does not apply writes), so the job's
+        // success is not taken on trust: both are not_confirmed (steered re-reads are covered below).
         result["preview"]!.GetValue<bool>().Should().BeFalse();
         result["job"]!["status"]!.GetValue<string>().Should().Be("completed");
+        result["changed"]!.AsArray().Should().BeEmpty();
+        result["not_confirmed"]!.AsArray().Select(n => n!["id"]!.GetValue<long>()).Should().Equal(101, 102);
     }
 
     [Fact]
@@ -269,18 +309,38 @@ public class TicketsBulkToolsTests
     }
 
     [Fact]
-    public async Task UndoRoundTripsAsTickets()
+    public async Task TheUndoOutputIsAcceptedBackAsTickets()
     {
-        // The undo entries are the tickets form, so they must be accepted back as-is. (One entry never
-        // carries both tags and custom fields: the change it undoes could not have.)
-        var undo = JsonSerializer.Deserialize<BulkTicketEntry[]>(
-            """[{"id":101,"status":"open","assignee_id":701,"additional_tags":["inbox"],"remove_tags":["spam"]},{"id":102,"type":null,"custom_fields":[{"id":9001,"value":null}]}]""",
-            McpJsonUtilities.DefaultOptions)!;
-        using var fake = BulkFake();
+        // Fed back exactly as returned. Ticket 102 had no priority, which Zendesk cannot restore, so its
+        // undo would hold nothing; an entry with nothing to restore would be refused, and the whole
+        // batch with it, so it is left out.
+        const string applied = """{"tickets":[{"id":101,"status":"open","priority":"high","tags":["phish","inbox"],"updated_at":"x"},{"id":102,"status":"new","priority":"high","tags":[],"updated_at":"y"}]}""";
+        using var fake = BulkFake(after: applied);
+        var result = await PreviewThenConfirm(c => TicketsBulkTools.BulkUpdateTickets(Service(fake), [101, 102],
+            new BulkTicketChange { Priority = "high" }, confirmation: c));
+        result["changed"]!.AsArray().Should().HaveCount(2);
+        result["undo"]!.AsArray().Should().ContainSingle("102 had no priority, so its undo would be bare and is left out");
+        result["warnings"]!.AsArray().Should().Contain(w => w!.GetValue<string>().Contains("no priority before"));
 
-        var result = JsonNode.Parse(await TicketsBulkTools.BulkUpdateTickets(Service(fake), tickets: undo))!;
+        var undo = JsonSerializer.Deserialize<BulkTicketEntry[]>(result["undo"]!.ToJsonString(), McpJsonUtilities.DefaultOptions)!;
+        using var again = BulkFake(applied);
+        var preview = JsonNode.Parse(await TicketsBulkTools.BulkUpdateTickets(Service(again), tickets: undo))!;
 
-        result["preview"]!.GetValue<bool>().Should().BeTrue();
+        preview["will_change"]![0]!["changes"]!["priority"]!.ToJsonString().Should().Be("""{"from":"high","to":"normal"}""");
+    }
+
+    [Fact]
+    public async Task UndoRestoresTheCustomStatus_NotJustTheStatusCategory()
+    {
+        const string withCustom = """{"tickets":[{"id":101,"status":"open","custom_status_id":44,"tags":[],"updated_at":"x"}]}""";
+        const string applied = """{"tickets":[{"id":101,"status":"pending","custom_status_id":2,"tags":[],"updated_at":"y"}]}""";
+        using var fake = BulkFake(withCustom, applied);
+
+        var result = await PreviewThenConfirm(c => TicketsBulkTools.BulkUpdateTickets(Service(fake), [101], new BulkTicketChange { Status = "pending" }, confirmation: c));
+
+        var undo = result["undo"]![0]!;
+        undo["custom_status_id"]!.GetValue<long>().Should().Be(44);
+        undo.AsObject().ContainsKey("status").Should().BeFalse("status and custom_status_id cannot go together");
     }
 
     [Fact]
@@ -308,6 +368,57 @@ public class TicketsBulkToolsTests
 
         await act.Should().ThrowAsync<ArgumentException>().WithMessage("*updated since*");
         NoWrites(fake);
+    }
+
+    [Fact]
+    public async Task Confirmed_TheSameBatchInAnotherOrderIsTheSameBatch()
+    {
+        // A model re-sending the batch need not repeat its key, tag or ticket order.
+        using var fake = BulkFake();
+        var preview = JsonNode.Parse(await TicketsBulkTools.BulkUpdateTickets(Service(fake), [101, 102],
+            new BulkTicketChange { Status = "pending", Priority = "high", AdditionalTags = ["a", "B"] }))!;
+
+        await TicketsBulkTools.BulkUpdateTickets(Service(fake), [102, 101],
+            new BulkTicketChange { AdditionalTags = ["b", "a"], Priority = "high", Status = "pending" },
+            confirmation: preview["confirmation"]!.GetValue<string>());
+
+        fake.Requests.Should().ContainSingle(r => r.Method == HttpMethod.Put);
+    }
+
+    [Fact]
+    public async Task Confirmed_AnotherPersonsPreviewDoesNotConfirm()
+    {
+        using var fake = BulkFake();
+        var preview = JsonNode.Parse(await TicketsBulkTools.BulkUpdateTickets(Service(fake), [101], Priority("high")))!;
+
+        var act = () => TicketsBulkTools.BulkUpdateTickets(Service(fake, o => o.DevelopmentEmail = "someone.else@example.com"), [101], Priority("high"),
+            confirmation: preview["confirmation"]!.GetValue<string>());
+
+        await act.Should().ThrowAsync<ArgumentException>().WithMessage("Nothing was changed.*");
+        NoWrites(fake);
+    }
+
+    [Fact]
+    public async Task CancellingAfterTheWriteStillReportsWhatHappened()
+    {
+        // Once the PUT has gone, a cancelled call would read as failed and invite a retry.
+        using var cancel = new CancellationTokenSource();
+        using var fake = BulkFake(extra: r =>
+        {
+            if (r.Method == HttpMethod.Put)
+            {
+                cancel.Cancel();
+            }
+
+            return null;
+        });
+        var preview = JsonNode.Parse(await TicketsBulkTools.BulkUpdateTickets(Service(fake), [101], Priority("high")))!;
+
+        var result = JsonNode.Parse(await TicketsBulkTools.BulkUpdateTickets(Service(fake), [101], Priority("high"),
+            confirmation: preview["confirmation"]!.GetValue<string>(), cancellationToken: cancel.Token))!;
+
+        cancel.IsCancellationRequested.Should().BeTrue();
+        result["job"]!["status"]!.GetValue<string>().Should().Be("completed");
     }
 
     [Theory]
@@ -374,7 +485,8 @@ public class TicketsBulkToolsTests
         result["job"]!["status"]!.GetValue<string>().Should().Be("unknown");
         result["summary"]!.GetValue<string>().Should().Contain("was submitted").And.Contain("Do not call again");
         result["not_confirmed"]!.AsArray().Should().HaveCount(2);
-        result["undo"]!.AsArray().Should().HaveCount(2, "the change may have landed, so the way back is still offered");
+        result["undo"]!.AsArray().Should().ContainSingle("the change may have landed, so the way back is still offered; 102 had no priority to restore")
+            .Which!["id"]!.GetValue<long>().Should().Be(101);
     }
 
     [Fact]
@@ -425,7 +537,8 @@ public class TicketsBulkToolsTests
 
         var result = await PreviewThenConfirm(c => TicketsBulkTools.BulkUpdateTickets(Service(fake), [101, 102], new BulkTicketChange { Status = "solved" },
             confirmation: c, solve_incidents: true));
-        result["warnings"]!.AsArray().Should().ContainSingle(w => w!.GetValue<string>().Contains("101"));
+        result["warnings"]!.AsArray().Should().ContainSingle(w => w!.GetValue<string>().StartsWith("Solving problem ticket(s) 101", StringComparison.Ordinal));
+        result["warnings"]!.AsArray().Should().Contain(w => w!.GetValue<string>().Contains("does not reopen the incidents"));
         fake.Requests.Should().ContainSingle(r => r.Method == HttpMethod.Put);
     }
 

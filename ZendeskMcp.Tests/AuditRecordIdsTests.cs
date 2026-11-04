@@ -277,7 +277,7 @@ public class AuditRecordIdsTests
     [Theory]
     [InlineData("PUT", "https://acme.zendesk.com/api/v2/tickets/update_many", """{"tickets":[{"id":101},{"status":"open"}]}""")]  // one entry without an id
     [InlineData("PUT", "https://acme.zendesk.com/api/v2/tickets/update_many", """{"tickets":[{"id":"101"}]}""")]                 // not a number
-    [InlineData("PUT", "https://acme.zendesk.com/api/v2/tickets/update_many", """{"tickets":[{"id":-1}]}""")]                    // not a whole number
+    [InlineData("PUT", "https://acme.zendesk.com/api/v2/tickets/update_many", """{"tickets":[{"id":-1}]}""")]                    // negative
     [InlineData("PUT", "https://acme.zendesk.com/api/v2/tickets/update_many", """{"ticket":{"status":"open"}}""")]
     [InlineData("PUT", "https://acme.zendesk.com/api/v2/tickets/update_many", "not json")]
     [InlineData("PUT", "https://acme.zendesk.com/api/v2/tickets/101", """{"tickets":[{"id":101}]}""")]                           // not a bulk update

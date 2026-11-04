@@ -37,10 +37,10 @@ public class BulkTicketChange
     [JsonPropertyName("status"), Description("New status: new, open, pending, hold or solved. Not closed: a closed ticket can never be changed again. Cannot be combined with custom_status_id.")]
     public string? Status { get => _status; set => Set(ref _status, value, "status"); }
 
-    [JsonPropertyName("custom_status_id"), Description("New custom ticket status ID. Cannot be combined with status.")]
+    [JsonPropertyName("custom_status_id"), Description("New custom ticket status ID (List_ticket_fields: the Status field's custom_statuses). Cannot be combined with status.")]
     public long? CustomStatusId { get => _customStatusId; set => Set(ref _customStatusId, value, "custom_status_id"); }
 
-    [JsonPropertyName("type"), Description("Ticket type: question, incident, problem or task; null clears it.")]
+    [JsonPropertyName("type"), Description("Ticket type: question, incident, problem or task; null clears it. Changing a linked incident to another type unlinks it from its problem; a problem with linked incidents cannot change type.")]
     public string? Type { get => _type; set => Set(ref _type, value, "type"); }
 
     [JsonPropertyName("priority"), Description("New priority: low, normal, high or urgent. Zendesk cannot clear a priority once it is set.")]
@@ -143,7 +143,7 @@ public static class TicketsBulkTools
 
     [Authorize(Policy = "zendesk:write")]
     [McpServerTool(Name = "Bulk_update_tickets", Title = "Bulk update tickets", ReadOnly = false, Destructive = true, Idempotent = true, OpenWorld = false),
-     Description("Change fields on up to 100 tickets in one call, as Zendesk's bulk edit does: the same change on every ticket (ticket_ids with changes, e.g. one custom field value on 80 tickets) or a different change per ticket (tickets, e.g. a rewritten subject on each). Fields: subject, status (not closed) or custom_status_id, type, priority, assignee_id, group_id, additional_tags, remove_tags and custom_fields. For comments, CCs, files, macros, problem links and organisations use Update_ticket, one ticket at a time. TWO STEPS: call it first without confirmation to preview (nothing is written): it lists each ticket as will_change (with from and to for each field), unchanged (already as asked) or cannot_change (with the reason), and returns a confirmation. Show the person how many tickets will change and what changes, and call again with the same arguments and that confirmation only after they say yes (valid 30 minutes; a ticket updated since the preview means previewing again). Each updated ticket runs its triggers, so a status change can email requesters. Tag changes on closed tickets are allowed (Zendesk allows nothing else on them). Solving a problem ticket also solves its unsolved incidents: refused unless solve_incidents is true, so tell the person first. Returns each ticket's result (changed, unchanged, failed with a reason such as closed or collision, or not_confirmed when Zendesk had not finished or the ticket does not show the change) and undo: the previous values, to pass back as tickets (with a fresh preview) to put them back. Safe to repeat: tickets already as asked are left alone. Split more than 100 tickets into several calls, one after another, not in parallel. " + TicketWriteHelpers.UntrustedContentWarning)]
+     Description("Change fields on up to 100 tickets in one call, as Zendesk's bulk edit does: the same change on every ticket (ticket_ids with changes, e.g. one custom field value on 80 tickets) or a different change per ticket (tickets, e.g. a rewritten subject on each). Fields: subject, status (not closed) or custom_status_id, type, priority, assignee_id, group_id, additional_tags, remove_tags and custom_fields. For comments, CCs, files, macros, problem links and organisations use Update_ticket, one ticket at a time. TWO STEPS: call it first without confirmation to preview (nothing is written): it lists each ticket as will_change (with from and to for each field), unchanged (already as asked) or cannot_change (with the reason), and returns a confirmation. Show the person how many tickets will change and what changes, and call again with the same arguments and that confirmation only after they say yes (valid 30 minutes; a ticket updated since the preview means previewing again). Each updated ticket runs its triggers, so a status change can email requesters. Tag changes on closed tickets are allowed (Zendesk allows nothing else on them) and run no triggers. A drop-down (tagger) field adds its option's tag, and its previous option's tag is removed. Solving a problem ticket also solves its unsolved incidents: refused unless solve_incidents is true, so tell the person first. Returns each ticket's result (changed, unchanged, failed with a reason such as closed or collision, or not_confirmed when Zendesk had not finished or the ticket does not show the change) and undo: the previous values, to pass back as tickets (with a fresh preview) to put them back. Safe to repeat: tickets already as asked are left alone. Split more than 100 tickets into several calls, one after another, not in parallel. " + TicketWriteHelpers.UntrustedContentWarning)]
     public static async Task<string> BulkUpdateTickets(
         ZendeskService zendesk,
         [Description("The tickets that all get the same changes, 1 to 100. Pass this or tickets, not both.")] long[]? ticket_ids = null,
@@ -181,7 +181,7 @@ public static class TicketsBulkTools
                 continue;
             }
 
-            if (ToolJson.String(ticket["status"]) == "closed" && !change.OnlyTags)
+            if (ToolJson.String(ticket["status"]) == "closed" && diff.Select(kv => kv.Key).Any(field => field != "tags"))
             {
                 cannotChange.Add(new JsonObject { ["id"] = id, ["reason"] = "closed: Zendesk allows only tag changes on a closed ticket" });
                 continue;
@@ -209,7 +209,7 @@ public static class TicketsBulkTools
             warnings.Add($"Solving problem ticket(s) {Join(problems)} also solves their unsolved linked incidents.");
         }
 
-        var material = Material(zendesk.BaseUrl, plan, found, solve_incidents == true);
+        var material = Material(zendesk.BaseUrl, await TicketWriteHelpers.CallerKeyAsync(zendesk, cancellationToken), plan, found, solve_incidents == true);
         var now = DateTimeOffset.UtcNow;
 
         if (confirmation is null)
@@ -283,23 +283,26 @@ public static class TicketsBulkTools
         var jobId = ToolJson.String(job["id"]);
 
         // The change has been submitted from here on, so a failure reading the job must not look like a
-        // failed call that is worth retrying. It is reported as not confirmed instead.
+        // failed call that is worth retrying: it is reported as not confirmed instead. For the same
+        // reason the caller's cancellation no longer applies; the polls and the re-read are bounded
+        // by MaxJobStatusPolls and Zendesk's own timeouts instead.
+        var afterWrite = CancellationToken.None;
         var unreadable = false;
         for (var poll = 0; jobId is not null && !IsFinished(job) && poll < zendesk.Options.MaxJobStatusPolls; poll++)
         {
             try
             {
-                await Task.Delay(zendesk.Options.JobStatusPollInterval, cancellationToken);
-                job = (await zendesk.GetAsync($"/api/v2/job_statuses/{ZendeskService.Segment(jobId)}", cancellationToken: cancellationToken))["job_status"] ?? job;
+                await Task.Delay(zendesk.Options.JobStatusPollInterval, afterWrite);
+                job = (await zendesk.GetAsync($"/api/v2/job_statuses/{ZendeskService.Segment(jobId)}", cancellationToken: afterWrite))["job_status"] ?? job;
             }
-            catch (Exception) when (!cancellationToken.IsCancellationRequested)
+            catch (Exception)
             {
                 unreadable = true;
                 break;
             }
         }
 
-        return (await OutcomeAsync(zendesk, willChange, job, jobId, unreadable, unchanged, failed, warnings, cancellationToken)).ToJsonString();
+        return (await OutcomeAsync(zendesk, willChange, job, jobId, unreadable, unchanged, failed, warnings)).ToJsonString();
     }
 
     private sealed record Planned(long Id, Change Change, JsonNode Ticket, JsonObject Diff);
@@ -316,17 +319,19 @@ public static class TicketsBulkTools
 
         public List<TicketCustomFieldInput> CustomFields { get; } = [];
 
-        public bool OnlyTags => Fields.Count == 0 && CustomFields.Count == 0;
-
         public bool HasAny => Fields.Count > 0 || AddTags.Count > 0 || RemoveTags.Count > 0 || CustomFields.Count > 0;
 
         public string Canonical() => new JsonObject
         {
-            ["fields"] = Fields.DeepClone(),
-            ["additional_tags"] = StringArray(AddTags),
-            ["remove_tags"] = StringArray(RemoveTags),
-            ["custom_fields"] = TicketWriteHelpers.CustomFields([.. CustomFields]),
+            ["fields"] = new JsonObject(Fields.OrderBy(kv => kv.Key, StringComparer.Ordinal)
+                .Select(kv => KeyValuePair.Create(kv.Key, kv.Value?.DeepClone()))),
+            ["additional_tags"] = StringArray(Folded(AddTags)),
+            ["remove_tags"] = StringArray(Folded(RemoveTags)),
+            ["custom_fields"] = TicketWriteHelpers.CustomFields([.. CustomFields.OrderBy(f => f.Id)]),
         }.ToJsonString();
+
+        private static IEnumerable<string> Folded(IEnumerable<string> tags) =>
+            tags.Select(t => t.ToLowerInvariant()).Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal);
     }
 
     private static List<(long Id, Change Change)> Plan(long[]? ticketIds, BulkTicketChange? changes, BulkTicketEntry[]? tickets)
@@ -564,13 +569,16 @@ public static class TicketsBulkTools
     }
 
     /// <summary>
-    /// What the confirmation is bound to: the account, the batch exactly as normalised, the
-    /// solve_incidents confirmation, and every ticket's <c>updated_at</c> (or its absence).
+    /// What the confirmation is bound to: the account, the person (so one person's preview cannot
+    /// confirm another's write), the batch as normalised, the solve_incidents confirmation, and every
+    /// ticket's <c>updated_at</c> (or its absence). Order-free throughout (tickets by id, fields by
+    /// name, tags case-folded): a model re-sending the same batch with its keys in another order is
+    /// confirming the same thing.
     /// </summary>
-    private static string Material(string baseUrl, List<(long Id, Change Change)> plan, Dictionary<long, JsonNode> found, bool solveIncidents)
+    private static string Material(string baseUrl, string caller, List<(long Id, Change Change)> plan, Dictionary<long, JsonNode> found, bool solveIncidents)
     {
-        var material = new StringBuilder().Append(baseUrl).Append('\n').Append(solveIncidents ? "solve_incidents" : "-").Append('\n');
-        foreach (var (id, change) in plan)
+        var material = new StringBuilder().Append(baseUrl).Append('\n').Append(caller).Append('\n').Append(solveIncidents ? "solve_incidents" : "-").Append('\n');
+        foreach (var (id, change) in plan.OrderBy(p => p.Id))
         {
             material.Append(id.ToString(CultureInfo.InvariantCulture)).Append('@')
                 .Append(found.TryGetValue(id, out var ticket) ? ToolJson.String(ticket["updated_at"]) ?? "?" : "missing")
@@ -592,12 +600,22 @@ public static class TicketsBulkTools
         foreach (var (field, value) in planned.Diff)
         {
             entry[field] = field == "custom_fields"
-                ? new JsonArray(value!.AsArray().Select(f => (JsonNode?)new JsonObject { ["id"] = f!["id"]!.DeepClone(), ["value"] = f["to"]?.DeepClone() }).ToArray())
+                ? new JsonArray(value!.AsArray().Select(f => (JsonNode?)new JsonObject { ["id"] = f!["id"]!.DeepClone(), ["value"] = FieldValue(f["from"], f["to"]) }).ToArray())
                 : value!["to"]?.DeepClone();
         }
 
         return entry;
     }
+
+    /// <summary>
+    /// The value to send for a custom field: a multi-select (a field that holds a list) gets its option
+    /// tags as a list, everything else the text as given. Unverified against the live API: the list
+    /// form for a multi-select through update_many.
+    /// </summary>
+    private static JsonNode? FieldValue(JsonNode? from, JsonNode? to) =>
+        from is JsonArray && ToolJson.String(to) is { } text
+            ? StringArray(text.Split([',', ' '], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+            : to?.DeepClone();
 
     private static bool IsFinished(JsonNode job) => FinishedJobStatuses.Contains(ToolJson.String(job["status"]));
 
@@ -610,7 +628,7 @@ public static class TicketsBulkTools
     /// <c>status</c>, <c>error</c>, <c>details</c>) is taken from Zendesk's job status documentation.
     /// </remarks>
     private static async Task<JsonObject> OutcomeAsync(ZendeskService zendesk, List<Planned> sent, JsonNode job, string? jobId, bool unreadable,
-        List<long> unchanged, JsonArray failed, List<string> warnings, CancellationToken cancellationToken)
+        List<long> unchanged, JsonArray failed, List<string> warnings)
     {
         var jobStatus = unreadable ? "unknown" : IsFinished(job) ? ToolJson.String(job["status"])! : "running";
         var notConfirmed = new JsonArray();
@@ -669,9 +687,9 @@ public static class TicketsBulkTools
             Dictionary<long, JsonNode>? reread = null;
             try
             {
-                reread = await ReadTicketsAsync(zendesk, reportedSuccess.Select(p => p.Id).ToList(), cancellationToken);
+                reread = await ReadTicketsAsync(zendesk, reportedSuccess.Select(p => p.Id).ToList(), CancellationToken.None);
             }
-            catch (Exception) when (!cancellationToken.IsCancellationRequested)
+            catch (Exception)
             {
                 // Reported below as not confirmed; as far as Zendesk said, the write itself succeeded.
             }
@@ -698,8 +716,10 @@ public static class TicketsBulkTools
         }
 
         var notConfirmedIds = notConfirmed.Select(n => ToolJson.Long(n?["id"])).OfType<long>().ToHashSet();
+        // An entry with nothing to restore is left out: passed back, a bare {"id"} is refused, and with
+        // it the whole batch.
         var undo = new JsonArray(sent.Where(p => changed.Contains(p.Id) || notConfirmedIds.Contains(p.Id))
-            .Select(p => (JsonNode?)Undo(p, warnings)).ToArray());
+            .Select(p => Undo(p, warnings)).Where(e => e.Count > 1).Select(e => (JsonNode?)e).ToArray());
 
         var summary = jobStatus switch
         {
@@ -757,6 +777,35 @@ public static class TicketsBulkTools
                 case "priority" when value!["from"] is null:
                     warnings.Add($"Ticket {planned.Id} had no priority before; Zendesk cannot clear one, so undo leaves it.");
                     break;
+                case "status":
+                    // A status change also resets the custom status to its category's default, so the
+                    // custom status the ticket had is what puts it back exactly.
+                    if (!planned.Diff.ContainsKey("custom_status_id") && ToolJson.Long(planned.Ticket["custom_status_id"]) is { } previousCustom)
+                    {
+                        entry["custom_status_id"] = previousCustom;
+                    }
+                    else if (ToolJson.String(value!["from"]) == "new")
+                    {
+                        warnings.Add($"Ticket {planned.Id} was New; a ticket cannot return to New, so undo leaves its status.");
+                    }
+                    else
+                    {
+                        entry["status"] = value!["from"]?.DeepClone();
+                    }
+
+                    if (ToolJson.String(value!["to"]) == "solved" && ToolJson.String(planned.Ticket["type"]) == "problem")
+                    {
+                        warnings.Add($"Undoing problem ticket {planned.Id} does not reopen the incidents solving it solved.");
+                    }
+
+                    break;
+                case "custom_status_id" when value!["from"] is null:
+                    entry["status"] = planned.Ticket["status"]?.DeepClone();
+                    break;
+                case "type" when ToolJson.Long(planned.Ticket["problem_id"]) is { } problemId && ToolJson.String(value!["from"]) == "incident":
+                    entry["type"] = "incident";
+                    warnings.Add($"Ticket {planned.Id} was an incident of problem {problemId}; changing its type unlinked it, and undo does not relink it (use Update_ticket with problem_id).");
+                    break;
                 default:
                     entry[field] = value!["from"]?.DeepClone();
                     break;
@@ -800,17 +849,28 @@ public static class TicketsBulkTools
         return values;
     }
 
-    // Empty and null both mean "no value" for a custom field; a list never compares equal to text.
+    /// <summary>
+    /// Whether a custom field already holds the requested value. Empty, null and a cleared checkbox's
+    /// <c>false</c> all mean "no value". A multi-select holds a list of option tags, compared as a set
+    /// with the requested value's comma- or space-separated tags.
+    /// </summary>
     private static bool SameFieldValue(JsonNode? current, string? requested)
     {
-        if (current is JsonArray or JsonObject)
+        if (current is JsonObject)
         {
             return false;
         }
 
+        if (current is JsonArray list)
+        {
+            var have = list.Select(ScalarText).OfType<string>().ToHashSet(StringComparer.Ordinal);
+            var want = (requested ?? string.Empty).Split([',', ' '], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+            return have.SetEquals(want);
+        }
+
         var currentText = ScalarText(current);
-        return (string.IsNullOrEmpty(currentText) && string.IsNullOrEmpty(requested))
-            || string.Equals(currentText, requested, StringComparison.Ordinal);
+        static bool None(string? text) => string.IsNullOrEmpty(text) || text == "false";
+        return (None(currentText) && None(requested)) || string.Equals(currentText, requested, StringComparison.Ordinal);
     }
 
     /// <summary>A scalar's text: a string's own value, a number or boolean as JSON writes it.</summary>

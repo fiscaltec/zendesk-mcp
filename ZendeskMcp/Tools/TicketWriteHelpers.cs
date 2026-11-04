@@ -350,10 +350,14 @@ public static partial class TicketWriteHelpers
     /// </remarks>
     public static async Task<string> IdempotencyKeyAsync(ZendeskService zendesk, JsonObject arguments, CancellationToken cancellationToken)
     {
-        var identity = zendesk.Credentials.UsesDevelopmentToken
-            ? $"dev:{zendesk.Options.DevelopmentEmail}"
-            : $"user:{(await zendesk.Credentials.GetUserTokenAsync(cancellationToken)).ZendeskUserId.ToString(CultureInfo.InvariantCulture)}";
+        var identity = await CallerKeyAsync(zendesk, cancellationToken);
         var material = $"{zendesk.BaseUrl}\n{identity}\n{arguments.ToJsonString()}";
         return Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(material)));
     }
+
+    /// <summary>Who is asking, as a stable key: the connected Zendesk user, or the development login.</summary>
+    public static async Task<string> CallerKeyAsync(ZendeskService zendesk, CancellationToken cancellationToken) =>
+        zendesk.Credentials.UsesDevelopmentToken
+            ? $"dev:{zendesk.Options.DevelopmentEmail}"
+            : $"user:{(await zendesk.Credentials.GetUserTokenAsync(cancellationToken)).ZendeskUserId.ToString(CultureInfo.InvariantCulture)}";
 }
