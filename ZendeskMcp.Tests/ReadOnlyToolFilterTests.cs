@@ -40,4 +40,24 @@ public class ReadOnlyToolFilterTests
 
         result.Should().BeEmpty();
     }
+
+    [Fact]
+    public void ReadOnly_KeepsDisconnectZendesk()
+    {
+        // Destructive in annotation, but it only touches the caller's own connection.
+        var disconnect = new Tool { Name = "Disconnect_zendesk", Annotations = new ToolAnnotations { ReadOnlyHint = false, DestructiveHint = true } };
+        var tools = new[] { ReadTool(), DeleteTool(), disconnect };
+
+        var result = ReadOnlyToolFilter.FilterTools(tools, readOnly: true);
+
+        result.Select(t => t.Name).Should().BeEquivalentTo(["Get_thing", "Disconnect_zendesk"]);
+    }
+
+    [Fact]
+    public void OwnConnectionTools_AreExactlyTheReadTierMutations()
+    {
+        // The filter's exemption and the catalogue's read-tier exception must name the same tools:
+        // a new read-tier mutation is not exempt from read-only mode unless someone decides it is.
+        ReadOnlyToolFilter.OwnConnectionTools.Should().BeEquivalentTo(ToolCatalogue.ReadTierMutations);
+    }
 }

@@ -151,7 +151,8 @@ public static class TestHelpers
         ClaimsPrincipal? user = null,
         IMemoryCache? cache = null,
         TimeProvider? timeProvider = null,
-        IHttpClientFactory? oauthHttpClientFactory = null)
+        IHttpClientFactory? oauthHttpClientFactory = null,
+        Microsoft.Extensions.Logging.ILogger<ZendeskCredentialProvider>? credentialLogger = null)
     {
         var serverOptions = new ZendeskServerOptions
         {
@@ -189,7 +190,7 @@ public static class TestHelpers
         var links = new ZendeskConnectLinks(new MemoryDistributedCache(Options.Create(new MemoryDistributedCacheOptions())), options);
         var credentials = new ZendeskCredentialProvider(
             options, oauthOptions, tokenStore ?? new InMemoryZendeskTokenStore(), oauthClient, links,
-            NullLogger<ZendeskCredentialProvider>.Instance, accessor, timeProvider);
+            credentialLogger ?? NullLogger<ZendeskCredentialProvider>.Instance, accessor, timeProvider);
 
         // Default to a disabled authorizer so the bulk of the tests (which exercise URL/shape
         // behaviour, not access control) don't need to set up claims. Enforcement is covered
@@ -213,7 +214,8 @@ public static class TestHelpers
         string signInName = "agent@example.com",
         Action<ZendeskServerOptions>? configure = null,
         TimeProvider? timeProvider = null,
-        IHttpClientFactory? oauthHttpClientFactory = null)
+        IHttpClientFactory? oauthHttpClientFactory = null,
+        Microsoft.Extensions.Logging.ILogger<ZendeskCredentialProvider>? credentialLogger = null)
     {
         var store = new InMemoryZendeskTokenStore();
         if (token is not null)
@@ -223,7 +225,7 @@ public static class TestHelpers
 
         var service = BuildZendeskService(httpClient, configure: configure, tokenStore: store,
             user: UserPrincipal(TestObjectId, signInName), timeProvider: timeProvider,
-            oauthHttpClientFactory: oauthHttpClientFactory);
+            oauthHttpClientFactory: oauthHttpClientFactory, credentialLogger: credentialLogger);
         return (service, store);
     }
 

@@ -587,7 +587,8 @@ mcpBuilder.WithRequestFilters(filters =>
         });
     }
 
-    // Read-only deployments: hide destructive tools from tools/list (enforcement is in ToolAuthorizer).
+    // Read-only deployments: hide destructive tools from tools/list (enforcement is in ToolAuthorizer),
+    // except ReadOnlyToolFilter.OwnConnectionTools, which touch only the caller's own connection.
     if (readOnlyMode)
     {
         filters.AddListToolsFilter(next => async (context, cancellationToken) =>

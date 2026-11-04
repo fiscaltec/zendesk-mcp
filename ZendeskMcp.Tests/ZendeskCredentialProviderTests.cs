@@ -171,15 +171,40 @@ public class ZendeskCredentialProviderTests
         using var zendesk = TestHelpers.CreateFakeZendesk(request => request.Path == "/oauth/tokens"
             ? FakeResponse.WithStatus(HttpStatusCode.BadRequest, "{\"error\":\"invalid_grant\",\"error_description\":\"echoes old-refresh\"}")
             : FakeResponse.Json("{}"));
+        var logger = new CapturingLogger<ZendeskCredentialProvider>();
         var (service, store) = TestHelpers.BuildUserZendeskService(zendesk.Client,
             TestHelpers.SampleToken("old-access", expiresAt: Now.AddSeconds(30), refreshToken: "old-refresh"),
-            timeProvider: time);
+            timeProvider: time, credentialLogger: logger);
 
         var act = () => service.GetAsync("/api/v2/tickets/101");
 
         var thrown = await act.Should().ThrowAsync<ZendeskConnectionRequiredException>();
         thrown.Which.Message.Should().NotContain("old-refresh", "Zendesk's error description can echo the request");
         (await store.GetAsync(TestHelpers.TestObjectId)).Should().BeNull();
+        logger.Entries.Should().ContainSingle(e => e.Level == Microsoft.Extensions.Logging.LogLevel.Warning)
+            .Which.Message.Should().Contain(TestHelpers.TestObjectId).And.Contain("invalid_grant",
+                "forgetting someone's grant must leave a record of who and why");
+        logger.Entries.Should().NotContain(e => e.Message.Contains("old-refresh") || e.Message.Contains("old-access"),
+            "neither a token nor Zendesk's description may reach the log");
+    }
+
+    [Fact]
+    public async Task AnExpiredTokenWithNoRefreshToken_IsForgotten_AndLogged()
+    {
+        var time = new FixedClock(Now);
+        using var zendesk = TestHelpers.CreateFakeZendesk(_ => FakeResponse.Json("{}"));
+        var logger = new CapturingLogger<ZendeskCredentialProvider>();
+        var (service, store) = TestHelpers.BuildUserZendeskService(zendesk.Client,
+            TestHelpers.SampleToken("old-access", expiresAt: Now.AddSeconds(-60), refreshToken: null),
+            timeProvider: time, credentialLogger: logger);
+
+        var act = () => service.GetAsync("/api/v2/tickets/101");
+
+        await act.Should().ThrowAsync<ZendeskConnectionRequiredException>();
+        (await store.GetAsync(TestHelpers.TestObjectId)).Should().BeNull();
+        logger.Entries.Should().ContainSingle(e => e.Level == Microsoft.Extensions.Logging.LogLevel.Warning)
+            .Which.Message.Should().Contain(TestHelpers.TestObjectId);
+        zendesk.Requests.Should().BeEmpty("there is nothing to refresh with");
     }
 
     [Fact]
