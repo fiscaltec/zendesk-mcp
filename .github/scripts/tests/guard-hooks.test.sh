@@ -23,6 +23,20 @@ for b in main feat/thing; do
 done
 ON_MAIN="$WORK/repo-main"
 ON_FEATURE="$WORK/repo-feat-thing"
+# A repository on main whose path contains a space, and feature checkouts whose configuration
+# decides where a push without an explicit destination goes.
+git init -q -b main "$WORK/repo main"
+mk() { # $1 = name, then git config pairs
+	local d="$WORK/$1"
+	shift
+	git init -q -b feat/thing "$d"
+	while [ "$#" -gt 0 ]; do git -C "$d" config "$1" "$2"; shift 2; done
+	printf '%s' "$d"
+}
+CONFIGURED_PUSH=$(mk configured-push remote.origin.push HEAD:main)
+MATCHING=$(mk matching push.default matching)
+UPSTREAM_MAIN=$(mk upstream-main push.default upstream branch.feat/thing.merge refs/heads/main)
+UPSTREAM_FEATURE=$(mk upstream-feature push.default upstream branch.feat/thing.merge refs/heads/feat/thing)
 
 check() { # $1 = allow|deny, $2 = name, $3 = hook, $4 = payload
 	local out decision
@@ -76,6 +90,34 @@ push deny 'git push origin' "$ON_MAIN"
 push deny 'git push -u origin HEAD' "$ON_MAIN"
 push deny "cd $ON_MAIN && git push" "$ON_FEATURE"
 push deny "git -C $ON_MAIN push" "$ON_FEATURE"
+
+# Refused: the bypasses Copilot found on PR #47.
+push deny $'git push origin \\\nmain'
+push deny "git -C \"$WORK/repo main\" push origin HEAD"
+push deny 'git push -o ci.skip origin' "$ON_MAIN"
+push deny 'git push origin > /tmp/push.log' "$ON_MAIN"
+push deny 'git push origin :'
+push deny "git push origin 'refs/heads/*:refs/heads/*'"
+push deny 'git -c remote.origin.push=HEAD:main push origin'
+push deny 'git checkout main && git push origin'
+push deny 'git switch main; git push'
+push deny 'git checkout main && git push -u origin HEAD'
+# Refused: implicit destinations the configuration sends to main, or that cannot be read.
+push deny 'git push' "$CONFIGURED_PUSH"
+push deny 'git push' "$MATCHING"
+push deny 'git push origin' "$UPSTREAM_MAIN"
+push deny 'git push origin $BRANCH'
+push deny 'git push origin $(git branch --show-current)'
+push deny 'git push origin "fix/a'
+
+# Allowed: everyday pushes from a feature branch, redirected, piped and chained.
+push allow 'git push -u origin fix/thing 2>&1 | tail -2'
+push allow 'timeout 90 git push -q -u origin fix/thing 2>&1 | grep -v remote'
+push allow 'git add -A && git commit -m "a message; git push origin main" && git push -u origin fix/thing'
+push allow 'git push -o ci.skip origin fix/thing'
+push allow 'git push origin "fix/thing"'
+push allow 'git checkout -b fix/new && git push -u origin fix/new'
+push allow 'git push origin' "$UPSTREAM_FEATURE"
 
 # Allowed: feature branches, including names that merely contain "main".
 push allow 'git push -u origin fix/thing'
