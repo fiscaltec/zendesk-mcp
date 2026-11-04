@@ -49,6 +49,13 @@ public sealed class KeyVaultZendeskTokenStore(
     private const string TombstoneValue = "{\"revoked\":true}";
     private readonly ZendeskServerOptions _options = options.Value;
 
+    // Per person, bumped at the start and end of every save and removal, so GetAsync can tell that a
+    // write overlapped its vault read. Process-local, like the cache it guards (the app runs one
+    // replica); a few bytes per person who has ever written a grant. The gate makes "check the
+    // generation, then fill the cache" atomic against "bump it, then set the cache".
+    private readonly ConcurrentDictionary<string, long> _generations = new(StringComparer.Ordinal);
+    private readonly object _generationGate = new();
+
     public string SecretName(string objectId) => $"{_options.TokenSecretPrefix}{objectId}";
 
     private static string CacheKey(string objectId) => $"zendesk-token::{objectId}";
@@ -63,6 +70,8 @@ public sealed class KeyVaultZendeskTokenStore(
 
         metrics?.CacheLookup("user_token", hit: false);
 
+        // Taken before the vault read, so a save or removal that overlaps the read is detectable below.
+        var generation = Generation(objectId);
         ZendeskUserToken? token;
         try
         {
@@ -82,7 +91,21 @@ public sealed class KeyVaultZendeskTokenStore(
             throw;
         }
 
-        cache.Set(CacheKey(objectId), new CachedToken(token), _options.TokenCacheDuration);
+        // Cached only if nothing has filled the entry meanwhile (a save caches before its vault write
+        // completes) and no save or removal for this person began or finished during the read. The
+        // provider's first read runs outside the person's lock, so without this a slow cache-miss read
+        // could land after a refresh saved the rotated grant (or a disconnect wrote its tombstone) and
+        // put the older state back: a spent refresh token, whose next use fails invalid_grant and
+        // disconnects the person. The reader still gets what it read; a stale access token meets a
+        // 401, which OnTokenRejectedAsync resolves against the newer stored grant.
+        lock (_generationGate)
+        {
+            if (Generation(objectId) == generation && !cache.TryGetValue(CacheKey(objectId), out _))
+            {
+                cache.Set(CacheKey(objectId), new CachedToken(token), _options.TokenCacheDuration);
+            }
+        }
+
         return token;
     }
 
@@ -99,8 +122,25 @@ public sealed class KeyVaultZendeskTokenStore(
 
         // Cached BEFORE the write: after a refresh, Zendesk has already spent the old refresh token, so
         // if the vault write fails this replica must still hold the new one rather than the spent one.
-        cache.Set(CacheKey(objectId), new CachedToken(token), _options.TokenCacheDuration);
-        await secrets.SetSecretAsync(secret, cancellationToken);
+        lock (_generationGate)
+        {
+            Advance(objectId);
+            cache.Set(CacheKey(objectId), new CachedToken(token), _options.TokenCacheDuration);
+        }
+
+        try
+        {
+            await secrets.SetSecretAsync(secret, cancellationToken);
+        }
+        finally
+        {
+            // Again once the write is over, so a read that began while it was in flight — and may have
+            // seen the previous version — is not cached either.
+            lock (_generationGate)
+            {
+                Advance(objectId);
+            }
+        }
     }
 
     public async Task RemoveAsync(string objectId, CancellationToken cancellationToken = default)
@@ -109,9 +149,22 @@ public sealed class KeyVaultZendeskTokenStore(
         secret.Properties.ContentType = "application/json";
         secret.Properties.Tags["kind"] = "zendesk-user-token";
         secret.Properties.Tags["revoked"] = "true";
+        lock (_generationGate)
+        {
+            Advance(objectId);
+        }
+
         await secrets.SetSecretAsync(secret, cancellationToken);
-        cache.Set(CacheKey(objectId), new CachedToken(null), _options.TokenCacheDuration);
+        lock (_generationGate)
+        {
+            Advance(objectId);
+            cache.Set(CacheKey(objectId), new CachedToken(null), _options.TokenCacheDuration);
+        }
     }
+
+    private long Generation(string objectId) => _generations.TryGetValue(objectId, out var value) ? value : 0;
+
+    private void Advance(string objectId) => _generations.AddOrUpdate(objectId, 1, (_, value) => value + 1);
 
     public static ZendeskUserToken? Parse(string? value)
     {

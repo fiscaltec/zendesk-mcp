@@ -88,6 +88,37 @@ public class ZendeskTokenStoreTests
         (await store.GetAsync(ObjectId)).Should().BeNull("this replica must not serve the token it has just removed");
     }
 
+    [Fact]
+    public async Task AVaultReadThatLandsAfterASave_DoesNotReplaceTheSavedGrantInTheCache()
+    {
+        // The provider's first read runs outside the person's lock. A cache-miss read that started
+        // before a refresh saved the rotated grant, and finishes after it, carries the spent refresh
+        // token; caching it would make the next refresh fail invalid_grant and disconnect them (#13).
+        var (secrets, release) = SlowVaultRead(TestHelpers.SampleToken("old", refreshToken: "spent"));
+        var store = Build(secrets.Object);
+
+        var slowRead = store.GetAsync(ObjectId, TestContext.Current.CancellationToken);
+        await store.SaveAsync(ObjectId, TestHelpers.SampleToken("new", refreshToken: "rotated"), TestContext.Current.CancellationToken);
+        release();
+        (await slowRead)!.AccessToken.Should().Be("old", "the slow reader itself still gets what it read");
+
+        (await store.GetAsync(ObjectId, TestContext.Current.CancellationToken))!.RefreshToken.Should().Be("rotated");
+    }
+
+    [Fact]
+    public async Task AVaultReadThatLandsAfterARemoval_DoesNotBringTheGrantBack()
+    {
+        var (secrets, release) = SlowVaultRead(TestHelpers.SampleToken("old"));
+        var store = Build(secrets.Object);
+
+        var slowRead = store.GetAsync(ObjectId, TestContext.Current.CancellationToken);
+        await store.RemoveAsync(ObjectId, TestContext.Current.CancellationToken);
+        release();
+        await slowRead;
+
+        (await store.GetAsync(ObjectId, TestContext.Current.CancellationToken)).Should().BeNull("the tombstone is the newer state");
+    }
+
     [Theory]
     [InlineData("{\"revoked\":true}")]
     [InlineData("not json")]
@@ -102,6 +133,24 @@ public class ZendeskTokenStoreTests
         new(secrets, new MemoryCache(new MemoryCacheOptions()),
             Options.Create(new ZendeskServerOptions { Subdomain = "acme" }),
             NullLogger<KeyVaultZendeskTokenStore>.Instance);
+
+    // The first read of the secret waits until released and then answers with `stale`; later reads
+    // answer at once with the same. Writes succeed.
+    private static (Mock<SecretClient> Secrets, Action Release) SlowVaultRead(ZendeskUserToken stale)
+    {
+        var gate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var value = System.Text.Json.JsonSerializer.Serialize(stale);
+        var secrets = new Mock<SecretClient>();
+        secrets.Setup(s => s.GetSecretAsync($"zendesk-user-{ObjectId}", null, It.IsAny<SecretContentType?>(), It.IsAny<CancellationToken>()))
+            .Returns(async () =>
+            {
+                await gate.Task;
+                return Response.FromValue(new KeyVaultSecret($"zendesk-user-{ObjectId}", value), Mock.Of<Response>());
+            });
+        secrets.Setup(s => s.SetSecretAsync(It.IsAny<KeyVaultSecret>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync(Response.FromValue(new KeyVaultSecret("x", "y"), Mock.Of<Response>()));
+        return (secrets, () => gate.TrySetResult());
+    }
 
     private static Mock<SecretClient> SecretReturning(string value)
     {
