@@ -1,5 +1,6 @@
 using System.Collections.Concurrent;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using Azure;
 using Azure.Security.KeyVault.Secrets;
 using Microsoft.Extensions.Caching.Memory;
@@ -12,6 +13,10 @@ namespace ZendeskMcp;
 public interface IZendeskTokenStore
 {
     /// <summary>The caller's grant, or null when they have not connected (or have disconnected).</summary>
+    /// <exception cref="ZendeskStoredTokenUnreadableException">
+    /// Something is stored but it is neither a grant nor a tombstone. That is not "not connected": the
+    /// grant inside may still be live at Zendesk.
+    /// </exception>
     Task<ZendeskUserToken?> GetAsync(string objectId, CancellationToken cancellationToken = default);
 
     Task SaveAsync(string objectId, ZendeskUserToken token, CancellationToken cancellationToken = default);
@@ -63,15 +68,14 @@ public sealed class KeyVaultZendeskTokenStore(
 
         metrics?.CacheLookup("user_token", hit: false);
 
-        ZendeskUserToken? token;
+        KeyVaultSecret? secret;
         try
         {
-            var response = await secrets.GetSecretAsync(SecretName(objectId), cancellationToken: cancellationToken);
-            token = Parse(response.Value.Value);
+            secret = (await secrets.GetSecretAsync(SecretName(objectId), cancellationToken: cancellationToken)).Value;
         }
         catch (RequestFailedException ex) when (ex.Status == 404)
         {
-            token = null;
+            secret = null;
         }
         catch (Exception ex) when (!cancellationToken.IsCancellationRequested)
         {
@@ -79,6 +83,22 @@ public sealed class KeyVaultZendeskTokenStore(
             // with directory access), and it is what an operator needs to find the secret.
             LogBestEffort(() => logger.LogError(ex,
                 "Failed to read the Zendesk token for {UserObjectId} from Key Vault", objectId));
+            throw;
+        }
+
+        ZendeskUserToken? token;
+        try
+        {
+            token = Parse(secret?.Value);
+        }
+        catch (ZendeskStoredTokenUnreadableException)
+        {
+            // Not cached: caching it as "not connected" is what let a reconnect replace the grant
+            // without revoking it (#12). The version is what an operator needs to look at it; the
+            // value is never logged, since it may hold a live token.
+            LogBestEffort(() => logger.LogError(
+                "The stored Zendesk token for {UserObjectId} (secret version {SecretVersion}) is neither a grant nor a tombstone",
+                objectId, secret?.Properties.Version));
             throw;
         }
 
@@ -113,6 +133,11 @@ public sealed class KeyVaultZendeskTokenStore(
         cache.Set(CacheKey(objectId), new CachedToken(null), _options.TokenCacheDuration);
     }
 
+    /// <summary>
+    /// Reads a stored value: a grant, or null for nothing stored or a tombstone. Anything else throws
+    /// <see cref="ZendeskStoredTokenUnreadableException"/>, carrying whatever tokens could be read
+    /// from it so that the grant can still be revoked.
+    /// </summary>
     public static ZendeskUserToken? Parse(string? value)
     {
         if (string.IsNullOrWhiteSpace(value))
@@ -120,19 +145,118 @@ public sealed class KeyVaultZendeskTokenStore(
             return null;
         }
 
+        JsonObject? stored;
         try
         {
-            var token = JsonSerializer.Deserialize<ZendeskUserToken>(value);
-            return token is null || string.IsNullOrWhiteSpace(token.AccessToken) ? null : token;
+            stored = JsonNode.Parse(value) as JsonObject;
+
+            // A JsonObject builds its members lazily, so a duplicate key surfaces as ArgumentException
+            // on first access. Forced here, so it is refused as unreadable like any other bad JSON
+            // rather than escaping as an exception nothing logs or tombstones.
+            _ = stored?.Count;
         }
         catch (JsonException)
         {
-            // A tombstone has no access_token and fails the record's required members; anything else
-            // unreadable is treated the same way — as no connection — so the person is asked to
-            // reconnect rather than every call failing.
+            throw new ZendeskStoredTokenUnreadableException(salvaged: null);
+        }
+        catch (Exception ex) when (ex is ArgumentException or InvalidOperationException)
+        {
+            // Duplicate keys: valid JSON, so the tokens may still be readable. Never a usable grant —
+            // which value a duplicated member means is ambiguous — but a token named exactly once is
+            // salvaged for revocation (Copilot on #48).
+            throw new ZendeskStoredTokenUnreadableException(SalvageDuplicateKeyed(value));
+        }
+
+        if (stored is null)
+        {
+            throw new ZendeskStoredTokenUnreadableException(salvaged: null);
+        }
+
+        if (IsTombstone(stored))
+        {
+            return null;
+        }
+
+        ZendeskUserToken? token = null;
+        try
+        {
+            token = stored.Deserialize<ZendeskUserToken>();
+        }
+        catch (Exception ex) when (ex is JsonException or InvalidOperationException or FormatException)
+        {
+            // A member of the wrong type: fall through and salvage what can be read.
+        }
+
+        if (token is not null && !string.IsNullOrWhiteSpace(token.AccessToken))
+        {
+            return token;
+        }
+
+        throw new ZendeskStoredTokenUnreadableException(Salvage(stored));
+    }
+
+    private static bool IsTombstone(JsonObject stored) =>
+        stored.TryGetPropertyValue("revoked", out var revoked)
+        && revoked is JsonValue flag && flag.TryGetValue<bool>(out var isRevoked) && isRevoked
+        && !stored.ContainsKey("access_token") && !stored.ContainsKey("refresh_token");
+
+    // Only the two tokens matter to a revocation. With a refresh token the expiry is set in the past (the
+    // Unix epoch: DateTimeOffset.MinValue would overflow when a refresh skew is subtracted from it),
+    // because the stored one cannot be trusted: ZendeskOAuthClient.RevokeGrantAsync then refreshes
+    // first, so an expired access token's 401 cannot read as a revocation.
+    private static ZendeskUserToken? Salvage(JsonObject stored)
+    {
+        var access = StringMember(stored, "access_token");
+        var refresh = StringMember(stored, "refresh_token");
+        if (access is null && refresh is null)
+        {
+            return null;
+        }
+
+        return new ZendeskUserToken(
+            AccessToken: access ?? string.Empty,
+            RefreshToken: refresh,
+            ExpiresAt: refresh is null ? null : DateTimeOffset.UnixEpoch,
+            RefreshExpiresAt: null,
+            ZendeskUserId: 0,
+            ZendeskEmail: string.Empty,
+            ZendeskRole: string.Empty,
+            ConnectedAt: DateTimeOffset.MinValue);
+    }
+
+    private static ZendeskUserToken? SalvageDuplicateKeyed(string value)
+    {
+        try
+        {
+            using var document = JsonDocument.Parse(value);
+            if (document.RootElement.ValueKind != JsonValueKind.Object)
+            {
+                return null;
+            }
+
+            var stored = new JsonObject();
+            foreach (var name in new[] { "access_token", "refresh_token" })
+            {
+                var values = document.RootElement.EnumerateObject().Where(p => p.Name == name).ToList();
+                if (values.Count == 1 && values[0].Value.ValueKind == JsonValueKind.String)
+                {
+                    stored[name] = values[0].Value.GetString();
+                }
+            }
+
+            return Salvage(stored);
+        }
+        catch (JsonException)
+        {
             return null;
         }
     }
+
+    private static string? StringMember(JsonObject stored, string name) =>
+        stored.TryGetPropertyValue(name, out var node) && node is JsonValue value
+            && value.TryGetValue<string>(out var text) && !string.IsNullOrWhiteSpace(text)
+            ? text
+            : null;
 
     // Wrapped so "nothing stored" can be cached as well as a token: without it every call from a person
     // who has not connected would reach Key Vault.
@@ -173,4 +297,15 @@ public sealed class InMemoryZendeskTokenStore : IZendeskTokenStore
         _tokens.TryRemove(objectId, out _);
         return Task.CompletedTask;
     }
+}
+
+/// <summary>
+/// Thrown by <see cref="IZendeskTokenStore.GetAsync"/> when a person's stored value is neither a grant
+/// nor a tombstone. Its message names no token. <see cref="Salvaged"/> holds the access and refresh
+/// tokens if either could be read, for revocation only; everything else in it is blank.
+/// </summary>
+public sealed class ZendeskStoredTokenUnreadableException(ZendeskUserToken? salvaged)
+    : Exception("The stored Zendesk connection could not be read.")
+{
+    public ZendeskUserToken? Salvaged { get; } = salvaged;
 }
