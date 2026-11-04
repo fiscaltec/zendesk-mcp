@@ -25,7 +25,9 @@ public static class TicketFilterDescriptions
     public const string IncludeTags = "Comma-separated tags the tickets must have.";
     public const string ExcludeTags = "Comma-separated tags the tickets must not have.";
     public const string CustomFieldId = "Numeric id of a ticket field to filter on. Give custom_field_value with it. Use List_ticket_fields to find ids.";
-    public const string CustomFieldValue = "Value the custom field must have (for a drop-down, the option's tag). Requires custom_field_id.";
+    public const string CustomFieldValue = "Value the custom field must have (for a drop-down, the option's tag). Requires custom_field_id. 'none' does not find empty fields: use custom_fields with has_value false.";
+    public const string CustomFields = "Custom field conditions, all of which must hold (at most 10, each field once, not the custom_field_id field): {id, value} for an exact value (a drop-down option's tag; true or false for a checkbox), {id, has_value: false} for an empty field, {id, has_value: true} for any value. has_value works on drop-down, multi-select, text, multi-line, number, decimal, date, regex, lookup and credit-card fields; a checkbox is never empty, so use value true or false. Built-in fields such as priority or group have their own filters. Use List_ticket_fields for ids.";
+    public const string Channel = "Channels the tickets came in on; a ticket on any of them matches: email, web, api, voice, native_messaging, chat, mobile, mobile_sdk, sms, facebook, twitter, whatsapp, web_widget, or messaging (native_messaging and whatsapp together). Each selects exactly the tickets of that channel's group in Count_tickets group_by channel. Use this, never 'via:' in text.";
     public const string CustomStatusId = "Numeric id of a custom ticket status.";
     public const string HasAttachments = "true for tickets with attachments, false for tickets without.";
     public const string StartDate = "Created on or after this date (YYYY-MM-DD, or an ISO date-time).";
@@ -597,6 +599,106 @@ public static class TicketSearchHelpers
         }
 
         return titles;
+    }
+
+    // Field types whose search terms are their own filters rather than custom_field_<id>. Zendesk marks
+    // most built-in fields removable: false, but priority and ticket type are removable (seen on the
+    // live account), so the type decides too.
+    private static readonly HashSet<string> BuiltInFieldTypes = new(StringComparer.Ordinal)
+    {
+        "subject", "description", "status", "custom_status", "tickettype", "priority", "group", "assignee", "brand",
+    };
+
+    // The field types has_value applies to: every type a ticket can leave empty.
+    private static readonly HashSet<string> EmptiableFieldTypes = new(StringComparer.Ordinal)
+    {
+        "tagger", "multiselect", "text", "textarea", "integer", "decimal", "date", "regexp", "lookup", "partialcreditcard",
+    };
+
+    /// <summary>
+    /// Checks the custom field filters against the account's field definitions, which the query
+    /// builder cannot see: the field exists and is not a built-in one, has_value is not asked of a
+    /// checkbox (never empty), a checkbox value is true or false, and 'none' is refused where it would
+    /// silently match nothing (Zendesk reads it as a literal value, so it finds no empty fields —
+    /// confirmed against the live API) unless the field has an option tagged 'none'. Makes no request
+    /// when neither custom_fields nor a 'none' value is given.
+    /// </summary>
+    public static async Task CheckCustomFieldsAsync(ZendeskService zendesk, TicketSearchFilters filters, CancellationToken cancellationToken)
+    {
+        var conditions = (filters.CustomFields ?? []).ToList();
+        var noneValue = filters.CustomFieldId is not null
+            && string.Equals(filters.CustomFieldValue?.Trim(), "none", StringComparison.OrdinalIgnoreCase);
+        if (conditions.Count == 0 && !noneValue)
+        {
+            return;
+        }
+
+        var listing = await zendesk.GetAllPagesAsync("/api/v2/ticket_fields", null, "ticket_fields", maxItems: 2000, cancellationToken: cancellationToken);
+        var definitions = new Dictionary<long, JsonNode>();
+        foreach (var field in listing.Items)
+        {
+            if (ToolJson.Long(field["id"]) is { } fieldId)
+            {
+                definitions[fieldId] = field;
+            }
+        }
+
+        static string Id(long id) => id.ToString(CultureInfo.InvariantCulture);
+
+        static bool HasNoneOption(JsonNode field) =>
+            (field["custom_field_options"]?.AsArray() ?? [])
+                .Any(o => string.Equals(ToolJson.String(o?["value"]), "none", StringComparison.OrdinalIgnoreCase));
+
+        string NoneRefusal(long id, string parameter) =>
+            $"{parameter} 'none' does not find tickets with field {Id(id)} empty: Zendesk searches for the value 'none'. Use custom_fields [{{\"id\": {Id(id)}, \"has_value\": false}}].";
+
+        if (noneValue)
+        {
+            var id = filters.CustomFieldId!.Value;
+            if (!definitions.TryGetValue(id, out var field) || !HasNoneOption(field))
+            {
+                throw new ArgumentException(NoneRefusal(id, "custom_field_value"));
+            }
+        }
+
+        foreach (var condition in conditions)
+        {
+            if (!definitions.TryGetValue(condition.Id, out var field))
+            {
+                throw new ArgumentException($"custom_fields: there is no ticket field {Id(condition.Id)} (see List_ticket_fields).");
+            }
+
+            var type = ToolJson.String(field["type"]) ?? string.Empty;
+            var removable = field["removable"] is not JsonValue r || !r.TryGetValue<bool>(out var flag) || flag;
+            if (BuiltInFieldTypes.Contains(type) || !removable)
+            {
+                throw new ArgumentException($"custom_fields: field {Id(condition.Id)} is the built-in '{type}' field, which custom_fields cannot search. Use its own filter (status, priority, ticket_type, group, assignee, brand, text).");
+            }
+
+            if (type == "checkbox")
+            {
+                // Unverified against the live API: searching a checkbox as custom_field_<id>:true / :false
+                // (as group_by custom_field does). The validation account has no checkbox ticket field.
+                if (condition.HasValue is not null)
+                {
+                    throw new ArgumentException($"custom_fields: field {Id(condition.Id)} is a checkbox, which is never empty. Use value true (checked) or false (unchecked) instead of has_value.");
+                }
+
+                if (condition.Value!.Trim().ToLowerInvariant() is not ("true" or "false"))
+                {
+                    throw new ArgumentException($"custom_fields: field {Id(condition.Id)} is a checkbox; its value is true (checked) or false (unchecked) (got '{condition.Value}').");
+                }
+            }
+            else if (condition.HasValue is not null && !EmptiableFieldTypes.Contains(type))
+            {
+                throw new ArgumentException($"custom_fields: has_value does not apply to field {Id(condition.Id)}, a '{type}' field. It works on drop-down, multi-select, text, multi-line, number, decimal, date, regex, lookup and credit-card fields.");
+            }
+
+            if (string.Equals(condition.Value?.Trim(), "none", StringComparison.OrdinalIgnoreCase) && !HasNoneOption(field))
+            {
+                throw new ArgumentException(NoneRefusal(condition.Id, "custom_fields value"));
+            }
+        }
     }
 
     /// <summary>The number of tickets a search query matches.</summary>

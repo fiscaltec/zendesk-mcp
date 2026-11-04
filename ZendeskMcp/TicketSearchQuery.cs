@@ -1,5 +1,7 @@
 using System.Globalization;
 using System.Text;
+using System.Text.Json.Serialization;
+using ZendeskMcp.Tools;
 
 namespace ZendeskMcp;
 
@@ -30,7 +32,22 @@ public sealed record TicketSearchFilters
     public string? EndDate { get; init; }
     public string? SolvedStartDate { get; init; }
     public string? SolvedEndDate { get; init; }
+
+    /// <summary>Channels (see <see cref="TicketSearchQuery.ChannelValues"/>); a ticket on any of them matches.</summary>
+    public IReadOnlyList<string>? Channels { get; init; }
+
+    /// <summary>Custom field conditions, all of which must hold.</summary>
+    public IReadOnlyList<TicketCustomFieldCondition>? CustomFields { get; init; }
 }
+
+/// <summary>
+/// One custom field condition in a ticket search: the field has exactly <c>value</c>, or, with
+/// <c>has_value</c>, the field is set (true) or empty (false). Exactly one of the two is given.
+/// </summary>
+public sealed record TicketCustomFieldCondition(
+    [property: JsonPropertyName("id")] long Id,
+    [property: JsonPropertyName("value")] string? Value = null,
+    [property: JsonPropertyName("has_value")] bool? HasValue = null);
 
 /// <summary>
 /// Turns <see cref="TicketSearchFilters"/> into a Zendesk Search query (<c>type:ticket status:open …</c>).
@@ -51,6 +68,19 @@ public sealed record TicketSearchFilters
 public static class TicketSearchQuery
 {
     public const int MaxTextLength = 500;
+
+    /// <summary>Most conditions one custom_fields filter takes.</summary>
+    public const int MaxCustomFieldConditions = 10;
+
+    /// <summary>The value that selects every messaging channel together.</summary>
+    public const string MessagingChannel = "messaging";
+
+    /// <summary>
+    /// The values the channel filter takes: the channel keys Count_tickets groups by, so a channel here
+    /// selects exactly the tickets of its group there, plus <see cref="MessagingChannel"/>.
+    /// </summary>
+    public static readonly string[] ChannelValues =
+        [.. TicketCountHelpers.Channels.Select(c => c.Channel), MessagingChannel];
 
     private static readonly string[] Statuses = ["new", "open", "pending", "hold", "solved", "closed"];
     private static readonly string[] Priorities = ["low", "normal", "high", "urgent"];
@@ -106,6 +136,9 @@ public static class TicketSearchQuery
 
             terms.Add($"custom_field_{fieldId.ToString(CultureInfo.InvariantCulture)}:{Quote(filters.CustomFieldValue)}");
         }
+
+        AddCustomFields(terms, filters);
+        AddChannels(terms, filters.Channels);
 
         if (filters.CustomStatusId is { } customStatus)
         {
@@ -163,6 +196,104 @@ public static class TicketSearchQuery
         }
 
         throw new ArgumentException($"{parameter} must be YYYY-MM-DD or YYYY-MM-DDThh:mm:ss[Z] (got '{value}').");
+    }
+
+    /// <summary>
+    /// The via: search values a channel filter expands to, in the channel table's order. Each value is
+    /// one the live API accepts (TicketCountHelpers.Channels); repeating a keyword ORs its values, as
+    /// priority:low priority:normal counts the two priorities together (confirmed against the live API).
+    /// </summary>
+    public static IReadOnlyList<string> ChannelSearchValues(IReadOnlyList<string>? channels)
+    {
+        if (channels is null || channels.Count == 0)
+        {
+            return [];
+        }
+
+        var wanted = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var channel in channels)
+        {
+            var normalised = (channel ?? string.Empty).Trim().ToLowerInvariant();
+            if (!ChannelValues.Contains(normalised))
+            {
+                throw new ArgumentException($"channel values must be from: {string.Join(", ", ChannelValues)} (got '{channel}'). Use this filter for the channel, never 'via:' in text.");
+            }
+
+            wanted.Add(normalised);
+        }
+
+        // messaging is every messaging channel the table has a search value for. The other messaging
+        // channels Zendesk knows (TicketConversationHelpers.MessagingChannels: Instagram DM, LINE, WeChat
+        // and so on) are left out: their via: values have not been tried against the live API, and an
+        // unknown one makes Zendesk refuse the whole search.
+        var messaging = wanted.Contains(MessagingChannel);
+        return TicketCountHelpers.Channels
+            .Where(c => wanted.Contains(c.Channel) || (messaging && TicketConversationHelpers.MessagingChannels.Contains(c.Channel)))
+            .Select(c => c.SearchValue)
+            .Distinct(StringComparer.Ordinal)
+            .ToList();
+    }
+
+    private static void AddChannels(List<string> terms, IReadOnlyList<string>? channels)
+    {
+        foreach (var value in ChannelSearchValues(channels))
+        {
+            terms.Add($"via:{value}");
+        }
+    }
+
+    // custom_fields: each condition one term, all ANDed. Zendesk ORs two terms on the same field, so a
+    // field may appear once, and not alongside custom_field_id. What a field's type allows (a checkbox is
+    // never empty, a built-in field has its own filter) needs the field definitions, which
+    // TicketSearchHelpers.CheckCustomFieldsAsync reads; this checks only the shape.
+    private static void AddCustomFields(List<string> terms, TicketSearchFilters filters)
+    {
+        if (filters.CustomFields is not { Count: > 0 } conditions)
+        {
+            return;
+        }
+
+        if (conditions.Count > MaxCustomFieldConditions)
+        {
+            throw new ArgumentException($"custom_fields takes at most {MaxCustomFieldConditions} conditions (got {conditions.Count}).");
+        }
+
+        var seen = new HashSet<long>();
+        foreach (var condition in conditions)
+        {
+            if (condition is null || condition.Id <= 0)
+            {
+                throw new ArgumentException("Each custom_fields condition needs id, a positive ticket field id (see List_ticket_fields).");
+            }
+
+            var id = condition.Id.ToString(CultureInfo.InvariantCulture);
+            if (!seen.Add(condition.Id))
+            {
+                throw new ArgumentException($"custom_fields names field {id} more than once; Zendesk would match either condition rather than both. Give each field once.");
+            }
+
+            if (filters.CustomFieldId == condition.Id)
+            {
+                throw new ArgumentException($"Field {id} is already filtered by custom_field_id; give it in one place only.");
+            }
+
+            var hasValue = !string.IsNullOrWhiteSpace(condition.Value);
+            if (hasValue == condition.HasValue.HasValue || (condition.Value is not null && !hasValue))
+            {
+                throw new ArgumentException($"custom_fields condition for field {id} needs exactly one of value (an exact value; for a drop-down, the option's tag) or has_value (true: any value, false: empty).");
+            }
+
+            // custom_field_<id>:* matches a field holding any value: on a drop-down it counted exactly the
+            // tickets outside group_by custom_field's '(none)' group (confirmed against the live API).
+            // Unverified against the live API: the negation, -custom_field_<id>:*, for empty fields, and
+            // the wildcard on text, number, date and other non-drop-down fields.
+            terms.Add(condition.HasValue switch
+            {
+                true => $"custom_field_{id}:*",
+                false => $"-custom_field_{id}:*",
+                null => $"custom_field_{id}:{Quote(condition.Value!)}",
+            });
+        }
     }
 
     private static void AddDate(List<string> terms, string op, string? value, string parameter)

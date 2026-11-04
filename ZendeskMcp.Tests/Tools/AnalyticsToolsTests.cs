@@ -393,4 +393,67 @@ public class AnalyticsToolsTests
         result["counts"]!["scanned"]!.GetValue<int>().Should().Be(0);
         result["tickets"]!.AsArray().Should().BeEmpty();
     }
+
+    // ---- channel and custom_fields reach every analytics tool ----
+
+    private static FakeResponse WithFields(RecordedRequest r, Func<RecordedRequest, FakeResponse> inner) =>
+        r.Path == "/api/v2/ticket_fields" ? FakeResponse.Json(TicketsToolsTests.TicketFieldsJson) : inner(r);
+
+    [Fact]
+    public async Task MetricsSummary_ChannelAndCustomFields_NarrowTheSearch()
+    {
+        using var fake = TestHelpers.CreateFakeZendesk(r => WithFields(r, Route));
+        var zendesk = TestHelpers.BuildZendeskService(fake.Client);
+
+        await AnalyticsTools.GetTicketMetricsSummary(zendesk, start_date: "2026-03-01", channel: ["web"],
+            custom_fields: [new TicketCustomFieldCondition(10, HasValue: true)]);
+
+        fake.Requests.Single(r => r.Path == "/api/v2/search/export").Query("query")
+            .Should().Be("type:ticket custom_field_10:* via:web created>=2026-03-01");
+    }
+
+    [Fact]
+    public async Task SlaSummary_ChannelAndCustomFields_NarrowBothSearches()
+    {
+        using var fake = TestHelpers.CreateFakeZendesk(r => WithFields(r, SlaRoute));
+        var zendesk = TestHelpers.BuildZendeskService(fake.Client);
+
+        await AnalyticsTools.GetSlaSummary(zendesk, start_date: "2026-03-01", end_date: "2026-03-07", channel: ["email"],
+            custom_fields: [new TicketCustomFieldCondition(16, HasValue: false)]);
+
+        fake.Requests.Where(r => r.Path == "/api/v2/search/export").Select(r => r.Query("query")).Should().Equal(
+            "type:ticket -custom_field_16:* via:mail updated>=2026-03-01",
+            "type:ticket -custom_field_16:* via:mail status<solved");
+    }
+
+    [Fact]
+    public async Task SlaQueue_ChannelAndCustomFields_NarrowTheQueue()
+    {
+        using var fake = TestHelpers.CreateFakeZendesk(r => WithFields(r, q => q.Path == "/api/v2/search/export"
+            ? FakeResponse.Json(Export())
+            : FakeResponse.Json("""{"tickets":[]}""")));
+        var zendesk = TestHelpers.BuildZendeskService(fake.Client);
+
+        await AnalyticsTools.GetSlaQueue(zendesk, channel: ["messaging"], custom_fields: [new TicketCustomFieldCondition(10, Value: "a")]);
+
+        fake.Requests.Single(r => r.Path == "/api/v2/search/export").Query("query")
+            .Should().Be("type:ticket custom_field_10:a via:native_messaging via:whatsapp status<solved");
+    }
+
+    [Fact]
+    public async Task AnalyticsTools_RefuseACustomFieldTheFieldCannotTake_BeforeSearching()
+    {
+        using var fake = TestHelpers.CreateFakeZendesk(r => WithFields(r, Route));
+        var zendesk = TestHelpers.BuildZendeskService(fake.Client);
+        TicketCustomFieldCondition[] checkboxEmpty = [new TicketCustomFieldCondition(12, HasValue: false)];
+
+        await FluentActions.Awaiting(() => AnalyticsTools.GetTicketMetricsSummary(zendesk, start_date: "2026-03-01", custom_fields: checkboxEmpty))
+            .Should().ThrowAsync<ArgumentException>().WithMessage("*checkbox*");
+        await FluentActions.Awaiting(() => AnalyticsTools.GetSlaSummary(zendesk, start_date: "2026-03-01", custom_fields: checkboxEmpty))
+            .Should().ThrowAsync<ArgumentException>().WithMessage("*checkbox*");
+        await FluentActions.Awaiting(() => AnalyticsTools.GetSlaQueue(zendesk, custom_fields: checkboxEmpty))
+            .Should().ThrowAsync<ArgumentException>().WithMessage("*checkbox*");
+
+        fake.Requests.Should().NotContain(r => r.Path == "/api/v2/search/export");
+    }
 }

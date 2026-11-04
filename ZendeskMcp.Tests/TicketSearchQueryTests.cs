@@ -115,6 +115,132 @@ public class TicketSearchQueryTests
     }
 
     [Fact]
+    public void Channels_BecomeViaTerms_InTheChannelTablesOrder_WithEmailAsMail()
+    {
+        TicketSearchQuery.Build(new TicketSearchFilters { Channels = ["WEB", " email ", "web"] })
+            .Should().Be("type:ticket via:mail via:web");
+    }
+
+    [Fact]
+    public void Messaging_ExpandsToTheMessagingChannelsTheTableCanSearch()
+    {
+        TicketSearchQuery.Build(new TicketSearchFilters { Channels = ["messaging", "whatsapp"] })
+            .Should().Be("type:ticket via:native_messaging via:whatsapp");
+    }
+
+    [Fact]
+    public void EveryChannelValue_IsAcceptedAndMapsToATerm()
+    {
+        // Every value but messaging is a group of Count_tickets group_by channel, so a filter selects
+        // exactly that group's tickets: the term is the one the breakdown counts.
+        foreach (var (channel, searchValue) in ZendeskMcp.Tools.TicketCountHelpers.Channels)
+        {
+            TicketSearchQuery.Build(new TicketSearchFilters { Channels = [channel] })
+                .Should().Be($"type:ticket via:{searchValue}");
+        }
+
+        TicketSearchQuery.ChannelValues.Should().Contain("messaging");
+    }
+
+    [Theory]
+    [InlineData("instagram_dm")]
+    [InlineData("via:mail")]
+    [InlineData("")]
+    public void UnknownChannels_AreRefused(string channel)
+    {
+        var act = () => TicketSearchQuery.Build(new TicketSearchFilters { Channels = [channel] });
+
+        act.Should().Throw<ArgumentException>().WithMessage("*channel values must be from*never 'via:' in text*");
+    }
+
+    [Fact]
+    public void ViaInText_StaysAWord_NotAChannelFilter()
+    {
+        TicketSearchQuery.Build(new TicketSearchFilters { Text = "via:mail" })
+            .Should().Be("type:ticket \"via:mail\"");
+    }
+
+    [Fact]
+    public void CustomFieldConditions_BecomeOneTermEach()
+    {
+        var query = TicketSearchQuery.Build(new TicketSearchFilters
+        {
+            CustomFieldId = 1,
+            CustomFieldValue = "a",
+            CustomFields =
+            [
+                new TicketCustomFieldCondition(2, Value: "two words"),
+                new TicketCustomFieldCondition(3, HasValue: false),
+                new TicketCustomFieldCondition(4, HasValue: true),
+            ],
+        });
+
+        query.Should().Be("type:ticket custom_field_1:a custom_field_2:\"two words\" -custom_field_3:* custom_field_4:*");
+    }
+
+    [Theory]
+    [InlineData(null, null)]
+    [InlineData("x", false)]
+    [InlineData("  ", null)]
+    [InlineData("  ", true)]
+    public void ACustomFieldCondition_NeedsExactlyOneOfValueAndHasValue(string? value, bool? hasValue)
+    {
+        var act = () => TicketSearchQuery.Build(new TicketSearchFilters { CustomFields = [new TicketCustomFieldCondition(5, value, hasValue)] });
+
+        act.Should().Throw<ArgumentException>().WithMessage("*exactly one of value*has_value*");
+    }
+
+    [Fact]
+    public void AFieldNamedTwice_IsRefused_BecauseZendeskWouldOrTheConditions()
+    {
+        var act = () => TicketSearchQuery.Build(new TicketSearchFilters
+        {
+            CustomFields = [new TicketCustomFieldCondition(5, Value: "a"), new TicketCustomFieldCondition(5, Value: "b")],
+        });
+
+        act.Should().Throw<ArgumentException>().WithMessage("*more than once*");
+    }
+
+    [Fact]
+    public void AFieldAlsoGivenAsCustomFieldId_IsRefused()
+    {
+        var act = () => TicketSearchQuery.Build(new TicketSearchFilters
+        {
+            CustomFieldId = 5,
+            CustomFieldValue = "a",
+            CustomFields = [new TicketCustomFieldCondition(5, HasValue: true)],
+        });
+
+        act.Should().Throw<ArgumentException>().WithMessage("*already filtered by custom_field_id*");
+    }
+
+    [Fact]
+    public void MoreThanTenConditions_AreRefused_AndTenAreAccepted()
+    {
+        TicketCustomFieldCondition[] Conditions(int count) =>
+            Enumerable.Range(1, count).Select(i => new TicketCustomFieldCondition(i, HasValue: true)).ToArray();
+
+        TicketSearchQuery.Build(new TicketSearchFilters { CustomFields = Conditions(10) }).Should().Contain("custom_field_10:*");
+        var act = () => TicketSearchQuery.Build(new TicketSearchFilters { CustomFields = Conditions(11) });
+        act.Should().Throw<ArgumentException>().WithMessage("*at most 10*");
+    }
+
+    [Fact]
+    public void ANonPositiveFieldId_IsRefused()
+    {
+        var act = () => TicketSearchQuery.Build(new TicketSearchFilters { CustomFields = [new TicketCustomFieldCondition(0, Value: "a")] });
+
+        act.Should().Throw<ArgumentException>().WithMessage("*positive ticket field id*");
+    }
+
+    [Fact]
+    public void ACustomFieldValue_DropsQuotes_SoItCannotBreakOutOfTheTerm()
+    {
+        TicketSearchQuery.Build(new TicketSearchFilters { CustomFields = [new TicketCustomFieldCondition(5, Value: "a\" status:solved \"b")] })
+            .Should().Be("type:ticket custom_field_5:\"a status:solved b\"");
+    }
+
+    [Fact]
     public void TheAgentSearchUrl_EscapesTheQuery()
     {
         TicketSearchQuery.AgentSearchUrl("https://acme.zendesk.com", "type:ticket status:open")
