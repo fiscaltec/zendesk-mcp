@@ -306,19 +306,53 @@ public class TicketsToolsTests
         fake.Requests.Single(r => r.Path == "/api/v2/search/export").Query("query").Should().Be("type:ticket -custom_field_10:* custom_field_11:none");
     }
 
-    [Fact]
-    public async Task SearchTickets_AFieldBeyondATruncatedListing_SaysItCouldNotBeChecked()
+    private static FakeZendesk TruncatedFieldsFake() => TestHelpers.CreateFakeZendesk(r => r.Path switch
     {
-        // A listing that stops early must not be read as "the field does not exist".
-        using var fake = TestHelpers.CreateFakeZendesk(r => r.Path switch
-        {
-            "/api/v2/ticket_fields" => Json("""{"ticket_fields":[{"id":10,"type":"tagger","removable":true}],"meta":{"has_more":true,"after_cursor":"c2"}}"""),
-            _ => Count(0),
-        });
+        // One page of a longer listing; fields 11 and 16 are on pages the server does not reach.
+        "/api/v2/ticket_fields" => Json("""{"ticket_fields":[{"id":10,"type":"tagger","removable":true}],"meta":{"has_more":true,"after_cursor":"c2"}}"""),
+        "/api/v2/ticket_fields/11" => Json("""{"ticket_field":{"id":11,"type":"tagger","removable":true,"custom_field_options":[{"name":"None","value":"none"}]}}"""),
+        "/api/v2/ticket_fields/16" => Json("""{"ticket_field":{"id":16,"type":"text","removable":true}}"""),
+        "/api/v2/ticket_fields/99" => FakeResponse.NotFound(),
+        _ => Count(0),
+    });
+
+    [Fact]
+    public async Task CountTickets_FieldsBeyondATruncatedListing_AreReadOneByOne()
+    {
+        using var fake = TruncatedFieldsFake();
+
+        var result = JsonNode.Parse(await TicketsTools.CountTickets(TestHelpers.BuildZendeskService(fake.Client, maxAutoPageFetches: 1),
+            custom_field_id: 11, custom_field_value: "none", custom_fields: [new TicketCustomFieldCondition(16, HasValue: false), new TicketCustomFieldCondition(10, Value: "a")]))!;
+
+        // Field 11's 'none' option and field 16's type come from the single reads, so neither is refused.
+        result["query"]!.GetValue<string>().Should().Be("type:ticket custom_field_11:none -custom_field_16:* custom_field_10:a");
+        fake.Requests.Select(r => r.Path).Where(p => p.StartsWith("/api/v2/ticket_fields/", StringComparison.Ordinal))
+            .Should().BeEquivalentTo(["/api/v2/ticket_fields/11", "/api/v2/ticket_fields/16"], "field 10 was on the page read, so it is not read again");
+    }
+
+    [Fact]
+    public async Task SearchTickets_AFieldMissingFromATruncatedListing_ThatDoesNotExist_IsRefused()
+    {
+        using var fake = TruncatedFieldsFake();
+
         var act = () => TicketsTools.SearchTickets(TestHelpers.BuildZendeskService(fake.Client, maxAutoPageFetches: 1),
             custom_fields: [new TicketCustomFieldCondition(99, Value: "x")]);
 
-        await act.Should().ThrowAsync<ArgumentException>().WithMessage("*not among the first 1 fields*");
+        await act.Should().ThrowAsync<ArgumentException>().WithMessage("*no ticket field 99*");
+        fake.Requests.Should().NotContain(r => r.Path.StartsWith("/api/v2/search", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task SearchTickets_ACompleteListing_IsNotFollowedBySingleReads()
+    {
+        // Negative control: when the listing is complete, a missing field is unknown without another request.
+        using var fake = SearchFake();
+
+        var act = () => TicketsTools.SearchTickets(TestHelpers.BuildZendeskService(fake.Client),
+            custom_fields: [new TicketCustomFieldCondition(99, Value: "x")]);
+
+        await act.Should().ThrowAsync<ArgumentException>().WithMessage("*no ticket field 99*");
+        fake.Requests.Should().NotContain(r => r.Path.StartsWith("/api/v2/ticket_fields/", StringComparison.Ordinal));
     }
 
     [Fact]

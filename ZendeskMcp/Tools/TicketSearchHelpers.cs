@@ -1,4 +1,5 @@
 using System.Globalization;
+using System.Net;
 using System.Text;
 using System.Text.Json.Nodes;
 using System.Text.RegularExpressions;
@@ -656,6 +657,31 @@ public static class TicketSearchHelpers
             definitions[fieldId!.Value] = field;
         }
 
+        // The listing stops at MaxAutoPageFetches pages. A field it did not reach is read on its own, so a
+        // long field list cannot turn a valid condition into a refusal; a 404 means there is no such field.
+        if (listing.HasMore)
+        {
+            var wanted = conditions.Select(c => c.Id)
+                .Concat(noneValue ? [filters.CustomFieldId!.Value] : [])
+                .Distinct()
+                .Where(id => !definitions.ContainsKey(id));
+            foreach (var id in wanted)
+            {
+                try
+                {
+                    var single = await zendesk.GetAsync($"/api/v2/ticket_fields/{Id(id)}", cancellationToken: cancellationToken);
+                    if (single["ticket_field"] is { } field)
+                    {
+                        definitions[id] = field;
+                    }
+                }
+                catch (HttpRequestException ex) when (ex.StatusCode == HttpStatusCode.NotFound)
+                {
+                    // No such field: refused below as unknown.
+                }
+            }
+        }
+
         static string Id(long id) => id.ToString(CultureInfo.InvariantCulture);
 
         static bool HasNoneOption(JsonNode field) =>
@@ -681,9 +707,7 @@ public static class TicketSearchHelpers
         {
             if (!definitions.TryGetValue(condition.Id, out var field))
             {
-                throw new ArgumentException(listing.HasMore
-                    ? $"custom_fields: ticket field {Id(condition.Id)} is not among the first {listing.Items.Count} fields this server reads, so it cannot be checked. Use custom_field_id and custom_field_value for it."
-                    : $"custom_fields: there is no ticket field {Id(condition.Id)} (see List_ticket_fields).");
+                throw new ArgumentException($"custom_fields: there is no ticket field {Id(condition.Id)} (see List_ticket_fields).");
             }
 
             var type = ToolJson.String(field["type"]) ?? string.Empty;
