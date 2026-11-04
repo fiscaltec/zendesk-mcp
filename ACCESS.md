@@ -77,7 +77,7 @@ switches also apply to everyone, whatever their tier:
 
 | Switch | Covers |
 |---|---|
-| Public replies | public comments, CCs and public macro replies (they email customers) |
+| Public replies | public comments, CCs, public macro replies and public merge comments (they email customers) |
 | Article publishing | publishing Help Center articles and translations rather than saving drafts, and changing who can view an article |
 | Help Center structure changes | creating and changing Help Center categories and sections, which are public as soon as they exist |
 | Macro changes | creating, editing, activating and deactivating macros |
@@ -155,7 +155,7 @@ Do all of these, in this order:
 An Entra access token they already hold stays valid until it expires (about 60–90 minutes). Step 2
 is what makes that harmless for Zendesk. If you need to stop all writes for everyone at once, set
 `Authorization__ReadOnly=true` on the Container App. If Graph is down as well, disable ingress
-instead — vitally-mcp's ACCESS.md explains why `ReadOnly` misbehaves during a Graph outage.
+instead — `docs/runbooks/read-only-and-rbac.md` (*What it is not for*) explains why `ReadOnly` misbehaves during a Graph outage.
 
 ## How it's set up (in brief)
 
