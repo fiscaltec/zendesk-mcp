@@ -84,7 +84,7 @@ stored_hash() {  # $1 = container app, $2 = secret name
 #    an API or RBAC outage masquerade as a fresh roll while an old replica still holds the
 #    superseded secret. That is the same trap as the `for REV in $(az …)` one above, one function
 #    later, and it has to be closed the same way.
-replicas_are_fresh() {  # $1 = app, $2 = epoch secs before `secret set`, $3 = min running replicas
+replicas_are_fresh() {  # $1 = app, $2 = epoch secs taken AFTER this target's `secret set` returned, $3 = min running replicas
   local CA="$1" STAMP="$2" MIN="${3:-0}" attempt
   for attempt in $(seq 1 12); do          # up to ~2 minutes, only ever waiting for MIN
     if _replicas_fresh_once "$CA" "$STAMP" "$MIN"; then
