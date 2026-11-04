@@ -226,7 +226,9 @@ public static partial class HelpCenterArticlesTools
 
         // The repeat guard is what makes a retried call safe: a model that lost the first response must
         // not leave a second draft. It is in-process and per person, so it covers retries, not a second
-        // server instance or a different agent creating the same article.
+        // server instance or a different agent creating the same article. The entry is recorded as
+        // pending BEFORE the write (see RepeatGuard), because a response lost to a cancellation or a
+        // timeout after Zendesk created the article is exactly the retry it exists for.
         var arguments = new JsonObject
         {
             ["section_id"] = section_id, ["locale"] = validLocale, ["title"] = validTitle, ["body"] = body, ["draft"] = draft,
@@ -235,20 +237,49 @@ public static partial class HelpCenterArticlesTools
         };
         var callerKey = await MacroSupport.CallerKeyAsync(zendesk, cancellationToken);
         var cacheKey = "zendesk-mcp:create-article:" + Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes($"{zendesk.BaseUrl}\n{callerKey}\n{arguments.ToJsonString()}")));
-        if (create_again != true && cache.TryGetValue<long>(cacheKey, out var earlierId))
+        if (create_again != true && cache.TryGetValue<RepeatGuardEntry>(cacheKey, out var earlier) && earlier is not null)
         {
-            try
+            if (earlier.InFlight)
             {
-                var earlier = await zendesk.GetAsync($"/api/v2/help_center/articles/{HelpCenterJson.Id(earlierId)}", brandUrl: brand_url, cancellationToken: cancellationToken);
-                var existing = HelpCenterJson.Article(earlier["article"], includeBody: false);
-                existing["result"] = "already_created";
-                existing["visible_to"] = user_segment_id is null ? "everyone once published" : "members of user_segment_id once published";
-                return existing.ToJsonString();
+                throw RepeatGuard.StillInFlight($"create '{validTitle}' in section {section_id}", "create_again");
             }
-            catch (HttpRequestException ex) when (ex.StatusCode == HttpStatusCode.NotFound)
+
+            if (earlier.Pending)
             {
-                // Deleted since: this call creates it again.
-                cache.Remove(cacheKey);
+                var (settled, found) = await ArticleCreatedSinceAsync(zendesk, section_id, validLocale, validTitle, earlier.At, brand_url, cancellationToken);
+                if (!settled)
+                {
+                    throw new ArgumentException(
+                        $"An earlier attempt to create '{validTitle}' in section {section_id} got no answer, and the section could not confirm whether it was created. Check the section in Zendesk; pass create_again true only if the article is not there.");
+                }
+
+                if (found is not null)
+                {
+                    cache.Set(cacheKey, RepeatGuard.Completed(found) with { At = earlier.At }, RecentCreateWindow);
+                    earlier = cache.Get<RepeatGuardEntry>(cacheKey);
+                }
+                else
+                {
+                    cache.Remove(cacheKey);
+                    earlier = null; // The earlier attempt did not land: create it now.
+                }
+            }
+
+            if (earlier?.RecordId is { } earlierId)
+            {
+                try
+                {
+                    var previous = await zendesk.GetAsync($"/api/v2/help_center/articles/{HelpCenterJson.Id(earlierId)}", brandUrl: brand_url, cancellationToken: cancellationToken);
+                    var existing = HelpCenterJson.Article(previous["article"], includeBody: false);
+                    existing["result"] = "already_created";
+                    existing["visible_to"] = user_segment_id is null ? "everyone once published" : "members of user_segment_id once published";
+                    return existing.ToJsonString();
+                }
+                catch (HttpRequestException ex) when (ex.StatusCode == HttpStatusCode.NotFound)
+                {
+                    // Deleted since: this call creates it again.
+                    cache.Remove(cacheKey);
+                }
             }
         }
 
@@ -280,21 +311,90 @@ public static partial class HelpCenterArticlesTools
             article["position"] = position;
         }
 
-        var response = await zendesk.PostAsync(
-            $"{HelpCenterJson.Root(validLocale)}/sections/{HelpCenterJson.Id(section_id)}/articles",
-            new JsonObject { ["article"] = article },
-            brandUrl: brand_url,
-            cancellationToken: cancellationToken);
+        var attempt = RepeatGuard.InFlightNow();
+        cache.Set(cacheKey, attempt, RecentCreateWindow);
+        JsonNode response;
+        try
+        {
+            response = await zendesk.PostAsync(
+                $"{HelpCenterJson.Root(validLocale)}/sections/{HelpCenterJson.Id(section_id)}/articles",
+                new JsonObject { ["article"] = article },
+                brandUrl: brand_url,
+                cancellationToken: cancellationToken);
+        }
+        catch (Exception ex) when (RepeatGuard.ProvesNotWritten(ex))
+        {
+            cache.Remove(cacheKey);
+            throw;
+        }
+        catch
+        {
+            // Outcome unknown, and no longer waiting: a retry now looks in the section.
+            cache.Set(cacheKey, attempt with { InFlight = false }, RecentCreateWindow);
+            throw;
+        }
 
         var created = HelpCenterJson.Article(response["article"], includeBody: false);
-        if (ToolJson.Long(response["article"]?["id"]) is { } createdId)
-        {
-            cache.Set(cacheKey, createdId, RecentCreateWindow);
-        }
+
+        // A success without an id still created the article; without the id a retry cannot fetch it,
+        // so the entry stays pending (not in flight) and a retry looks in the section instead.
+        cache.Set(cacheKey,
+            ToolJson.Long(response["article"]?["id"]) is { } createdId ? RepeatGuard.Completed(createdId) : attempt with { InFlight = false },
+            RecentCreateWindow);
 
         created["result"] = "created";
         created["visible_to"] = user_segment_id is null ? "everyone once published" : "members of user_segment_id once published";
         return created.ToJsonString();
+    }
+
+    /// <summary>
+    /// Looks in the section for the article an unanswered earlier attempt would have created: this title
+    /// and locale, by the connected user, created since <paramref name="since"/> (less
+    /// <see cref="RepeatGuard.ClockSkew"/>). <c>Settled</c> is false when the section could not be read,
+    /// or the newest page did not show it and there are more pages.
+    /// </summary>
+    /// <remarks>
+    /// Unverified against the live API: that a section's article list includes drafts for an agent
+    /// who can manage them (a new article is a draft by default, so a list without drafts would make
+    /// this report "not created" and the retry would leave a second draft), and that it honours
+    /// <c>sort_by=created_at</c> with <c>sort_order=desc</c>.
+    /// </remarks>
+    private static async Task<(bool Settled, long? ArticleId)> ArticleCreatedSinceAsync(
+        ZendeskService zendesk, long sectionId, string locale, string title, DateTimeOffset since, string? brandUrl, CancellationToken cancellationToken)
+    {
+        long? me;
+        JsonNode page;
+        try
+        {
+            me = ToolJson.Long((await MacroSupport.CurrentUserAsync(zendesk, cancellationToken))["id"]);
+            var query = new Dictionary<string, string?> { ["sort_by"] = "created_at", ["sort_order"] = "desc", ["page[size]"] = "100" };
+            page = await zendesk.GetAsync($"{HelpCenterJson.Root(locale)}/sections/{HelpCenterJson.Id(sectionId)}/articles", query, brandUrl, cancellationToken);
+        }
+        catch (HttpRequestException)
+        {
+            return (false, null);
+        }
+
+        if (me is not { } myId)
+        {
+            return (false, null);
+        }
+
+        var from = since - RepeatGuard.ClockSkew;
+        foreach (var candidate in (page["articles"] as JsonArray ?? []).OfType<JsonNode>())
+        {
+            if (string.Equals(ToolJson.String(candidate["title"])?.Trim(), title.Trim(), StringComparison.Ordinal)
+                && string.Equals(ToolJson.String(candidate["locale"]), locale, StringComparison.OrdinalIgnoreCase)
+                && ToolJson.Long(candidate["author_id"]) == myId
+                && RepeatGuard.Timestamp(candidate["created_at"]) is { } at && at >= from
+                && ToolJson.Long(candidate["id"]) is { } id)
+            {
+                return (true, id);
+            }
+        }
+
+        var hasMore = (page["meta"]?["has_more"] is JsonValue flag && flag.TryGetValue<bool>(out var flagged) && flagged) || ToolJson.String(page["next_page"]) is not null;
+        return (!hasMore, null);
     }
 
     [Authorize(Policy = "zendesk:write")]

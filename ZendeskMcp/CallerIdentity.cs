@@ -69,23 +69,30 @@ public static class CallerIdentity
             return null;
         }
 
-        // `upn` first: Microsoft documents `preferred_username` as mutable and not for authorisation
-        // decisions, and this one binds a Zendesk account to a person. `upn` is an optional claim on v2
-        // access tokens (entra.tf requests it); `preferred_username` remains the fallback, and in a
-        // single work tenant it carries the same UPN.
-        string[] claimTypes =
-        [
-            "upn",
-            ClaimTypes.Upn,
-            "email",
-            ClaimTypes.Email,
-            "preferred_username",
-            "unique_name",
-            ClaimTypes.Name,
-        ];
-
-        return claimTypes
+        return SignInNameClaimTypes
             .Select(type => user.FindFirst(type)?.Value)
             .FirstOrDefault(value => !string.IsNullOrWhiteSpace(value) && value.Contains('@'));
     }
+
+    /// <summary>
+    /// The claim types <see cref="TryGetSignInName"/> reads, in the order it prefers them. Public so a
+    /// component that rebuilds a principal — an upload slot — carries every one of them, rather than a
+    /// copy of the list that drifts from this one.
+    /// </summary>
+    /// <remarks>
+    /// <c>upn</c> first: Microsoft documents <c>preferred_username</c> as mutable and not for
+    /// authorisation decisions, and this one binds a Zendesk account to a person. <c>upn</c> is an
+    /// optional claim on v2 access tokens (entra.tf requests it); <c>preferred_username</c> remains the
+    /// fallback, and in a single work tenant it carries the same UPN.
+    /// </remarks>
+    public static IReadOnlyList<string> SignInNameClaimTypes { get; } =
+    [
+        "upn",
+        ClaimTypes.Upn,
+        "email",
+        ClaimTypes.Email,
+        "preferred_username",
+        "unique_name",
+        ClaimTypes.Name,
+    ];
 }
