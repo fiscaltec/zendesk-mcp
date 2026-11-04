@@ -13,8 +13,9 @@ resource "azurerm_user_assigned_identity" "app" {
 # refresh and tombstones it on disconnect. Secrets User would let people connect and then fail every
 # save.
 #
-# The cost, stated plainly: the same grant lets the app overwrite or delete the two shared secrets in
-# this vault — `zendesk-oauth-client-secret` and `entra-mcp-client-secret` — and the scanner Job, which
+# The cost, stated plainly: the same grant lets the app overwrite or delete the shared secrets in this
+# vault — `zendesk-oauth-client-secret`, `zendesk-staging-oauth-client-secret` and
+# `entra-mcp-client-secret` — and the scanner Job, which
 # shares the identity, could too. Accepted, with one vault, because:
 #   * the identity already holds every person's Zendesk token, each of which can act in Zendesk as
 #     that person. A compromise of the identity is already the worst case; reaching the Zendesk
