@@ -91,8 +91,14 @@ variable "zendesk_subdomain" {
 
 variable "zendesk_oauth_client_id" {
   type        = string
-  description = "Unique identifier of the Zendesk OAuth client (Admin Centre > Apps and integrations > APIs > OAuth clients). Shared by both targets; its redirect URLs must list BOTH /zendesk/callback URLs. Its secret goes into Key Vault as `zendesk-oauth-client-secret`, never here."
+  description = "Unique identifier of PRODUCTION's Zendesk OAuth client (Admin Centre > Apps and integrations > APIs > OAuth clients). Its only redirect URL is production's /zendesk/callback and its allowed scopes are `read write`. Its secret goes into Key Vault as `zendesk-oauth-client-secret`, never here."
   default     = "fiscal_zendesk_mcp"
+}
+
+variable "staging_zendesk_oauth_client_id" {
+  type        = string
+  description = "Unique identifier of STAGING's own Zendesk OAuth client (split from production's on 2026-11-04). Its only redirect URL is staging's /zendesk/callback and its allowed scopes are `read` alone, matching the Zendesk__OAuthScopes staging requests. Its secret goes into Key Vault as `zendesk-staging-oauth-client-secret`, never here."
+  default     = "fiscal_zendesk_mcp_staging"
 }
 
 # Account-wide safety switches (ZendeskFeatureOptions). Each guards an action that reaches beyond the
@@ -158,7 +164,7 @@ variable "staging_zendesk_allow_user_and_organization_changes" {
 
 variable "staging_read_only" {
   type        = bool
-  description = "Authorization__ReadOnly on staging. Staging runs unreleased code against the ONE live Zendesk account, so every mutating tool is denied there unless someone deliberately turns this off for a write test (and back on afterwards)."
+  description = "Authorization__ReadOnly on staging. Staging runs unreleased code against the ONE live Zendesk account, so every mutating tool is denied there. Since 2026-11-04 staging's own Zendesk OAuth client allows only `read`, so Zendesk refuses a staging write even with this off; turning it off for a write test also needs that client widened."
   default     = true
 }
 

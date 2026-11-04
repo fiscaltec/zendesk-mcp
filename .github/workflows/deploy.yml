@@ -39,7 +39,7 @@ name: Deploy
 # `staging` is the pre-production target (the pattern is vitally-mcp#112's): authentication and the
 # per-person Zendesk connection have the largest blast radius in this system, so changes to either
 # are validated on staging first. Its hostname is deliberately stable -- the Entra app's redirect URIs
-# and the Zendesk OAuth client's redirect URLs must name it exactly, so an ephemeral one would mean
+# and staging's own Zendesk OAuth client's redirect URL must name it exactly, so an ephemeral one would mean
 # re-registering both per run.
 #
 # FIRST DEPLOY. "Capture current image" below needs the Container App to exist already, so the very
