@@ -133,9 +133,19 @@ public static class TicketMerge
             }
 
             // A source already merged is closed, so it is set aside here and judged below by where it went.
+            // Both closed and tagged, as the read-back after a merge requires: a tag alone can be added by
+            // hand, and a tagged ticket that is still open has not been merged.
             if (role == "source" && HasTag(ticket, "closed_by_merge"))
             {
-                mergedSources.Add(id);
+                if (ToolJson.String(ticket["status"]) == "closed")
+                {
+                    mergedSources.Add(id);
+                }
+                else
+                {
+                    problems.Add($"Ticket {id} (source) is tagged closed_by_merge but is not closed, so whether it was merged cannot be told; remove the tag or check the ticket first.");
+                }
+
                 continue;
             }
 
@@ -362,8 +372,17 @@ public static class TicketMerge
         // What Zendesk did beyond the merge itself, for the model to relay, as Swifteq's merge_tickets
         // does. Each is a read after the fact: a failure is reported as a warning and never changes the
         // result, which the sources' own state has already decided.
-        AddSideEffectWarnings(before, after, targetTicketId, toMerge.Where(id => !unconfirmed.Contains(id)), warnings);
-        result["comments"] = await SavedCommentsAsync(zendesk, targetTicketId, toMerge, targetPublic, sourcePublic, warnings, cancellationToken);
+        try
+        {
+            AddSideEffectWarnings(before, after, targetTicketId, toMerge.Where(id => !unconfirmed.Contains(id)), warnings);
+            result["comments"] = await SavedCommentsAsync(zendesk, targetTicketId, toMerge, targetPublic, sourcePublic, warnings, cancellationToken);
+        }
+        catch (Exception ex) when (!cancellationToken.IsCancellationRequested)
+        {
+            // Belt and braces: the reads above already swallow their own failures, but nothing after the
+            // merge may turn a known result into a plain error.
+            warnings.Add($"Could not finish reading what Zendesk did beyond the merge ({ex.GetType().Name}).");
+        }
 
         return result.ToJsonString();
     }
@@ -427,33 +446,34 @@ public static class TicketMerge
     /// </summary>
     /// <remarks>
     /// Null when the audits cannot be read. Unverified against the live API: the via shape of merge audits. A shape this does not recognise
-    /// only means the source is refused as merged elsewhere, which is what happened before this check.
+    /// only means the source is refused as merged elsewhere: it fails closed.
     /// </remarks>
     private static async Task<bool?> WasMergedIntoAsync(ZendeskService zendesk, long sourceId, long targetId, CancellationToken cancellationToken)
     {
         // A merge is among the last things to happen to a ticket, so the newest page is enough. Nothing
-        // has been changed yet, so a failed read is a refusal (null), never a guess either way.
-        JsonNode page;
+        // has been changed yet, so any failed or malformed read is a refusal (null), never a guess either
+        // way. Only objects are indexed, so an unexpected shape reads as "no merge record".
         try
         {
-            page = await zendesk.GetAsync($"/api/v2/tickets/{Id(sourceId)}/audits",
+            var page = await zendesk.GetAsync($"/api/v2/tickets/{Id(sourceId)}/audits",
                 ToolJson.Query(("sort_order", "desc"), ("page[size]", 100)), cancellationToken: cancellationToken);
+            var vias = ((page as JsonObject)?["audits"] as JsonArray ?? [])
+                .OfType<JsonObject>()
+                .SelectMany(audit => new[] { audit["via"] }.Concat((audit["events"] as JsonArray ?? []).OfType<JsonObject>().Select(e => e["via"])))
+                .OfType<JsonObject>();
+            return vias.Any(via => via["source"] is JsonObject source
+                && ToolJson.String(source["rel"]) == "merge"
+                && (NamesTicket(source["to"], targetId) || NamesTicket(source["from"], targetId)));
         }
-        catch (HttpRequestException)
+        catch (Exception) when (!cancellationToken.IsCancellationRequested)
         {
             return null;
         }
-
-        var vias = (page["audits"] as JsonArray ?? [])
-            .Where(audit => audit is not null)
-            .SelectMany(audit => new[] { audit!["via"] }.Concat((audit["events"] as JsonArray ?? []).Select(e => e?["via"])));
-        return vias.Any(via => ToolJson.String(via?["source"]?["rel"]) == "merge"
-            && (NamesTicket(via!["source"]!["to"], targetId) || NamesTicket(via["source"]!["from"], targetId)));
     }
 
     private static bool NamesTicket(JsonNode? end, long ticketId) =>
-        ToolJson.Long(end?["ticket_id"]) == ticketId
-        || (end?["ticket_ids"] as JsonArray ?? []).Any(t => ToolJson.Long(t) == ticketId);
+        end is JsonObject obj
+        && (ToolJson.Long(obj["ticket_id"]) == ticketId || (obj["ticket_ids"] as JsonArray ?? []).Any(t => ToolJson.Long(t) == ticketId));
 
     /// <summary>The longest quote of a source's latest public comment that a default note carries.</summary>
     public const int MaxQuotedCommentLength = 1500;
@@ -504,7 +524,7 @@ public static class TicketMerge
         {
             var page = await zendesk.GetAsync($"/api/v2/tickets/{Id(ticketId)}/comments",
                 ToolJson.Query(("sort_order", "desc"), ("page[size]", pageSize)), cancellationToken: cancellationToken);
-            return ((page as JsonObject)?["comments"] as JsonArray ?? []).OfType<JsonNode>().ToList();
+            return ((page as JsonObject)?["comments"] as JsonArray ?? []).OfType<JsonObject>().Cast<JsonNode>().ToList();
         }
         // Any failure: these reads also run after the merge, where an escaping exception would read as
         // "nothing changed". Only the caller's own cancellation escapes.
@@ -542,14 +562,13 @@ public static class TicketMerge
             }
         }
 
-        foreach (var id in merged)
+        var newlyAssigned = merged
+            .Where(id => ToolJson.Long(before.Tickets[id]["assignee_id"]) is null)
+            .Select(id => (Id: id, Assignee: after.Tickets.TryGetValue(id, out var sourceAfter) ? ToolJson.Long(sourceAfter["assignee_id"]) : null))
+            .Where(x => x.Assignee is not null);
+        foreach (var (id, assignee) in newlyAssigned)
         {
-            if (ToolJson.Long(before.Tickets[id]["assignee_id"]) is null
-                && after.Tickets.TryGetValue(id, out var sourceAfter)
-                && ToolJson.Long(sourceAfter["assignee_id"]) is { } assignee)
-            {
-                warnings.Add($"Zendesk assigned ticket {id} to {Person(after, assignee)} when it closed it.");
-            }
+            warnings.Add($"Zendesk assigned ticket {id} to {Person(after, assignee!.Value)} when it closed it.");
         }
     }
 
@@ -615,17 +634,17 @@ public static class TicketMerge
     {
         var page = await zendesk.GetAsync("/api/v2/tickets/show_many",
             ToolJson.Query(("ids", ToolJson.Ids(ids)), ("include", "users")), cancellationToken: cancellationToken);
-        var tickets = ById(page["tickets"]);
-        var users = ById(page["users"]);
+        var tickets = ById((page as JsonObject)?["tickets"]);
+        var users = ById((page as JsonObject)?["users"]);
         return new TicketRead(tickets, users);
     }
 
     private static Dictionary<long, JsonNode> ById(JsonNode? array) =>
         (array as JsonArray ?? [])
-            .Where(node => node is not null && ToolJson.Long(node["id"]) is not null)
-            .Select(node => node!)
+            .OfType<JsonObject>()
+            .Where(node => ToolJson.Long(node["id"]) is not null)
             .DistinctBy(node => ToolJson.Long(node["id"])!.Value)
-            .ToDictionary(node => ToolJson.Long(node["id"])!.Value);
+            .ToDictionary(node => ToolJson.Long(node["id"])!.Value, node => (JsonNode)node);
 
     private static JsonObject Describe(TicketRead read, long id, string role)
     {

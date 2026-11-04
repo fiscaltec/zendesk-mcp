@@ -122,7 +122,7 @@ Compared with Swifteq's server: the same tools and parameters (snake_case, so pr
 
 - `get_usage` and `submit_mcp_feedback` are dropped: they are about Swifteq's billing and support.
 - The connection tools are added.
-- `Merge_tickets` follows Swifteq's `merge_tickets`: the same parameters, defaults (the target note quotes each merged ticket's latest public comment), refusals (a different requester, solved or shared sources), `already_merged` on a repeat, result values, saved comments and side-effect warnings. Departures, all additive or from this server's rules, are listed in PR #31 (#22).
+- `Merge_tickets` follows Swifteq's `merge_tickets`: the same parameters, defaults (the target note quotes each merged ticket's latest public comment), refusals (a different requester, solved or shared sources), `already_merged` on a repeat, result values, saved comments and side-effect warnings. It departs in three ways. It needs the `zendesk:write` tier, and public comments need `AllowPublicReplies`. It does not refuse AI-agent tickets itself: Zendesk documents no field marking them, so Zendesk's own job refuses them. And its result adds fields: `merged`, `job`, `polls`, `tickets_before`, `next_step` and `target_agent_url` (#22).
 - Tool names use the Vitally capitalisation (`Search_tickets`).
 - Two Help Center tools are renamed for clarity: `create_article` → `Create_help_center_article` and `get_help_center_article_content` → `Get_help_center_article`.
 - Swifteq's "MCP Server settings" toggles are the `Zendesk:Features:*` switches.

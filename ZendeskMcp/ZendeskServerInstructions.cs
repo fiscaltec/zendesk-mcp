@@ -25,7 +25,7 @@ public static class ZendeskServerInstructions
         - Public replies, article publishing, Help Center category and section changes, macro changes and
           user/organisation changes can each be switched off for the whole account; a refusal naming one
           of these is a setting, not a fault.
-        - Read-only deployments deny all writes and hide the create/update tools; a permission error
+        - Read-only deployments deny all writes and hide the tools that change Zendesk; a permission error
           means your Entra tier lacks the required permission, or Zendesk refused it for this agent.
         """;
 }

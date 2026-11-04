@@ -223,7 +223,7 @@ public class TicketMergeToolsTests
 
     [Theory]
     [InlineData("closed", "", "*Ticket 102 (source) is closed*")]
-    [InlineData("solved", "\"closed_by_merge\"", "*Ticket 102 (source) has already been merged*")]
+    [InlineData("solved", "\"closed_by_merge\"", "*Ticket 102 (source) is tagged closed_by_merge but is not closed*")]
     public async Task MergeTickets_UnmergeableSource_IsRefusedNamingTheTicket(string status, string tags, string message)
     {
         using var fake = TestHelpers.CreateFakeZendesk(r => r.Path switch
@@ -564,6 +564,80 @@ public class TicketMergeToolsTests
 
         await act.Should().ThrowAsync<ArgumentException>().WithMessage($"*Ticket {shared} ({role}) is shared*");
         fake.Requests.Should().NotContain(r => r.Path == MergePath);
+    }
+
+    [Theory]
+    [InlineData("""{"comments":[1]}""")]
+    [InlineData("""{"comments":[[{"id":1}]]}""")]
+    [InlineData("""[]""")]
+    public async Task MergeTickets_MalformedCommentsAfterACompletedMerge_StillReportTheMerge(string comments)
+    {
+        // The merge is done; a malformed best-effort read must not turn it into a plain error.
+        using var fake = SideEffectsFake(_ => FakeResponse.Json(comments));
+
+        var result = JsonNode.Parse(await Merge(TestHelpers.BuildZendeskService(fake.Client), [102]))!;
+
+        result["result"]!.GetValue<string>().Should().Be("merged");
+        result["warnings"]!.AsArray().Select(w => w!.GetValue<string>()).Should().Contain(w => w.Contains("merge comment on ticket 101"));
+    }
+
+    [Fact]
+    public async Task MergeTickets_TaggedButOpenSource_IsRefusedNotAlreadyMerged()
+    {
+        using var open = TestHelpers.CreateFakeZendesk(r => (r.Method.Method, r.Path) switch
+        {
+            ("GET", ShowManyPath) => FakeResponse.Json(ShowMany(Ticket(101), Ticket(102, "open", Merged))),
+            ("GET", "/api/v2/tickets/102/audits") => FakeResponse.Json(Audits(MergeVia("to", 101))),
+            _ => FakeResponse.NotFound(),
+        });
+
+        var act = () => Merge(TestHelpers.BuildZendeskService(open.Client), [102]);
+
+        await act.Should().ThrowAsync<ArgumentException>().WithMessage("*Ticket 102 (source) is tagged closed_by_merge but is not closed*");
+        open.Requests.Should().NotContain(r => r.Method == HttpMethod.Post);
+    }
+
+    [Theory]
+    [InlineData("""[]""")]
+    [InlineData("""{"audits":[1,{"via":"web"},{"via":{"source":"x"}}]}""")]
+    public async Task MergeTickets_MalformedAudits_AreRefusedNotGuessed(string audits)
+    {
+        using var fake = AlreadyMergedFake(_ => FakeResponse.Json(audits));
+
+        var act = () => Merge(TestHelpers.BuildZendeskService(fake.Client), [102, 103]);
+
+        await act.Should().ThrowAsync<ArgumentException>().WithMessage("*Ticket 102*");
+        fake.Requests.Should().NotContain(r => r.Method == HttpMethod.Post);
+    }
+
+    [Fact]
+    public async Task MergeTickets_AuditsReadWithoutAConnection_IsRefusedNotAnError()
+    {
+        // A non-HTTP failure reading the audits (here the development credential refused) still refuses
+        // by name rather than escaping.
+        using var fake = AlreadyMergedFake(_ => FakeResponse.WithStatus(HttpStatusCode.Unauthorized));
+
+        var act = () => Merge(TestHelpers.BuildZendeskService(fake.Client), [102, 103]);
+
+        await act.Should().ThrowAsync<ArgumentException>().WithMessage("*Ticket 102*history could not be read*");
+    }
+
+    [Fact]
+    public async Task MergeTickets_PublicTargetWithTheDefaultNote_SendsTheQuoteAsAsked()
+    {
+        // Swifteq's behaviour: a public target comment with the default note quotes the sources' latest
+        // public comments publicly. Pinned so a change to it is deliberate.
+        var merged = false;
+        using var fake = SideEffectsFake(r => FakeResponse.Json(!merged && r.Path.EndsWith("/102/comments", StringComparison.Ordinal)
+            ? Comments((2, true, "Original question"))
+            : Comments((9, true, "saved"))));
+        var zendesk = TestHelpers.BuildZendeskService(fake.Client, configure: o => o.Features.AllowPublicReplies = true);
+
+        await Merge(zendesk, [102], targetPublic: true);
+
+        var body = JsonNode.Parse(fake.Requests.Single(r => r.Path == MergePath).Body!)!;
+        body["target_comment_is_public"]!.GetValue<bool>().Should().BeTrue();
+        body["target_comment"]!.GetValue<string>().Should().EndWith("Last comment in request #102:\n\nOriginal question");
     }
 
     [Fact]
