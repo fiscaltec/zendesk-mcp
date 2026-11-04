@@ -135,8 +135,8 @@ re-reads `tools/list`, then:
 
 1. **Production only:** list the server's tools. Expect **only** read tools — `Get_`/`List_`/
    `Search_`/`Count_`/`Find_`/`Preview_`/`Export_`, plus `Get_zendesk_connect_link` and
-   `Disconnect_zendesk` — **28** of 45 at the time of writing. No `Create_`, `Update_`, `Set_`,
-   `Apply_`, `Add_` or `Request_` tool. (On staging you will see the same 28 whatever your tier.)
+   `Disconnect_zendesk` — **28** of 46 at the time of writing. No `Create_`, `Update_`, `Bulk_`,
+   `Set_`, `Apply_`, `Add_` or `Request_` tool. (On staging you will see the same 28 whatever your tier.)
 2. Run a read, e.g. *search for three tickets created this week*.
 
 Verify the tier the server used, and do not go on until it shows `zendesk:read` alone (an editor shows
