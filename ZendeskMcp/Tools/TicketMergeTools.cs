@@ -291,26 +291,17 @@ public static class TicketMerge
     {
         var page = await zendesk.GetAsync("/api/v2/tickets/show_many",
             ToolJson.Query(("ids", ToolJson.Ids(ids)), ("include", "users")), cancellationToken: cancellationToken);
-        var tickets = new Dictionary<long, JsonNode>();
-        foreach (var ticket in page["tickets"] as JsonArray ?? [])
-        {
-            if (ticket is not null && ToolJson.Long(ticket["id"]) is { } id)
-            {
-                tickets[id] = ticket;
-            }
-        }
-
-        var users = new Dictionary<long, JsonNode>();
-        foreach (var user in page["users"] as JsonArray ?? [])
-        {
-            if (user is not null && ToolJson.Long(user["id"]) is { } id)
-            {
-                users[id] = user;
-            }
-        }
-
+        var tickets = ById(page["tickets"]);
+        var users = ById(page["users"]);
         return new TicketRead(tickets, users);
     }
+
+    private static Dictionary<long, JsonNode> ById(JsonNode? array) =>
+        (array as JsonArray ?? [])
+            .Where(node => node is not null && ToolJson.Long(node["id"]) is not null)
+            .Select(node => node!)
+            .DistinctBy(node => ToolJson.Long(node["id"])!.Value)
+            .ToDictionary(node => ToolJson.Long(node["id"])!.Value);
 
     private static JsonObject Describe(TicketRead read, long id, string role)
     {
