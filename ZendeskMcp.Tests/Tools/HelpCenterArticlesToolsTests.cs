@@ -495,6 +495,96 @@ public sealed class HelpCenterArticlesToolsTests : IDisposable
         fake.Requests.Should().BeEmpty();
     }
 
+    // ---- Set_help_center_article_visibility ----
+
+    private static FakeResponse VisibilityRoute(RecordedRequest r, bool draft, string putSegment)
+    {
+        var draftJson = draft ? "true" : "false";
+        return r.Method == HttpMethod.Get
+            ? FakeResponse.Json("{\"article\":{\"id\":42,\"title\":\"T\",\"draft\":" + draftJson + ",\"user_segment_id\":11}}")
+            : FakeResponse.Json("{\"article\":{\"id\":42,\"title\":\"T\",\"draft\":" + draftJson + ",\"user_segment_id\":" + putSegment
+                + ",\"html_url\":\"https://acme.zendesk.com/hc/en-gb/articles/42\"}}");
+    }
+
+    [Fact]
+    public async Task SetVisibility_PutsTheSegment_AndReportsBeforeAndAfter()
+    {
+        using var fake = TestHelpers.CreateFakeZendesk(r => VisibilityRoute(r, draft: false, putSegment: "77"));
+        var zendesk = TestHelpers.BuildZendeskService(fake.Client, configure: o => o.Features.AllowArticlePublishing = true);
+
+        var json = JsonNode.Parse(await HelpCenterArticlesTools.SetHelpCenterArticleVisibility(zendesk, 42, user_segment_id: 77))!;
+
+        var put = fake.Requests.Single(r => r.Method == HttpMethod.Put);
+        put.Path.Should().Be("/api/v2/help_center/articles/42");
+        JsonNode.Parse(put.Body!)!["article"]!.ToJsonString().Should().Be("""{"user_segment_id":77}""");
+        json["user_segment_ids_before"]!.AsArray().Select(n => n!.GetValue<long>()).Should().Equal(11);
+        json["user_segment_ids"]!.AsArray().Select(n => n!.GetValue<long>()).Should().Equal(77);
+        json["visible_to"]!.GetValue<string>().Should().Be("user segments");
+    }
+
+    [Fact]
+    public async Task SetVisibility_ToEveryone_SendsAnExplicitNull()
+    {
+        using var fake = TestHelpers.CreateFakeZendesk(r => VisibilityRoute(r, draft: true, putSegment: "null"));
+        var zendesk = TestHelpers.BuildZendeskService(fake.Client);
+
+        var json = JsonNode.Parse(await HelpCenterArticlesTools.SetHelpCenterArticleVisibility(zendesk, 42, visible_to_everyone: true))!;
+
+        var put = fake.Requests.Single(r => r.Method == HttpMethod.Put);
+        JsonNode.Parse(put.Body!)!["article"]!.ToJsonString().Should().Be("""{"user_segment_id":null}""",
+            "Zendesk reads a null segment as everyone; omitting it would change nothing");
+        json["visible_to"]!.GetValue<string>().Should().Be("everyone");
+    }
+
+    [Fact]
+    public async Task SetVisibility_OnAPublishedArticle_NeedsThePublishingSwitch()
+    {
+        using var fake = TestHelpers.CreateFakeZendesk(r => VisibilityRoute(r, draft: false, putSegment: "77"));
+        var zendesk = TestHelpers.BuildZendeskService(fake.Client);
+
+        var act = () => HelpCenterArticlesTools.SetHelpCenterArticleVisibility(zendesk, 42, user_segment_id: 77);
+
+        await act.Should().ThrowAsync<UnauthorizedAccessException>().WithMessage("*AllowArticlePublishing*");
+        fake.Requests.Should().OnlyContain(r => r.Method == HttpMethod.Get);
+    }
+
+    [Fact]
+    public async Task SetVisibility_OnADraft_NeedsNoSwitch()
+    {
+        using var fake = TestHelpers.CreateFakeZendesk(r => VisibilityRoute(r, draft: true, putSegment: "77"));
+        var zendesk = TestHelpers.BuildZendeskService(fake.Client);
+
+        await HelpCenterArticlesTools.SetHelpCenterArticleVisibility(zendesk, 42, user_segment_id: 77);
+
+        fake.Requests.Should().ContainSingle(r => r.Method == HttpMethod.Put);
+    }
+
+    [Fact]
+    public async Task SetVisibility_WhenZendeskDidNotApplyIt_FailsRatherThanReportingSuccess()
+    {
+        using var fake = TestHelpers.CreateFakeZendesk(r => VisibilityRoute(r, draft: true, putSegment: "11"));
+        var zendesk = TestHelpers.BuildZendeskService(fake.Client);
+
+        var act = () => HelpCenterArticlesTools.SetHelpCenterArticleVisibility(zendesk, 42, user_segment_id: 77);
+
+        await act.Should().ThrowAsync<HttpRequestException>().WithMessage("*not the requested audience*");
+    }
+
+    [Theory]
+    [InlineData(null, false)]
+    [InlineData(77L, true)]
+    [InlineData(0L, false)]
+    public async Task SetVisibility_RejectsAmbiguousOrInvalidInputWithoutCallingZendesk(long? segment, bool everyone)
+    {
+        using var fake = TestHelpers.CreateFakeZendesk(_ => FakeResponse.Json("{}"));
+        var zendesk = TestHelpers.BuildZendeskService(fake.Client);
+
+        var act = () => HelpCenterArticlesTools.SetHelpCenterArticleVisibility(zendesk, 42, user_segment_id: segment, visible_to_everyone: everyone);
+
+        await act.Should().ThrowAsync<ArgumentException>();
+        fake.Requests.Should().BeEmpty();
+    }
+
     // ---- Export_help_center_articles ----
 
     [Fact]

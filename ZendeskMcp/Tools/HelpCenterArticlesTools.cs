@@ -399,6 +399,77 @@ public static partial class HelpCenterArticlesTools
         return result.ToJsonString();
     }
 
+    [Authorize(Policy = "zendesk:write")]
+    [McpServerTool(Name = "Set_help_center_article_visibility", Title = "Set who can view a Help Center article", ReadOnly = false, Destructive = true, Idempotent = true, OpenWorld = false), Description(
+        "Set who can view a Help Center article: the members of one user segment (user_segment_id), or everyone (visible_to_everyone=true). Give exactly one of the two. " +
+        "Use List_user_segments to find the segment id, and Get_help_center_article to see who can view the article now. " +
+        "Changing who can view a published article changes what people see on the live Help Center, so it must be allowed in this server's settings (the same administrator switch as publishing); a draft's audience can always be set. " +
+        "Returns the article's audience before and after. Applies to every translation of the article. " +
+        "For multi-brand accounts, pass brand_url when the article belongs to a non-default brand. " + HelpCenterJson.UntrustedContentWarning)]
+    public static async Task<string> SetHelpCenterArticleVisibility(
+        ZendeskService zendesk,
+        [Description("The id of the article.")] long article_id,
+        [Description("The user segment whose members may view the article. Use List_user_segments. Omit when visible_to_everyone is true.")] long? user_segment_id = null,
+        [Description("True to let everyone view the article, signed in or not. Omit when giving user_segment_id.")] bool visible_to_everyone = false,
+        [Description(HelpCenterJson.BrandUrlDescription)] string? brand_url = null,
+        CancellationToken cancellationToken = default)
+    {
+        ToolJson.PositiveId(article_id, "article_id");
+        if ((user_segment_id is not null) == visible_to_everyone)
+        {
+            throw new ArgumentException("Give exactly one of user_segment_id or visible_to_everyone=true.");
+        }
+
+        if (user_segment_id is not null)
+        {
+            ToolJson.PositiveId(user_segment_id.Value, "user_segment_id");
+        }
+
+        var id = HelpCenterJson.Id(article_id);
+        var before = (await zendesk.GetAsync($"/api/v2/help_center/articles/{id}", brandUrl: brand_url, cancellationToken: cancellationToken))["article"];
+        var beforeIds = HelpCenterJson.UserSegmentIds(before);
+
+        // A published article's audience is what people see on the live Help Center — widening it can
+        // expose an internal article to customers — so it needs the publishing switch. A draft is seen
+        // only by the agents who manage it, whatever its segment.
+        if (before?["draft"] is { } draftNode && MacroSupport.ParseBool(draftNode) == false)
+        {
+            ToolJson.RequireFeature(zendesk.Options.Features.AllowArticlePublishing, "AllowArticlePublishing",
+                "Changing who can view a published Help Center article");
+        }
+
+        // The single user_segment_id, which create uses and the validation account's responses carry
+        // (none of 100 articles had user_segment_ids). Null means everyone.
+        // Unverified against the live API: that a PUT of user_segment_id alone also replaces a
+        // multi-segment user_segment_ids list on an account that has one. The after-check below
+        // catches it if not.
+        var response = await zendesk.PutAsync(
+            $"/api/v2/help_center/articles/{id}",
+            new JsonObject { ["article"] = new JsonObject { ["user_segment_id"] = user_segment_id } },
+            brandUrl: brand_url,
+            cancellationToken: cancellationToken);
+
+        var after = response["article"];
+        var afterIds = HelpCenterJson.UserSegmentIds(after);
+        var applied = user_segment_id is null
+            ? afterIds.Count == 0
+            : afterIds.Count == 1 && ToolJson.Long(afterIds[0]) == user_segment_id;
+        if (!applied)
+        {
+            // Never report a visibility change Zendesk did not make: the caller may be restricting an
+            // article because it must not be seen.
+            throw new HttpRequestException(
+                $"Zendesk accepted the change but article {article_id} is now visible to segments [{string.Join(",", afterIds)}], not the requested audience. Check it in Guide.");
+        }
+
+        var result = ToolJson.Pick(after, "id", "title", "draft", "html_url", "updated_at");
+        result["visible_to_before"] = beforeIds.Count == 0 ? "everyone" : "user segments";
+        result["user_segment_ids_before"] = beforeIds;
+        result["visible_to"] = afterIds.Count == 0 ? "everyone" : "user segments";
+        result["user_segment_ids"] = afterIds;
+        return result.ToJsonString();
+    }
+
     [Authorize(Policy = "zendesk:read")]
     [McpServerTool(Name = "Export_help_center_articles", Title = "Export Help Center articles", ReadOnly = true, Destructive = false, Idempotent = true, OpenWorld = false), Description(
         "Export Help Center articles with their full HTML body. Use this only when you need complete article content (content analysis, migration, full-text processing); to find articles without their bodies, use Search_help_center_articles. " +

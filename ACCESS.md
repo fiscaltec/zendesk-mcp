@@ -78,7 +78,7 @@ switches also apply to everyone, whatever their tier:
 | Switch | Covers |
 |---|---|
 | Public replies | public comments, CCs and public macro replies (they email customers) |
-| Article publishing | publishing Help Center articles and translations rather than saving drafts |
+| Article publishing | publishing Help Center articles and translations rather than saving drafts, and changing who can view a published article |
 | Help Center structure changes | creating and changing Help Center categories and sections, which are public as soon as they exist |
 | Macro changes | creating, editing, activating and deactivating macros |
 | User and organisation changes | creating end users from an email address, organisation memberships |
