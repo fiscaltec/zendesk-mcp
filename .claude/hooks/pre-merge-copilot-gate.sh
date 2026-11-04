@@ -54,23 +54,25 @@ COPILOT_LOGINS='["Copilot","copilot-pull-request-reviewer[bot]","copilot-pull-re
 # 1. Is this a merge at all? (Bash regex — no external grep, so a broken grep can't fail open.)
 # ---------------------------------------------------------------------------------------------
 form=""
-#    `gh` counts after anything that cannot continue a word — a space, `/` (`/usr/local/bin/gh`),
-#    `\`, a quote, `;`, `&`, `|`, `(` — not only after a space: those forms run gh too, and step 2
-#    then refuses them for their metacharacters. Over-matching only denies; under-matching allowed
-#    an unpinned merge.
-# In a variable because a quote written inside [[ =~ ]] is shell quoting, not part of the pattern.
-gh_word='(^|[^[:alnum:]_-])gh["'"'"']?[[:space:]]+'
-if [[ "$cmd" =~ ${gh_word}pr[[:space:]]+merge([[:space:]]|$) ]]; then
+# Detection reads a copy with quotes and backslashes removed, so `"gh" pr merge`, `g\h pr merge`
+# and `gh pr "merge"` are seen as the shell runs them. A merge word counts when anything that
+# cannot continue a word bounds it on both sides — a space, `/`, `;`, `&`, `|`, `(`, `)`, `<`, `>`
+# — not only a space: `(gh pr merge)` and `gh pr merge>log` run gh too. Step 2 then refuses
+# every such form for its metacharacters, on the original command. Over-matching only denies;
+# under-matching allowed an unpinned merge (#12, and Copilot on #46).
+probe=${cmd//[\"\'\\]/}
+nw='[^[:alnum:]_-]'
+if [[ "$probe" =~ (^|$nw)gh[[:space:]]+pr[[:space:]]+merge($nw|$) ]]; then
 	form="gh-pr-merge"
-elif [[ "$cmd" =~ ${gh_word}api([[:space:]]|$) ]]; then
+elif [[ "$probe" =~ (^|$nw)gh[[:space:]]+api($nw|$) ]]; then
 	# A GraphQL merge mutation is a merge by another route: refuse it rather than parse it.
-	[[ "$cmd" =~ (mergePullRequest|enablePullRequestAutoMerge) ]] \
+	[[ "$probe" =~ (mergePullRequest|enablePullRequestAutoMerge) ]] \
 		&& deny "merging through a GraphQL mutation is not gated; use the REST form: gh api -X PUT repos/{owner}/{repo}/pulls/<n>/merge -f merge_method=squash -f sha=<head> (failing closed)"
 	# A GraphQL query read from a file (-F query=@file) or a body (--input) is invisible here, so
 	# it could carry that mutation unseen: refuse it rather than allow what cannot be read.
-	[[ "$cmd" =~ (^|[[:space:]])graphql([[:space:]]|$) ]] && [[ "$cmd" =~ (=@|[[:space:]]--input([[:space:]=]|$)) ]] \
+	[[ "$probe" =~ (^|[[:space:]])graphql([[:space:]]|$) ]] && [[ "$probe" =~ (=@|[[:space:]]--input([[:space:]=]|$)) ]] \
 		&& deny "a GraphQL request whose query comes from a file or --input cannot be checked for a merge mutation; pass the query inline (failing closed)"
-	[[ "$cmd" =~ pulls/[^[:space:]]*/merge ]] && form="rest-merge"
+	[[ "$probe" =~ pulls/[^[:space:]]*/merge ]] && form="rest-merge"
 fi
 [ -n "$form" ] || allow
 

@@ -100,6 +100,10 @@ new_case; expect_allow "a word ending in gh is not gh" "sigh pr merge 7"
 for spelt in '\gh pr merge 7 --squash' '"gh" pr merge 7 --squash' "'gh' api -X PUT repos/{owner}/{repo}/pulls/7/merge" 'true;gh pr merge 7 --squash' '(gh pr merge 7 --squash)' 'x|gh pr merge 7' "true&&gh api -X PUT repos/{owner}/{repo}/pulls/7/merge -f merge_method=squash"; do
 	new_case; expect_deny "gh after a metacharacter: $spelt" "$spelt" "quotes or shell metacharacters"
 done
+for spelt in 'gh pr merge>/tmp/merge.log --squash' 'gh pr merge;' '(gh pr merge)' 'gh pr "merge" 7' 'g\h pr merge 7' "gh api -X PUT repos/{owner}/{repo}/pulls/7/merge>/dev/null"; do
+	new_case; expect_deny "a delimiter or quote around the merge word: $spelt" "$spelt" "quotes or shell metacharacters"
+done
+new_case; expect_allow "a word starting with merge is not merge" "gh pr merged-list"
 
 # --- not a merge: no gating -----------------------------------------------------------------------
 new_case; expect_allow "an unrelated gh api call" "gh api repos/{owner}/{repo}/pulls/7"

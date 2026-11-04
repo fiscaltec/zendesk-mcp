@@ -420,9 +420,10 @@ Caveats worth knowing before trusting it:
   `Bash(gh pr merge*)` and `Bash(gh api*)` filters, `GH_HOST=github.com gh …` and `cd . && gh …`
   reached the hook, but `command gh …`, `env gh …` and `/usr/local/bin/gh …` ran without it. Under
   `Bash(*gh*)` all three reached it — the change to `if` took effect without a restart. The hook's
-  own step 1 then decides what is a merge: `gh` counts after anything that cannot continue a word
-  (a space, `/`, `\`, a quote, `;`, `&`, `|`, `(`), and may be quoted itself, so `"gh" pr merge`
-  and `true;gh api …` are recognised and then refused for their metacharacters. So any Bash call
+  own step 1 then decides what is a merge, on a copy of the command with quotes and backslashes
+  removed: `gh`, `pr`, `merge` and `api` count when anything that cannot continue a word bounds them
+  (a space, `/`, `;`, `&`, `|`, `(`, `)`, `<`, `>`), so `"gh" pr merge`, `true;gh api …` and
+  `gh pr merge>log` are recognised and then refused for their metacharacters. So any Bash call
   mentioning `gh` runs the hook, and one whose text contains a merge command anywhere — a heredoc,
   a commit message — is denied. For anything that is not a
   merge it allows at once, without a network call; but because every such call now runs `jq`,
