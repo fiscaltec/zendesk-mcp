@@ -596,7 +596,7 @@ Dropped from Swifteq's set: `get_usage` and `submit_mcp_feedback` (Swifteq billi
 
 xUnit v3 on **Microsoft.Testing.Platform** (not VSTest): `global.json` selects the runner, the test project is an `Exe`, and VSTest-only flags (`--filter "FullyQualifiedName~…"`, `--logger`, `--collect`) are rejected — use `--filter-class` / `--filter-method`, `--report-trx`, `--coverage`.
 
-The tests are immune to a shell set up to run the server locally: `AmbientConfiguration`, a module initialiser in the test assembly, clears any inherited variable under the sections `Program.cs` reads (`OAuth__`, `Authorization__`, `Zendesk__`, `Audit__`, `ToolsListCache__`, `ApplicationInsights__`, `Logging__`) and `ASPNETCORE_ENVIRONMENT` before any test runs, so the suite gives the same result there as in CI (#8). It changes only the test process's environment; fixtures set their own values afterwards.
+The tests are immune to a shell set up to run the server locally: `AmbientConfiguration`, a module initialiser in the test assembly, clears any inherited variable under the sections `Program.cs` reads (`OAuth__`, `Authorization__`, `Zendesk__`, `Audit__`, `ToolsListCache__`, `ApplicationInsights__`, `Logging__`), plus `ASPNETCORE_ENVIRONMENT`, `AllowedHosts` and `OTEL_*`, before any test runs, so the variables used to run the server locally cannot change the results (#8). It changes only the test process's environment; fixtures set their own values afterwards.
 
 | Area | Tests |
 |---|---|

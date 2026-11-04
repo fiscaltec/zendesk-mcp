@@ -1,3 +1,5 @@
+using System.Reflection;
+using System.Runtime.CompilerServices;
 using FluentAssertions;
 using Xunit;
 
@@ -24,6 +26,10 @@ public class AmbientConfigurationTests
     [InlineData("Zendesk__Features__AllowPublicReplies")]
     [InlineData("DOTNET_ENVIRONMENT")]
     [InlineData("APPLICATIONINSIGHTS_CONNECTION_STRING")]
+    [InlineData("AllowedHosts")]
+    [InlineData("ASPNETCORE_AllowedHosts")]
+    [InlineData("OTEL_SDK_DISABLED")]
+    [InlineData("otel_exporter_otlp_endpoint")]
     // Case-insensitive: configuration keys are, and on Linux these are distinct variables.
     [InlineData("oauth__noauth")]
     [InlineData("ZENDESK__SUBDOMAIN")]
@@ -43,6 +49,18 @@ public class AmbientConfigurationTests
     [InlineData("OAuthToken")]
     [InlineData("ZENDESK_API_TOKEN")]
     [InlineData("Zendesk_Subdomain")]
+    [InlineData("AllowedHostsExtra")]
     public void UnrelatedVariables_AreLeftAlone(string name) =>
         AmbientConfiguration.IsServerConfiguration(name).Should().BeFalse();
+
+    /// <summary>
+    /// Pins the wiring rather than the predicate: CI sets none of these variables, so dropping the
+    /// attribute would leave every other test green while a developer's shell broke ~100 of them.
+    /// </summary>
+    [Fact]
+    public void ClearOnLoad_RunsWhenTheAssemblyLoads() =>
+        typeof(AmbientConfiguration)
+            .GetMethod(nameof(AmbientConfiguration.ClearOnLoad), BindingFlags.Static | BindingFlags.NonPublic)!
+            .GetCustomAttribute<ModuleInitializerAttribute>()
+            .Should().NotBeNull("without it nothing clears the inherited variables");
 }

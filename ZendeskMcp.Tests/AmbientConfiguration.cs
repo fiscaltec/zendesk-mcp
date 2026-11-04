@@ -1,4 +1,3 @@
-using System.Collections;
 using System.Runtime.CompilerServices;
 
 namespace ZendeskMcp.Tests;
@@ -47,7 +46,7 @@ public static class AmbientConfiguration
     /// <summary>
     /// The configuration sections <c>Program.cs</c> reads, in environment-variable form. <c>Logging__</c>
     /// because <c>WebApplication.CreateBuilder</c> binds it (an exported
-    /// <c>Logging__LogLevel__Default=Warning</c> fails <see cref="LoggingFilterTests"/>).
+    /// <c>Logging__LogLevel__Default=Warning</c> fails eight <see cref="ToolCallAuditCompositionTests"/>).
     /// </summary>
     public static readonly IReadOnlyList<string> SectionPrefixes =
     [
@@ -61,11 +60,21 @@ public static class AmbientConfiguration
     ];
 
     /// <summary>
-    /// Whole variable names: the hosting environment (the development-token guard depends on it), and
-    /// the Azure Monitor connection string the exporter reads directly from the environment.
+    /// Whole variable names the framework reads outside those sections: the hosting environment (the
+    /// development-token guard depends on it) and <c>AllowedHosts</c> (host filtering — an exported
+    /// <c>AllowedHosts=nope.example</c> fails 102 tests). <c>APPLICATIONINSIGHTS_CONNECTION_STRING</c> is
+    /// the Azure Monitor SDK's own environment fallback; cleared so a developer's resource can never
+    /// receive test telemetry.
     /// </summary>
     public static readonly IReadOnlyList<string> ExactNames =
-        ["ASPNETCORE_ENVIRONMENT", "DOTNET_ENVIRONMENT", "APPLICATIONINSIGHTS_CONNECTION_STRING"];
+        ["ASPNETCORE_ENVIRONMENT", "DOTNET_ENVIRONMENT", "AllowedHosts", "APPLICATIONINSIGHTS_CONNECTION_STRING"];
+
+    /// <summary>
+    /// Prefixes read straight from the environment by a library rather than through configuration:
+    /// the OpenTelemetry SDK's <c>OTEL_*</c> (an exported <c>OTEL_SDK_DISABLED=true</c> fails
+    /// <see cref="LoggingFilterTests"/>' exporter-wiring test).
+    /// </summary>
+    public static readonly IReadOnlyList<string> LibraryPrefixes = ["OTEL_"];
 
     /// <summary>The variables this process inherited and <see cref="ClearOnLoad"/> removed, for diagnosis.</summary>
     public static IReadOnlyList<string> Cleared { get; private set; } = [];
@@ -80,13 +89,15 @@ public static class AmbientConfiguration
     {
         ArgumentNullException.ThrowIfNull(name);
 
-        if (ExactNames.Any(n => string.Equals(n, name, StringComparison.OrdinalIgnoreCase)))
+        if (LibraryPrefixes.Any(p => name.StartsWith(p, StringComparison.OrdinalIgnoreCase)))
         {
             return true;
         }
 
         var unprefixed = StripHostPrefix(name);
-        return SectionPrefixes.Any(p => unprefixed.StartsWith(p, StringComparison.OrdinalIgnoreCase));
+        return ExactNames.Any(n => string.Equals(n, name, StringComparison.OrdinalIgnoreCase)
+                || string.Equals(n, unprefixed, StringComparison.OrdinalIgnoreCase))
+            || SectionPrefixes.Any(p => unprefixed.StartsWith(p, StringComparison.OrdinalIgnoreCase));
     }
 
     [ModuleInitializer]
