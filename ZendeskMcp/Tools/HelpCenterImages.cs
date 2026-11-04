@@ -172,6 +172,16 @@ public static partial class HelpCenterImages
         }
 
         session.Downloaded++;
+
+        // The budget only grows, so an image that does not fit now never will: refuse it before
+        // encoding, so its base64 copy is not built and then held in Resolved for nothing.
+        if (session.BytesEmbedded + file.Content.LongLength > MaxTotalBytes)
+        {
+            session.OverBudget.Add(raw);
+            Skip(session, raw, $"the {MaxTotalBytes}-byte total for inlined images in one call is used up; open it from its URL instead");
+            return null;
+        }
+
         return new Inlined($"data:{contentType.ToLowerInvariant()};base64,{Convert.ToBase64String(file.Content)}", file.Content.LongLength);
     }
 
