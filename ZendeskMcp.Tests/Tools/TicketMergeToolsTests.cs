@@ -282,7 +282,7 @@ public class TicketMergeToolsTests
         waits.Should().Equal(delays);
         fake.Requests.Count(r => r.Path == JobPath).Should().Be(3);
         result["merged"]!.GetValue<bool>().Should().BeFalse();
-        result["outcome"]!.GetValue<string>().Should().Be("still_running");
+        result["outcome"]!.GetValue<string>().Should().Be("unconfirmed");
         result["job"]!["status"]!.GetValue<string>().Should().Be("working");
         result["next_step"]!.GetValue<string>().Should().Contain("Do not call Merge_tickets again");
 
@@ -314,7 +314,8 @@ public class TicketMergeToolsTests
         var act = () => Merge(TestHelpers.BuildZendeskService(fake.Client), [102, 103]);
 
         var thrown = await act.Should().ThrowAsync<HttpRequestException>();
-        thrown.Which.Message.Should().Contain($"merge job job1 {status}").And.Contain("Ticket could not be merged");
+        thrown.Which.Message.Should().Contain($"merge job job1 {status}").And.Contain("Ticket could not be merged").And.Contain("before calling Merge_tickets again");
+        thrown.Which.StatusCode.Should().BeNull("Zendesk answered every request with success; the job failed");
         fake.Requests.Count(r => r.Path == ShowManyPath).Should().Be(1, "a failed job is not read back as a merge");
     }
 
@@ -331,7 +332,7 @@ public class TicketMergeToolsTests
     }
 
     [Fact]
-    public async Task MergeTickets_NoJobStatusInResponse_IsAnError()
+    public async Task MergeTickets_NoJobStatusInResponse_IsReportedUnconfirmed()
     {
         var reads = 0;
         using var fake = TestHelpers.CreateFakeZendesk(r => (r.Method.Method, r.Path) switch
@@ -341,9 +342,84 @@ public class TicketMergeToolsTests
             _ => FakeResponse.NotFound(),
         });
 
-        var act = () => Merge(TestHelpers.BuildZendeskService(fake.Client), [102]);
+        var result = JsonNode.Parse(await Merge(TestHelpers.BuildZendeskService(fake.Client), [102]))!;
 
-        await act.Should().ThrowAsync<HttpRequestException>().WithMessage("*no job status*");
+        result["merged"]!.GetValue<bool>().Should().BeFalse();
+        result["outcome"]!.GetValue<string>().Should().Be("unconfirmed");
+        result["next_step"]!.GetValue<string>().Should().Contain("no job status").And.Contain("Do not call Merge_tickets again");
+        fake.Requests.Should().NotContain(r => r.Path.StartsWith("/api/v2/job_statuses/", StringComparison.Ordinal));
+        fake.Requests.Count(r => r.Path == ShowManyPath).Should().Be(1, "nothing is read back as though the merge had finished");
+    }
+
+    [Theory]
+    [InlineData(HttpStatusCode.InternalServerError)]
+    [InlineData(HttpStatusCode.NotFound)]
+    public async Task MergeTickets_JobPollFails_IsReportedUnconfirmedNotAsAnError(HttpStatusCode status)
+    {
+        // The merge was accepted, so a failed poll must not read as "nothing changed": a retry would
+        // pass the pre-check (the sources are not yet tagged) and POST a second merge.
+        using var fake = MergingFake(job: _ => FakeResponse.WithStatus(status, """{"error":"Oops"}"""));
+
+        var result = JsonNode.Parse(await Merge(TestHelpers.BuildZendeskService(fake.Client), [102, 103]))!;
+
+        result["merged"]!.GetValue<bool>().Should().BeFalse();
+        result["outcome"]!.GetValue<string>().Should().Be("unconfirmed");
+        result["job"]!["id"]!.GetValue<string>().Should().Be("job1");
+        result["next_step"]!.GetValue<string>().Should().Contain("Checking the merge job failed").And.Contain("Do not call Merge_tickets again");
+        fake.Requests.Count(r => r.Path == MergePath).Should().Be(1);
+    }
+
+    [Fact]
+    public async Task MergeTickets_ReadBackFails_IsReportedUnconfirmedNotAsAnError()
+    {
+        var reads = 0;
+        using var fake = TestHelpers.CreateFakeZendesk(r => (r.Method.Method, r.Path) switch
+        {
+            ("GET", ShowManyPath) => Interlocked.Increment(ref reads) == 1
+                ? FakeResponse.Json(ShowMany(Ticket(101), Ticket(102)))
+                : FakeResponse.WithStatus(HttpStatusCode.InternalServerError),
+            ("POST", MergePath) => FakeResponse.Json(Job("completed")),
+            _ => FakeResponse.NotFound(),
+        });
+
+        var result = JsonNode.Parse(await Merge(TestHelpers.BuildZendeskService(fake.Client), [102]))!;
+
+        result["merged"]!.GetValue<bool>().Should().BeFalse();
+        result["outcome"]!.GetValue<string>().Should().Be("unconfirmed");
+        result["job"]!["status"]!.GetValue<string>().Should().Be("completed");
+        result["next_step"]!.GetValue<string>().Should().Contain("reading the source tickets back failed");
+    }
+
+    [Fact]
+    public async Task MergeTickets_JobWithoutId_IsNotPolledAndReportedUnconfirmed()
+    {
+        var reads = 0;
+        using var fake = TestHelpers.CreateFakeZendesk(r => (r.Method.Method, r.Path) switch
+        {
+            ("GET", ShowManyPath) => FakeResponse.Json(Interlocked.Increment(ref reads) == 1 ? ShowMany(Ticket(101), Ticket(102)) : ShowMany()),
+            ("POST", MergePath) => FakeResponse.Json("""{"job_status":{"status":"queued"}}"""),
+            _ => FakeResponse.NotFound(),
+        });
+
+        var result = JsonNode.Parse(await Merge(TestHelpers.BuildZendeskService(fake.Client), [102]))!;
+
+        fake.Requests.Should().NotContain(r => r.Path.StartsWith("/api/v2/job_statuses/", StringComparison.Ordinal));
+        result["merged"]!.GetValue<bool>().Should().BeFalse();
+        result["outcome"]!.GetValue<string>().Should().Be("unconfirmed");
+    }
+
+    [Fact]
+    public async Task MergeTickets_JobWithoutStatus_IsNeverReportedAsMerged()
+    {
+        using var fake = MergingFake(job: _ => FakeResponse.Json("""{"job_status":{"id":"job1"}}"""));
+
+        var result = JsonNode.Parse(await Merge(TestHelpers.BuildZendeskService(fake.Client), [102, 103],
+            delays: [TimeSpan.Zero, TimeSpan.Zero]))!;
+
+        fake.Requests.Count(r => r.Path == JobPath).Should().Be(2, "a job with no status is not terminal, so it is polled to the bound");
+        result["merged"]!.GetValue<bool>().Should().BeFalse();
+        result["outcome"]!.GetValue<string>().Should().Be("unconfirmed");
+        result["next_step"]!.GetValue<string>().Should().Contain("'unknown'");
     }
 
     [Fact]
@@ -360,6 +436,8 @@ public class TicketMergeToolsTests
         var act = () => Merge(TestHelpers.BuildZendeskService(fake.Client), [102]);
 
         await act.Should().ThrowAsync<HttpRequestException>().WithMessage("*Forbidden*");
+        fake.Requests.Should().NotContain(r => r.Path.StartsWith("/api/v2/job_statuses/", StringComparison.Ordinal));
+        fake.Requests.Count(r => r.Path == ShowManyPath).Should().Be(1, "a refused merge is not read back");
     }
 
     [Fact]
@@ -377,9 +455,10 @@ public class TicketMergeToolsTests
     }
 
     [Fact]
-    public async Task MergeTickets_AuditRecord_NegativeControl_WithoutThePreReadNoTicketIsNamed()
+    public async Task MergeTickets_AuditRecord_NegativeControl_JobResponsesAloneNameNoTicket()
     {
-        // Proves the test above depends on the read: the merge and job responses alone name only the job.
+        // Shows the transport finds no ticket id in the merge and job responses, so the ids in the test
+        // above can only have come from the ticket read before the merge.
         using var fake = TestHelpers.CreateFakeZendesk(r => r.Path switch
         {
             MergePath => FakeResponse.Json(Job("queued")),
