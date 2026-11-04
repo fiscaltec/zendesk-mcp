@@ -250,6 +250,27 @@ public sealed class HelpCenterArticlesToolsTests : IDisposable
     }
 
     [Fact]
+    public async Task Get_EmbedImages_CapsDownloadAttempts_EvenWhenTheyFail()
+    {
+        // Every attempt that reaches the network counts against the cap, not only the images that
+        // were inlined: an article could otherwise make one call download without limit as its reader.
+        var body = string.Concat(Enumerable.Range(1, HelpCenterImages.MaxImages + 15)
+            .Select(i => $"""<img src="/hc/article_attachments/{i}.png">"""));
+        using var fake = TestHelpers.CreateFakeZendesk(r => r.Path switch
+        {
+            "/api/v2/help_center/articles/42" => FakeResponse.Json(new JsonObject { ["article"] = new JsonObject { ["id"] = 42, ["body"] = body } }.ToJsonString()),
+            _ when r.Path.StartsWith("/hc/article_attachments/", StringComparison.Ordinal) => FakeResponse.NotFound(),
+            _ => DefaultRoute(r),
+        });
+        var zendesk = TestHelpers.BuildZendeskService(fake.Client);
+
+        await HelpCenterArticlesTools.GetHelpCenterArticle(zendesk, 42, embed_images: true);
+
+        fake.Requests.Count(r => r.Path.StartsWith("/hc/article_attachments/", StringComparison.Ordinal))
+            .Should().Be(HelpCenterImages.MaxImages, "failed downloads count against the cap too");
+    }
+
+    [Fact]
     public async Task Get_RejectsNonPositiveId()
     {
         using var fake = TestHelpers.CreateFakeZendesk(DefaultRoute);

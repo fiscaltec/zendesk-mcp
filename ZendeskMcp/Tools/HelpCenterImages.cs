@@ -137,10 +137,13 @@ public static partial class HelpCenterImages
 
         if (session.Downloaded >= MaxImages)
         {
-            Skip(session, raw, $"more than {MaxImages} images; only the first {MaxImages} are embedded");
+            Skip(session, raw, $"more than {MaxImages} images; only the first {MaxImages} are downloaded");
             return null;
         }
 
+        // Counted before the request, so that every attempt reaching the network counts: one that
+        // fails, is not an image or is too large still cost a download made as the reader.
+        session.Downloaded++;
         DownloadedFile file;
         try
         {
@@ -170,8 +173,6 @@ public static partial class HelpCenterImages
             Skip(session, raw, $"larger than {MaxImageBytes} bytes; open it from its URL instead");
             return null;
         }
-
-        session.Downloaded++;
 
         // The budget only grows, so an image that does not fit now never will: refuse it before
         // encoding, so its base64 copy is not built and then held in Resolved for nothing.
