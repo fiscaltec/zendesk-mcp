@@ -79,6 +79,17 @@ public class TicketSearchQueryTests
         act.Should().Throw<ArgumentException>().WithMessage($"*{parameter}*");
     }
 
+    [Theory]
+    [InlineData("\"\"")]
+    [InlineData("\" \"")]
+    public void ACustomFieldValue_ThatIsOnlyQuotes_IsRefused(string value)
+    {
+        // Quote drops quote characters, so this would otherwise send custom_field_1: with no operand.
+        var act = () => TicketSearchQuery.Build(new TicketSearchFilters { CustomFieldId = 1, CustomFieldValue = value });
+
+        act.Should().Throw<ArgumentException>().WithMessage("*custom_field_id and custom_field_value*");
+    }
+
     [Fact]
     public void ACustomField_NeedsBothHalves()
     {
@@ -184,6 +195,8 @@ public class TicketSearchQueryTests
     [InlineData("x", false)]
     [InlineData("  ", null)]
     [InlineData("  ", true)]
+    [InlineData("\"\"", null)]
+    [InlineData("\" \"", null)]
     public void ACustomFieldCondition_NeedsExactlyOneOfValueAndHasValue(string? value, bool? hasValue)
     {
         var act = () => TicketSearchQuery.Build(new TicketSearchFilters { CustomFields = [new TicketCustomFieldCondition(5, value, hasValue)] });

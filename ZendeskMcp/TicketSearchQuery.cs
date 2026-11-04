@@ -143,7 +143,7 @@ public static class TicketSearchQuery
 
         if (filters.CustomFieldId is not null || !string.IsNullOrWhiteSpace(filters.CustomFieldValue))
         {
-            if (filters.CustomFieldId is not { } fieldId || fieldId <= 0 || string.IsNullOrWhiteSpace(filters.CustomFieldValue))
+            if (filters.CustomFieldId is not { } fieldId || fieldId <= 0 || !HasText(filters.CustomFieldValue))
             {
                 throw new ArgumentException("custom_field_id and custom_field_value must be given together, with a positive field id.");
             }
@@ -288,7 +288,7 @@ public static class TicketSearchQuery
                 throw new ArgumentException($"Field {id} is already filtered by custom_field_id; give it in one place only.");
             }
 
-            var hasValue = !string.IsNullOrWhiteSpace(condition.Value);
+            var hasValue = HasText(condition.Value);
             if (hasValue == condition.HasValue.HasValue || (condition.Value is not null && !hasValue))
             {
                 throw new ArgumentException($"custom_fields condition for field {id} needs exactly one of value (an exact value; for a drop-down, the option's tag) or has_value (true: any value, false: empty).");
@@ -393,6 +393,10 @@ public static class TicketSearchQuery
         var hasSyntax = bare.IndexOfAny([':', '<', '>', '=', '*']) >= 0 || bare.StartsWith('-');
         return hasSyntax && !cleaned.StartsWith('"') ? $"\"{bare}\"" : cleaned;
     }
+
+    // Whether a value still says something once Quote has dropped its quote characters: "" or " " would
+    // otherwise become a term with no operand (custom_field_<id>:).
+    private static bool HasText(string? value) => value is not null && Quote(value).Trim('"').Length > 0;
 
     /// <summary>Quotes a value with whitespace; drops quote characters, which Zendesk search cannot escape.</summary>
     public static string Quote(string value)

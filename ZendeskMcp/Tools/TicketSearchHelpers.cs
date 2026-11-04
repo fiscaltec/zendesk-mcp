@@ -651,12 +651,9 @@ public static class TicketSearchHelpers
 
         var listing = await zendesk.GetAllPagesAsync("/api/v2/ticket_fields", null, "ticket_fields", maxItems: 2000, cancellationToken: cancellationToken);
         var definitions = new Dictionary<long, JsonNode>();
-        foreach (var field in listing.Items)
+        foreach (var (fieldId, field) in listing.Items.Select(f => (Id: ToolJson.Long(f["id"]), Field: f)).Where(f => f.Id is not null))
         {
-            if (ToolJson.Long(field["id"]) is { } fieldId)
-            {
-                definitions[fieldId] = field;
-            }
+            definitions[fieldId!.Value] = field;
         }
 
         static string Id(long id) => id.ToString(CultureInfo.InvariantCulture);
