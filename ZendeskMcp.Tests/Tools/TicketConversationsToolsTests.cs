@@ -225,6 +225,61 @@ public class TicketConversationsToolsTests
     }
 
     [Fact]
+    public async Task TheDeadline_StopsPaging_WithoutCancellingTheRequestInFlight()
+    {
+        // The first comments page outlasts the deadline: it is still used (nothing was cancelled), but
+        // the next page is not requested and the ticket reads as time.
+        using var fake = TestHelpers.CreateFakeZendesk(r =>
+        {
+            if (r.Path.EndsWith("/comments", StringComparison.Ordinal))
+            {
+                Thread.Sleep(300);
+                return Json(Comments(Comment(1, 501, "Page"), hasMore: true));
+            }
+
+            return Simple(r);
+        });
+        var request = TicketConversationsTools.BulkConversationRequest.Parse([101], null, null, null, null, null);
+
+        var result = await TicketConversationsTools.ReadAsync(TestHelpers.BuildZendeskService(fake.Client), request, TimeSpan.FromMilliseconds(100), TimeProvider.System, CancellationToken.None);
+
+        result["tickets"]![0]!["reason"]!.GetValue<string>().Should().Be("time");
+        fake.Requests.Count(r => r.Path.EndsWith("/comments", StringComparison.Ordinal)).Should().Be(1);
+    }
+
+    [Fact]
+    public async Task AnHttpTimeout_IsReportedOnItsTicket_AndTheOthersAreKept()
+    {
+        using var fake = TestHelpers.CreateFakeZendesk(r => r.Path == "/api/v2/tickets/102/comments"
+            ? throw new TaskCanceledException("timed out", new TimeoutException())
+            : Simple(r));
+
+        var result = await Bulk(TestHelpers.BuildZendeskService(fake.Client), [101, 102]);
+
+        var tickets = result["tickets"]!.AsArray();
+        tickets[0]!["read"]!.GetValue<string>().Should().Be("complete");
+        tickets[1]!["reason"]!.GetValue<string>().Should().Be("time");
+        result["retry"]!.AsArray().Select(n => n!.GetValue<long>()).Should().Equal([102L]);
+    }
+
+    [Fact]
+    public async Task AMalformedPage_IsReportedOnItsTicket_AndTheOthersAreKept()
+    {
+        using var fake = TestHelpers.CreateFakeZendesk(r => r.Path switch
+        {
+            "/api/v2/tickets/102/comments" => Json("""{"comments":[],"meta":{"has_more":"yes"}}"""),
+            "/api/v2/tickets/103" => Json("""[]"""),
+            _ => Simple(r),
+        });
+
+        var tickets = (await Bulk(TestHelpers.BuildZendeskService(fake.Client), [101, 102, 103]))["tickets"]!.AsArray();
+
+        tickets[0]!["read"]!.GetValue<string>().Should().Be("complete");
+        tickets[1]!["reason"]!.GetValue<string>().Should().Be("error");
+        tickets[2]!["reason"]!.GetValue<string>().Should().Be("error", "a ticket response that is not a ticket");
+    }
+
+    [Fact]
     public async Task TheCallersOwnCancellation_FailsTheCall_RatherThanReadingAsTime()
     {
         // Cancelled while the last ticket's comments are being paged, so the cancellation lands inside

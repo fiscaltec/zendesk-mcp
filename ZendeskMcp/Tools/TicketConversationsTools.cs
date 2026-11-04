@@ -162,7 +162,10 @@ public static class TicketConversationsTools
         // ticket, and the record is the only trace of who read which ticket.
         var tickets = await AnalyticsSupport.ForEachBoundedAsync(ids, (id, _) =>
             Attempt(id, Expired, cancellationToken, async token =>
-                (await zendesk.GetAsync($"/api/v2/tickets/{Id(id)}", cancellationToken: token))["ticket"] ?? new JsonObject()),
+            {
+                var body = await zendesk.GetAsync($"/api/v2/tickets/{Id(id)}", cancellationToken: token);
+                return Parse(() => body["ticket"] as JsonObject ?? throw new FormatException("no ticket object"));
+            }),
             cancellationToken);
 
         var results = await AnalyticsSupport.ForEachBoundedAsync(Enumerable.Range(0, ids.Count).ToList(), async (index, _) =>
@@ -225,6 +228,15 @@ public static class TicketConversationsTools
         {
             return new(default, NotRead(id, "time", null));
         }
+        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+        {
+            // The HTTP client's own timeout, not the caller cancelling: this ticket ran out of time.
+            return new(default, NotRead(id, "time", "Zendesk did not answer in time."));
+        }
+        catch (ZendeskResponseFormatException ex)
+        {
+            return new(default, NotRead(id, "error", ex.Message));
+        }
         catch (HttpRequestException ex)
         {
             var reason = ex.StatusCode switch
@@ -243,6 +255,15 @@ public static class TicketConversationsTools
             return new(default, NotRead(id, "error", ex.Message));
         }
     }
+
+    // Stops the pager before its next page once the deadline has passed; a page in flight finishes.
+    private static Action StopAt(Func<bool> expired) => () =>
+    {
+        if (expired())
+        {
+            throw new DeadlineReachedException();
+        }
+    };
 
     /// <summary>The call's deadline passed between two steps of one ticket.</summary>
     private sealed class DeadlineReachedException : Exception;
@@ -303,7 +324,7 @@ public static class TicketConversationsTools
             try
             {
                 var log = await zendesk.GetAllPagesAsync($"/api/v2/tickets/{Id(id)}/conversation_log", null, "events",
-                    maxItems: int.MaxValue, pageSize: 100, cancellationToken: token);
+                    maxItems: int.MaxValue, pageSize: 100, cancellationToken: token, beforeNextPage: StopAt(expired));
                 var events = Parse(() => log.Items.Select(TicketConversationHelpers.ParseLogEvent).OfType<TicketConversationHelpers.LogEvent>().ToList());
                 if (events.Count > 0)
                 {
@@ -338,7 +359,7 @@ public static class TicketConversationsTools
         }
 
         var comments = await zendesk.GetAllPagesAsync($"/api/v2/tickets/{Id(id)}/comments",
-            ToolJson.Query(("include", "users")), "comments", maxItems: int.MaxValue, pageSize: 100, cancellationToken: token);
+            ToolJson.Query(("include", "users")), "comments", maxItems: int.MaxValue, pageSize: 100, cancellationToken: token, beforeNextPage: StopAt(expired));
         var list = Parse(() =>
         {
             var users = (comments.Sideloads["users"]?.AsArray() ?? [])
