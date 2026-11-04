@@ -25,6 +25,9 @@ public static class ZendeskConnectEndpoints
 {
     public const string ConnectPath = "/zendesk/connect";
     public const string CallbackPath = "/zendesk/callback";
+
+    /// <summary>How long the callback's check, store and spend of the link may take once begun, whatever the browser does.</summary>
+    internal static readonly TimeSpan StoreTimeout = TimeSpan.FromSeconds(30);
     internal const string StateCookie = "zendesk_connect_state";
 
     public static void MapZendeskConnect(this WebApplication app)
@@ -139,27 +142,45 @@ public static class ZendeskConnectEndpoints
 
             // Under the person's lock, so a refresh of their previous grant that is already in flight
             // cannot land after this and overwrite the new connection with the old one renewed.
+            //
+            // The link is checked and spent under the same lock. One link opened in two browsers
+            // starts two attempts; without this, the second would store a grant after the first had
+            // spent the link, and would reconnect someone who had disconnected in between (#13).
+            //
+            // Once the lock is held the section runs to the end on a bounded token of its own, not the
+            // browser's: a browser that gave up after the store would otherwise leave the grant stored
+            // and the link unspent, open to exactly that second attempt.
             var gate = ZendeskCredentialProvider.LockFor(attempt.ObjectId);
             await gate.WaitAsync(ctx.RequestAborted);
-            ZendeskUserToken? replaced;
+            using var commit = new CancellationTokenSource(StoreTimeout);
+            ZendeskUserToken? replaced = null;
             var replacedUnreadable = false;
+            var linkSpent = false;
             try
             {
-                try
+                if (await links.PeekAsync(attempt.Ticket, commit.Token) is null)
                 {
-                    replaced = await store.GetAsync(attempt.ObjectId, ctx.RequestAborted);
+                    linkSpent = true;
                 }
-                catch (ZendeskStoredTokenUnreadableException ex)
+                else
                 {
-                    // Replaced all the same — the person is reconnecting precisely because the old
-                    // grant does not work — but revoked below as far as it can be read.
-                    replaced = ex.Salvaged;
-                    replacedUnreadable = true;
-                }
+                    try
+                    {
+                        replaced = await store.GetAsync(attempt.ObjectId, commit.Token);
+                    }
+                    catch (ZendeskStoredTokenUnreadableException ex)
+                    {
+                        // Replaced all the same — the person is reconnecting precisely because the old
+                        // grant does not work — but revoked below as far as it can be read.
+                        replaced = ex.Salvaged;
+                        replacedUnreadable = true;
+                    }
 
-                await store.SaveAsync(attempt.ObjectId, oauthClient.ToUserToken(token, identity), ctx.RequestAborted);
+                    await store.SaveAsync(attempt.ObjectId, oauthClient.ToUserToken(token, identity), commit.Token);
+                    await links.RedeemAsync(attempt.Ticket, commit.Token);
+                }
             }
-            catch (Exception ex) when (ex is not OperationCanceledException)
+            catch (Exception ex) when (ex is not OperationCanceledException || commit.IsCancellationRequested)
             {
                 // Not persisted, so not kept: revoke it rather than leave a live grant nobody holds.
                 // (The store cached it before the write failed; revoked, a call with it meets a 401
@@ -173,6 +194,16 @@ public static class ZendeskConnectEndpoints
             finally
             {
                 gate.Release();
+            }
+
+            if (linkSpent)
+            {
+                // Revoked straight away, like a refused one: nothing holds it, so it must not stay live.
+                var revoked = await oauthClient.RevokeAsync(token.AccessToken, ctx.RequestAborted);
+                logger.LogWarning("Refused a Zendesk connection for {UserObjectId}: its connect link was already used or has expired; revoking the new grant {RevocationOutcome}",
+                    attempt.ObjectId, revoked ? "succeeded" : "was not confirmed");
+                return Page(StatusCodes.Status400BadRequest, "Connection not completed",
+                    "This connect link has already been used, or has expired. If you are not connected, ask Claude for a new link — any Zendesk tool will offer it.");
             }
 
             // A reconnect replaces the previous grant; revoke it so it does not stay live at Zendesk.
@@ -193,7 +224,6 @@ public static class ZendeskConnectEndpoints
                     attempt.ObjectId);
             }
 
-            await links.RedeemAsync(attempt.Ticket, ctx.RequestAborted);
             logger.LogInformation("Connected Zendesk user {ZendeskUserId} for {UserObjectId}", identity.Id, attempt.ObjectId);
 
             return Page(StatusCodes.Status200OK, "Zendesk connected",

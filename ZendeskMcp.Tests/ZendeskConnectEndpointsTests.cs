@@ -165,6 +165,71 @@ public class ZendeskConnectEndpointsTests
     }
 
     [Fact]
+    public async Task ASecondAttemptFromASpentLink_IsRefusedAndRevoked()
+    {
+        // One link opened in two browsers starts two attempts. Once the first stores a grant and
+        // spends the link, the second must not store another (#13).
+        using var factory = new Factory(zendeskEmail: "agent@example.com");
+        using var client = factory.CreateClient(new WebApplicationFactoryClientOptions { AllowAutoRedirect = false });
+        var link = await factory.IssueLinkAsync(ObjectId, "agent@example.com");
+        var firstState = QueryValue((await client.GetAsync(link)).Headers.Location!.ToString(), "state");
+        var secondState = QueryValue((await client.GetAsync(link)).Headers.Location!.ToString(), "state");
+        (await GetWithCookieAsync(client, $"/zendesk/callback?code=c1&state={firstState}", firstState))
+            .StatusCode.Should().Be(HttpStatusCode.OK);
+
+        var second = await GetWithCookieAsync(client, $"/zendesk/callback?code=c2&state={secondState}", secondState);
+
+        second.StatusCode.Should().Be(HttpStatusCode.BadRequest);
+        (await second.Content.ReadAsStringAsync()).Should().Contain("already been used");
+        (await factory.Store.GetAsync(ObjectId))!.AccessToken.Should().Be("issued-access", "the first connection stands");
+        factory.Revocations.Should().Equal(["issued-access-2"], "the refused grant is revoked, and the stored one is not");
+    }
+
+    [Fact]
+    public async Task ASecondAttemptFromASpentLink_DoesNotReconnectAfterADisconnect()
+    {
+        using var factory = new Factory(zendeskEmail: "agent@example.com");
+        using var client = factory.CreateClient(new WebApplicationFactoryClientOptions { AllowAutoRedirect = false });
+        var link = await factory.IssueLinkAsync(ObjectId, "agent@example.com");
+        var firstState = QueryValue((await client.GetAsync(link)).Headers.Location!.ToString(), "state");
+        var secondState = QueryValue((await client.GetAsync(link)).Headers.Location!.ToString(), "state");
+        (await GetWithCookieAsync(client, $"/zendesk/callback?code=c1&state={firstState}", firstState))
+            .StatusCode.Should().Be(HttpStatusCode.OK);
+        await factory.Store.RemoveAsync(ObjectId);
+
+        var second = await GetWithCookieAsync(client, $"/zendesk/callback?code=c2&state={secondState}", secondState);
+
+        second.StatusCode.Should().Be(HttpStatusCode.BadRequest);
+        (await factory.Store.GetAsync(ObjectId)).Should().BeNull("disconnecting must stay disconnected");
+        factory.Revocations.Should().Equal(["issued-access-2"]);
+    }
+
+    [Fact]
+    public async Task ABrowserThatGivesUpAfterTheStore_StillSpendsTheLink()
+    {
+        // Once the grant is stored, the link must be spent too, whatever the browser does: an unspent
+        // link would let a second attempt reconnect someone who has since disconnected (#13).
+        using var factory = new Factory(zendeskEmail: "agent@example.com");
+        using var client = factory.CreateClient(new WebApplicationFactoryClientOptions { AllowAutoRedirect = false });
+        var link = await factory.IssueLinkAsync(ObjectId, "agent@example.com");
+        var firstState = QueryValue((await client.GetAsync(link)).Headers.Location!.ToString(), "state");
+        var secondState = QueryValue((await client.GetAsync(link)).Headers.Location!.ToString(), "state");
+        using var browser = new CancellationTokenSource();
+        factory.AfterSave = browser.Cancel;
+
+        await FluentActions.Awaiting(() => GetWithCookieAsync(client, $"/zendesk/callback?code=c1&state={firstState}", firstState, browser.Token))
+            .Should().ThrowAsync<OperationCanceledException>();
+        factory.AfterSave = null;
+        (await factory.Store.GetAsync(ObjectId))!.AccessToken.Should().Be("issued-access", "the store finished before the browser gave up");
+        await factory.Store.RemoveAsync(ObjectId);
+
+        var second = await GetWithCookieAsync(client, $"/zendesk/callback?code=c2&state={secondState}", secondState);
+
+        second.StatusCode.Should().Be(HttpStatusCode.BadRequest, "the first callback spent the link before the cancellation could stop it");
+        (await factory.Store.GetAsync(ObjectId)).Should().BeNull("a disconnect must stay a disconnect");
+    }
+
+    [Fact]
     public async Task AStateUsedOnce_CannotCompleteASecondTime()
     {
         using var factory = new Factory(zendeskEmail: "agent@example.com");
@@ -212,11 +277,11 @@ public class ZendeskConnectEndpointsTests
         return QueryValue(connect.Headers.Location!.ToString(), "state");
     }
 
-    private static Task<HttpResponseMessage> GetWithCookieAsync(HttpClient client, string url, string state)
+    private static async Task<HttpResponseMessage> GetWithCookieAsync(HttpClient client, string url, string state, CancellationToken cancellationToken = default)
     {
         using var request = new HttpRequestMessage(HttpMethod.Get, url);
         request.Headers.Add("Cookie", $"zendesk_connect_state={state}");
-        return client.SendAsync(request);
+        return await client.SendAsync(request, cancellationToken);
     }
 
     private static string QueryValue(string url, string name) =>
@@ -231,6 +296,7 @@ public class ZendeskConnectEndpointsTests
     private sealed class Factory(string zendeskEmail, string role = "agent", string name = "Agent Example", IZendeskTokenStore? store = null) : WebApplicationFactory<Program>
     {
         private readonly List<RecordedRequest> _requests = [];
+        private int _exchanges;
 
         private string ZendeskEmail { get; } = zendeskEmail;
         private string Role { get; } = role;
@@ -249,6 +315,15 @@ public class ZendeskConnectEndpointsTests
 
         public IZendeskTokenStore Store => Services.GetRequiredService<IZendeskTokenStore>();
 
+        /// <summary>Runs after each store save, before the save returns, as if the browser acted then.</summary>
+        public Action? AfterSave { get; set; }
+
+        /// <summary>The access tokens revoked at Zendesk, in order.</summary>
+        public IReadOnlyList<string> Revocations => ZendeskRequests
+            .Where(r => r.Method == HttpMethod.Delete && r.Path == "/api/v2/oauth/tokens/current.json")
+            .Select(r => r.Headers["Authorization"]["Bearer ".Length..])
+            .ToList();
+
         public Task<string> IssueLinkAsync(string objectId, string signInName) =>
             Services.GetRequiredService<ZendeskConnectLinks>().CreateAsync(objectId, signInName, "http://localhost");
 
@@ -266,12 +341,31 @@ public class ZendeskConnectEndpointsTests
             {
                 services.AddHttpClient(ZendeskOAuthClient.HttpClientName)
                     .ConfigurePrimaryHttpMessageHandler(() => new StubZendesk(this));
-                if (store is not null)
-                {
-                    services.AddSingleton(store);
-                }
+                // A store given by the test wins; otherwise the in-memory one, with an AfterSave hook.
+                services.AddSingleton(store ?? new NotifyingStore(this));
             });
             return base.CreateHost(builder);
+        }
+
+        // The in-memory store, with a hook after each save that honours the caller's token afterwards,
+        // as a real store's later awaits would: a cancelled token there throws.
+        private sealed class NotifyingStore(Factory owner) : IZendeskTokenStore
+        {
+            private readonly InMemoryZendeskTokenStore _inner = new();
+
+            public Task<ZendeskUserToken?> GetAsync(string objectId, CancellationToken cancellationToken = default) =>
+                _inner.GetAsync(objectId, cancellationToken);
+
+            public async Task SaveAsync(string objectId, ZendeskUserToken token, CancellationToken cancellationToken = default)
+            {
+                await _inner.SaveAsync(objectId, token, cancellationToken);
+                owner.AfterSave?.Invoke();
+                await Task.Delay(50, CancellationToken.None);
+                cancellationToken.ThrowIfCancellationRequested();
+            }
+
+            public Task RemoveAsync(string objectId, CancellationToken cancellationToken = default) =>
+                _inner.RemoveAsync(objectId, cancellationToken);
         }
 
         private sealed class StubZendesk(Factory owner) : HttpMessageHandler
@@ -290,7 +384,13 @@ public class ZendeskConnectEndpointsTests
                 {
                     "/oauth/tokens" when body!.Contains("\"grant_type\":\"refresh_token\"", StringComparison.Ordinal) =>
                         "{\"access_token\":\"renewed-old\",\"refresh_token\":\"renewed-old-refresh\",\"expires_in\":7200,\"token_type\":\"bearer\"}",
-                    "/oauth/tokens" => "{\"access_token\":\"issued-access\",\"refresh_token\":\"issued-refresh\",\"expires_in\":7200,\"token_type\":\"bearer\"}",
+                    // The first exchange issues "issued-access", later ones "issued-access-2" and so on,
+                    // so a test can tell which grant was stored and which was revoked.
+                    "/oauth/tokens" => Interlocked.Increment(ref owner._exchanges) switch
+                    {
+                        1 => "{\"access_token\":\"issued-access\",\"refresh_token\":\"issued-refresh\",\"expires_in\":7200,\"token_type\":\"bearer\"}",
+                        var n => $"{{\"access_token\":\"issued-access-{n}\",\"refresh_token\":\"issued-refresh-{n}\",\"expires_in\":7200,\"token_type\":\"bearer\"}}",
+                    },
                     "/api/v2/users/me.json" => System.Text.Json.JsonSerializer.Serialize(new
                     {
                         user = new { id = 4242, name = owner.Name, email = owner.ZendeskEmail, role = owner.Role },
