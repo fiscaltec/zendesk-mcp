@@ -437,7 +437,7 @@ public class AnalyticsToolsTests
         await AnalyticsTools.GetSlaQueue(zendesk, channel: ["messaging"], custom_fields: [new TicketCustomFieldCondition(10, Value: "a")]);
 
         fake.Requests.Single(r => r.Path == "/api/v2/search/export").Query("query")
-            .Should().Be("type:ticket custom_field_10:a via:native_messaging via:whatsapp status<solved");
+            .Should().Be("type:ticket custom_field_10:a via:native_messaging via:whatsapp via:line via:wechat via:instagram_dm via:telegram via:viber via:kakaotalk via:apple_business_chat via:google_rcs via:google_business_messages via:sunshine_conversations_facebook_messenger via:sunshine_conversations_twitter_dm via:twilio_sms via:messagebird_sms via:sunshine_conversations_api status<solved");
     }
 
     [Fact]

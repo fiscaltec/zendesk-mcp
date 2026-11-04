@@ -285,9 +285,10 @@ public class TicketsToolsTests
         var zendesk = TestHelpers.BuildZendeskService(fake.Client);
 
         var result = JsonNode.Parse(await TicketsTools.SearchTickets(zendesk, channel: ["email", "messaging"],
-            custom_fields: [new TicketCustomFieldCondition(10, Value: "a"), new TicketCustomFieldCondition(16, HasValue: false), new TicketCustomFieldCondition(12, Value: "true")]))!;
+            custom_fields: [new TicketCustomFieldCondition(10, Value: "a"), new TicketCustomFieldCondition(16, HasValue: false), new TicketCustomFieldCondition(12, Value: "Checked")]))!;
 
-        const string expected = "type:ticket custom_field_10:a -custom_field_16:* custom_field_12:true via:mail via:native_messaging via:whatsapp";
+        // A checkbox is given as checked/unchecked (as Swifteq's server takes it) and searched as true/false.
+        const string expected = "type:ticket custom_field_10:a -custom_field_16:* custom_field_12:true via:mail via:native_messaging via:whatsapp via:line via:wechat via:instagram_dm via:telegram via:viber via:kakaotalk via:apple_business_chat via:google_rcs via:google_business_messages via:sunshine_conversations_facebook_messenger via:sunshine_conversations_twitter_dm via:twilio_sms via:messagebird_sms via:sunshine_conversations_api";
         result["query"]!.GetValue<string>().Should().Be(expected);
         fake.Requests.Single(r => r.Path == "/api/v2/search/export").Query("query").Should().Be(expected);
         fake.Requests.Count(r => r.Path == "/api/v2/ticket_fields").Should().Be(1, "the field definitions are read once per call");
@@ -334,14 +335,14 @@ public class TicketsToolsTests
 
     [Theory]
     [InlineData(12, null, false, "*checkbox, which is never empty*")]
-    [InlineData(12, "yes", null, "*checkbox; its value is true*")]
+    [InlineData(12, "yes", null, "*checkbox; its value is 'checked' or 'unchecked'*")]
     [InlineData(13, null, true, "*built-in 'priority' field*")]
     [InlineData(14, "open", null, "*built-in 'status' field*")]
     [InlineData(15, null, true, "*has_value does not apply*multi_lookup*")]
     [InlineData(99, "x", null, "*no ticket field 99*")]
     [InlineData(10, "none", null, "*'none' does not find*has_value*false*")]
     [InlineData(10, "\"none\"", null, "*'none' does not find*")]
-    [InlineData(12, "none", null, "*checkbox; its value is true*")]
+    [InlineData(12, "none", null, "*checkbox; its value is 'checked' or 'unchecked'*")]
     public async Task SearchTickets_CustomFieldsTheFieldCannotTake_AreRefusedBeforeSearching(long id, string? value, bool? hasValue, string message)
     {
         using var fake = SearchFake();

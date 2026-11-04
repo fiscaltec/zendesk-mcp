@@ -61,8 +61,7 @@ public static class TicketsTools
             StartDate = start_date, EndDate = end_date, SolvedStartDate = solved_start_date, SolvedEndDate = solved_end_date,
             CustomFields = custom_fields, Channels = channel,
         };
-        var query = TicketSearchQuery.Build(filters);
-        await TicketSearchHelpers.CheckCustomFieldsAsync(zendesk, filters, cancellationToken);
+        (var query, filters) = await TicketSearchHelpers.BuildQueryAsync(zendesk, filters, cancellationToken);
         var fields = TicketSearchHelpers.ParseEnumList(include_fields, TicketSearchHelpers.IncludeFieldValues, "include_fields");
         var includes = TicketSearchHelpers.ParseEnumList(include, TicketSearchHelpers.SearchIncludeValues, "include");
         var objectKeys = TicketSearchHelpers.ParseCustomObjectKeys(include_custom_objects);
@@ -199,8 +198,7 @@ public static class TicketsTools
             StartDate = start_date, EndDate = end_date, SolvedStartDate = solved_start_date, SolvedEndDate = solved_end_date,
             CustomFields = custom_fields, Channels = channel,
         };
-        var query = TicketSearchQuery.Build(filters);
-        await TicketSearchHelpers.CheckCustomFieldsAsync(zendesk, filters, cancellationToken);
+        (var query, filters) = await TicketSearchHelpers.BuildQueryAsync(zendesk, filters, cancellationToken);
 
         if (string.IsNullOrWhiteSpace(group_by))
         {

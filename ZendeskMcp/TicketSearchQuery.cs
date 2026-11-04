@@ -75,6 +75,20 @@ public static class TicketSearchQuery
     /// <summary>The value that selects every messaging channel together.</summary>
     public const string MessagingChannel = "messaging";
 
+    // The via: values messaging expands to: Web Widget and mobile SDK messaging, WhatsApp, LINE, WeChat,
+    // Instagram DM, Telegram, Viber, KakaoTalk, Apple Messages for Business, Google RCS and Business
+    // Messages, Facebook Messenger and X DM through Sunshine Conversations, messaging SMS (Twilio,
+    // MessageBird) and the Sunshine Conversations API. Swifteq's server sends this set, and on
+    // 2026-11-04 Zendesk accepted it as one search (an unknown via: value makes it refuse the whole
+    // search), so every value is valid search syntax. Whether each matches its tickets is unverified
+    // against the live API: the account has no messaging tickets.
+    private static readonly string[] MessagingSearchValues =
+    [
+        "native_messaging", "whatsapp", "line", "wechat", "instagram_dm", "telegram", "viber", "kakaotalk",
+        "apple_business_chat", "google_rcs", "google_business_messages", "sunshine_conversations_facebook_messenger",
+        "sunshine_conversations_twitter_dm", "twilio_sms", "messagebird_sms", "sunshine_conversations_api",
+    ];
+
     /// <summary>
     /// The values the channel filter takes: the channel keys Count_tickets groups by, so a channel here
     /// selects exactly the tickets of its group there, plus <see cref="MessagingChannel"/>.
@@ -199,12 +213,10 @@ public static class TicketSearchQuery
     }
 
     /// <summary>
-    /// The via: search values a channel filter expands to, in the channel table's order. Each value is
-    /// one the live API accepts (TicketCountHelpers.Channels). Repeating a keyword ORs its values:
-    /// priority:low priority:normal counts the two priorities together (confirmed against the live API).
+    /// The via: search values a channel filter expands to: the channel table's values in its order, then
+    /// messaging's. Each is one the live API accepts. Repeated via: terms OR: via:mail via:web counted the
+    /// email and web tickets together (confirmed against the live API through Swifteq's server).
     /// </summary>
-    // Unverified against the live API: that two via: terms OR in the same way. No deployed tool could
-    // send two before this filter existed.
     public static IReadOnlyList<string> ChannelSearchValues(IReadOnlyList<string>? channels)
     {
         if (channels is null || channels.Count == 0)
@@ -224,16 +236,13 @@ public static class TicketSearchQuery
             wanted.Add(normalised);
         }
 
-        // messaging is every messaging channel the table has a search value for. The other messaging
-        // channels Zendesk knows (TicketConversationHelpers.MessagingChannels: Instagram DM, LINE, WeChat
-        // and so on) are left out: their via: values have not been tried against the live API, and an
-        // unknown one makes Zendesk refuse the whole search.
-        var messaging = wanted.Contains(MessagingChannel);
-        return TicketCountHelpers.Channels
-            .Where(c => wanted.Contains(c.Channel) || (messaging && TicketConversationHelpers.MessagingChannels.Contains(c.Channel)))
-            .Select(c => c.SearchValue)
-            .Distinct(StringComparer.Ordinal)
-            .ToList();
+        var values = TicketCountHelpers.Channels.Where(c => wanted.Contains(c.Channel)).Select(c => c.SearchValue);
+        if (wanted.Contains(MessagingChannel))
+        {
+            values = values.Concat(MessagingSearchValues);
+        }
+
+        return values.Distinct(StringComparer.Ordinal).ToList();
     }
 
     private static void AddChannels(List<string> terms, IReadOnlyList<string>? channels)
@@ -244,10 +253,8 @@ public static class TicketSearchQuery
         }
     }
 
-    // custom_fields: each condition one term, all ANDed.
-    // Unverified against the live API: that terms on two different custom fields AND rather than OR
-    // (Zendesk might treat every custom_field_<id> as one keyword). No deployed tool could send two. Zendesk ORs two terms on the same field, so a
-    // field may appear once, and not alongside custom_field_id. What a field's type allows (a checkbox is
+    // custom_fields: each condition one term, all ANDed (two different fields AND: confirmed against the
+    // live API through Swifteq's server). Zendesk ORs two terms on the same field, so a field may appear once, and not alongside custom_field_id. What a field's type allows (a checkbox is
     // never empty, a built-in field has its own filter) needs the field definitions, which
     // TicketSearchHelpers.CheckCustomFieldsAsync reads; this checks only the shape.
     private static void AddCustomFields(List<string> terms, TicketSearchFilters filters)
@@ -287,10 +294,10 @@ public static class TicketSearchQuery
                 throw new ArgumentException($"custom_fields condition for field {id} needs exactly one of value (an exact value; for a drop-down, the option's tag) or has_value (true: any value, false: empty).");
             }
 
-            // custom_field_<id>:* matches a field holding any value: on a drop-down it counted exactly the
-            // tickets outside group_by custom_field's '(none)' group (confirmed against the live API).
-            // Unverified against the live API: the negation, -custom_field_<id>:*, for empty fields, and
-            // the wildcard on text, number, date and other non-drop-down fields.
+            // On a drop-down, custom_field_<id>:* counted exactly the tickets outside group_by custom_field's
+            // '(none)' group and -custom_field_<id>:* exactly those in it (confirmed against the live API).
+            // Unverified against the live API: the wildcard on text, number, date and other non-drop-down
+            // fields; the only text field tried was empty on every ticket, which cannot tell the two apart.
             terms.Add(condition.HasValue switch
             {
                 true => $"custom_field_{id}:*",

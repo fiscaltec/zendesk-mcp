@@ -122,10 +122,11 @@ public class TicketSearchQueryTests
     }
 
     [Fact]
-    public void Messaging_ExpandsToTheMessagingChannelsTheTableCanSearch()
+    public void Messaging_ExpandsToEveryMessagingChannel_WithoutRepeatingOneAlsoNamed()
     {
-        TicketSearchQuery.Build(new TicketSearchFilters { Channels = ["messaging", "whatsapp"] })
-            .Should().Be("type:ticket via:native_messaging via:whatsapp");
+        // The set Zendesk accepted as one search on 2026-11-04 (through Swifteq's server).
+        TicketSearchQuery.Build(new TicketSearchFilters { Channels = ["messaging", "whatsapp", "email"] })
+            .Should().Be("type:ticket via:mail via:whatsapp via:native_messaging via:line via:wechat via:instagram_dm via:telegram via:viber via:kakaotalk via:apple_business_chat via:google_rcs via:google_business_messages via:sunshine_conversations_facebook_messenger via:sunshine_conversations_twitter_dm via:twilio_sms via:messagebird_sms via:sunshine_conversations_api");
     }
 
     [Fact]

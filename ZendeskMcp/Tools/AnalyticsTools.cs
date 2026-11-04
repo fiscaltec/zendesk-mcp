@@ -103,8 +103,7 @@ public static class AnalyticsTools
             StartDate = start_date, EndDate = end_date, SolvedStartDate = solved_start_date, SolvedEndDate = solved_end_date,
             CustomFields = custom_fields, Channels = channel,
         };
-        var query = TicketSearchQuery.Build(filters);
-        await TicketSearchHelpers.CheckCustomFieldsAsync(zendesk, filters, cancellationToken);
+        (var query, filters) = await TicketSearchHelpers.BuildQueryAsync(zendesk, filters, cancellationToken);
         var searchUrl = TicketSearchQuery.AgentSearchUrl(zendesk.BaseUrl, query);
         var bySolved = !string.IsNullOrWhiteSpace(solved_start_date) && string.IsNullOrWhiteSpace(start_date);
 
@@ -283,8 +282,7 @@ public static class AnalyticsTools
             CustomFieldValue = custom_field_value, CustomStatusId = custom_status_id, HasAttachments = has_attachments,
             CustomFields = custom_fields, Channels = channel,
         };
-        var baseQuery = TicketSearchQuery.Build(filters);
-        await TicketSearchHelpers.CheckCustomFieldsAsync(zendesk, filters, cancellationToken);
+        (var baseQuery, filters) = await TicketSearchHelpers.BuildQueryAsync(zendesk, filters, cancellationToken);
 
         var (zone, zoneName) = await AnalyticsSupport.GetTimeZoneAsync(zendesk, cancellationToken);
         var end = string.IsNullOrWhiteSpace(end_date) ? AnalyticsStats.Today(zone, DateTimeOffset.UtcNow) : AnalyticsSupport.ParseDay(end_date, "end_date");
@@ -412,8 +410,7 @@ public static class AnalyticsTools
             CustomFieldValue = custom_field_value, CustomStatusId = custom_status_id, HasAttachments = has_attachments,
             CustomFields = custom_fields, Channels = channel,
         };
-        var query = TicketSearchQuery.Build(filters);
-        await TicketSearchHelpers.CheckCustomFieldsAsync(zendesk, filters, cancellationToken);
+        (var query, filters) = await TicketSearchHelpers.BuildQueryAsync(zendesk, filters, cancellationToken);
         if (string.IsNullOrWhiteSpace(status))
         {
             query += " status<solved";
