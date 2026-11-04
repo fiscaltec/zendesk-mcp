@@ -526,7 +526,7 @@ public sealed class HelpCenterArticlesToolsTests : IDisposable
     public async Task SetVisibility_ToEveryone_SendsAnExplicitNull()
     {
         using var fake = TestHelpers.CreateFakeZendesk(r => VisibilityRoute(r, draft: true, putSegment: "null"));
-        var zendesk = TestHelpers.BuildZendeskService(fake.Client);
+        var zendesk = TestHelpers.BuildZendeskService(fake.Client, configure: o => o.Features.AllowArticlePublishing = true);
 
         var json = JsonNode.Parse(await HelpCenterArticlesTools.SetHelpCenterArticleVisibility(zendesk, 42, visible_to_everyone: true))!;
 
@@ -536,34 +536,26 @@ public sealed class HelpCenterArticlesToolsTests : IDisposable
         json["visible_to"]!.GetValue<string>().Should().Be("everyone");
     }
 
-    [Fact]
-    public async Task SetVisibility_OnAPublishedArticle_NeedsThePublishingSwitch()
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task SetVisibility_NeedsThePublishingSwitch_EvenOnADraft(bool draft)
     {
-        using var fake = TestHelpers.CreateFakeZendesk(r => VisibilityRoute(r, draft: false, putSegment: "77"));
+        // A draft flag describes one translation and the audience covers all of them, so drafts are not exempt.
+        using var fake = TestHelpers.CreateFakeZendesk(r => VisibilityRoute(r, draft, putSegment: "77"));
         var zendesk = TestHelpers.BuildZendeskService(fake.Client);
 
         var act = () => HelpCenterArticlesTools.SetHelpCenterArticleVisibility(zendesk, 42, user_segment_id: 77);
 
         await act.Should().ThrowAsync<UnauthorizedAccessException>().WithMessage("*AllowArticlePublishing*");
-        fake.Requests.Should().OnlyContain(r => r.Method == HttpMethod.Get);
-    }
-
-    [Fact]
-    public async Task SetVisibility_OnADraft_NeedsNoSwitch()
-    {
-        using var fake = TestHelpers.CreateFakeZendesk(r => VisibilityRoute(r, draft: true, putSegment: "77"));
-        var zendesk = TestHelpers.BuildZendeskService(fake.Client);
-
-        await HelpCenterArticlesTools.SetHelpCenterArticleVisibility(zendesk, 42, user_segment_id: 77);
-
-        fake.Requests.Should().ContainSingle(r => r.Method == HttpMethod.Put);
+        fake.Requests.Should().BeEmpty("the switch is checked before anything is sent");
     }
 
     [Fact]
     public async Task SetVisibility_WhenZendeskDidNotApplyIt_FailsRatherThanReportingSuccess()
     {
         using var fake = TestHelpers.CreateFakeZendesk(r => VisibilityRoute(r, draft: true, putSegment: "11"));
-        var zendesk = TestHelpers.BuildZendeskService(fake.Client);
+        var zendesk = TestHelpers.BuildZendeskService(fake.Client, configure: o => o.Features.AllowArticlePublishing = true);
 
         var act = () => HelpCenterArticlesTools.SetHelpCenterArticleVisibility(zendesk, 42, user_segment_id: 77);
 
@@ -577,7 +569,7 @@ public sealed class HelpCenterArticlesToolsTests : IDisposable
     public async Task SetVisibility_RejectsAmbiguousOrInvalidInputWithoutCallingZendesk(long? segment, bool everyone)
     {
         using var fake = TestHelpers.CreateFakeZendesk(_ => FakeResponse.Json("{}"));
-        var zendesk = TestHelpers.BuildZendeskService(fake.Client);
+        var zendesk = TestHelpers.BuildZendeskService(fake.Client, configure: o => o.Features.AllowArticlePublishing = true);
 
         var act = () => HelpCenterArticlesTools.SetHelpCenterArticleVisibility(zendesk, 42, user_segment_id: segment, visible_to_everyone: everyone);
 

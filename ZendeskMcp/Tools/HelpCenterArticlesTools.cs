@@ -403,7 +403,7 @@ public static partial class HelpCenterArticlesTools
     [McpServerTool(Name = "Set_help_center_article_visibility", Title = "Set who can view a Help Center article", ReadOnly = false, Destructive = true, Idempotent = true, OpenWorld = false), Description(
         "Set who can view a Help Center article: the members of one user segment (user_segment_id), or everyone (visible_to_everyone=true). Give exactly one of the two. " +
         "Use List_user_segments to find the segment id, and Get_help_center_article to see who can view the article now. " +
-        "Changing who can view a published article changes what people see on the live Help Center, so it must be allowed in this server's settings (the same administrator switch as publishing); a draft's audience can always be set. " +
+        "Changing who can view an article changes what people see on the live Help Center, so it must be allowed in this server's settings (the same administrator switch as publishing). " +
         "Returns the article's audience before and after. Applies to every translation of the article. " +
         "For multi-brand accounts, pass brand_url when the article belongs to a non-default brand. " + HelpCenterJson.UntrustedContentWarning)]
     public static async Task<string> SetHelpCenterArticleVisibility(
@@ -415,6 +415,13 @@ public static partial class HelpCenterArticlesTools
         CancellationToken cancellationToken = default)
     {
         ToolJson.PositiveId(article_id, "article_id");
+
+        // Always the publishing switch, draft or not. An article's draft flag describes one translation
+        // while the audience applies to all of them, and a missing flag proves nothing, so exempting
+        // drafts would let a published translation's audience change with the switch off.
+        ToolJson.RequireFeature(zendesk.Options.Features.AllowArticlePublishing, "AllowArticlePublishing",
+            "Changing who can view a Help Center article");
+
         if ((user_segment_id is not null) == visible_to_everyone)
         {
             throw new ArgumentException("Give exactly one of user_segment_id or visible_to_everyone=true.");
@@ -428,15 +435,6 @@ public static partial class HelpCenterArticlesTools
         var id = HelpCenterJson.Id(article_id);
         var before = (await zendesk.GetAsync($"/api/v2/help_center/articles/{id}", brandUrl: brand_url, cancellationToken: cancellationToken))["article"];
         var beforeIds = HelpCenterJson.UserSegmentIds(before);
-
-        // A published article's audience is what people see on the live Help Center — widening it can
-        // expose an internal article to customers — so it needs the publishing switch. A draft is seen
-        // only by the agents who manage it, whatever its segment.
-        if (before?["draft"] is { } draftNode && MacroSupport.ParseBool(draftNode) == false)
-        {
-            ToolJson.RequireFeature(zendesk.Options.Features.AllowArticlePublishing, "AllowArticlePublishing",
-                "Changing who can view a published Help Center article");
-        }
 
         // The single user_segment_id, which create uses and the validation account's responses carry
         // (none of 100 articles had user_segment_ids). Null means everyone.
