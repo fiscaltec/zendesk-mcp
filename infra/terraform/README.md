@@ -41,8 +41,9 @@ cite `vitally-mcp#NNN` where a lesson was learned there.
   replica) and `zendesk-staging-ca-uksouth` (scales to zero). Both are pinned to **at most one
   replica**: connect links, OAuth state and upload slots live in an in-process cache
   (`containerapps.tf` explains; scaling out needs Redis first).
-- **One secret vault**, `zendesk-prod-kv-uksouth`, private-endpoint only. It holds the Zendesk OAuth
-  client secret (`zendesk-oauth-client-secret`), the record copy of the Entra client secret
+- **One secret vault**, `zendesk-prod-kv-uksouth`, private-endpoint only. It holds the two Zendesk OAuth
+  client secrets (`zendesk-oauth-client-secret` for production, `zendesk-staging-oauth-client-secret`
+  for staging), the record copy of the Entra client secret
   (`entra-mcp-client-secret`), and one secret per connected person, which the app writes itself —
   `zendesk-user-{objectId}` for production, `zendesk-staging-user-{objectId}` for staging, so the two
   targets never share a person's token. The app's identity therefore holds **Key Vault Secrets
@@ -63,7 +64,7 @@ Settled on 2026-10-28 and committed as defaults, so the record and the build run
 | Decision | Value | Where |
 |---|---|---|
 | Zendesk subdomain | `fiscalsupport` | `zendesk_subdomain` |
-| Zendesk OAuth client | `fiscal_zendesk_mcp` (confidential, PKCE) | `zendesk_oauth_client_id` |
+| Zendesk OAuth clients | production `fiscal_zendesk_mcp` (allowed scopes `read write`); staging `fiscal_zendesk_mcp_staging` (allowed scopes `read`, split 2026-11-04). Both confidential, PKCE, one redirect URL each | `zendesk_oauth_client_id`, `staging_zendesk_oauth_client_id` |
 | Gate 1 — who may sign in | IT & Security Department only, to begin with | `entra_gate1_group_object_ids` (`entra.tf`) |
 | Gate 2 — tier membership | IT & Security Department nested in `sg-zendesk-readers`; Dan Searle in all three tier groups | out-of-band, build runbook Phase 12 |
 | Hostnames | `https://zendesk-mcp.fiscaltec.com`, `https://zendesk-mcp-staging.fiscaltec.com` | `public_base_url` and friends |
