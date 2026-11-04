@@ -20,7 +20,7 @@ git -C <vitally-mcp clone> fetch origin main && git -C <vitally-mcp clone> log -
 That lists vitally-mcp's non-source changes since this audit; decide each as #10 did, then move the commit named here. Run on 2026-11-04, it listed nothing: the one later commit, `fdc6f5e` (#197), touches only the two `.csproj` files. ⚠️ The clone must hold history back to `0c6d4e1`: in a `--depth 1` clone the command fails with `fatal: bad revision` (exit 128), which is not "no drift". Check the exit status, not just the empty output. Source drift (a fix to a shared component such as the OAuth proxy, `ToolAuthorizer` or the Graph resolver) is out of this command's scope: list it with the same range over `-- VitallyMcp`, and read each commit, since the code here was ported and renamed rather than copied file for file.
 
 **Key characteristics:**
-- 46 tools over tickets, KPI/SLA/CSAT reporting, macros, users and organisations, configuration and the Help Center — see *Tools*.
+- 47 tools over tickets, KPI/SLA/CSAT reporting, macros, users and organisations, configuration and the Help Center — see *Tools*.
 - **Per-user Zendesk OAuth.** Every Zendesk call is made with the signed-in person's own Zendesk token. There is no shared Zendesk credential in a deployed target, so Zendesk attributes every change to the agent and applies their role, group and brand restrictions. This is the main architectural difference from vitally-mcp, which calls Vitally with one shared key.
 - **Two OAuth relationships, never mixed:** Entra signs people in to *this server* (`/oauth/*`, unchanged from vitally-mcp); Zendesk OAuth lets the server act *as them* (`/zendesk/connect`, `/zendesk/callback`).
 - **Streamable HTTP transport** (MCP 2026-07-28), stateless, on `ModelContextProtocol.AspNetCore`.
@@ -394,8 +394,8 @@ timeline events can also name it `Copilot`. The commands above and the hook acce
 `--auto` is for Dependabot only, which carries no human review.
 
 **This is enforced mechanically, not just documented.** `.claude/hooks/pre-merge-copilot-gate.sh` is a
-`PreToolUse` hook, registered in `.claude/settings.json` under the `Bash` matcher twice — with
-`if: "Bash(gh pr merge*)"` and with `if: "Bash(gh api*)"` — that **denies** a merge (`gh pr merge`, or
+`PreToolUse` hook, registered in `.claude/settings.json` under the `Bash` matcher with
+`if: "Bash(*gh*)"`, that **denies** a merge (`gh pr merge`, or
 `gh api` reaching `pulls/<n>/merge` with any method but GET) unless Copilot is not pending, its
 latest review's `commit_id` equals the head, and unresolved threads are zero. A GraphQL merge
 mutation is refused outright. It exempts Dependabot and **fails closed** — including if
@@ -404,6 +404,10 @@ from `searledan/dansearle.co.uk`, then moved to REST on 2026-10-28 (#2) after `s
 #484: it resolves the repo from the `origin` remote, reads the PR, its timeline and its reviews over
 REST, and reads review threads from the cloud session's `ccr/review_threads` route when
 `CLAUDE_CODE_REMOTE` is set and through GraphQL locally (REST has no thread-resolution state).
+The `ccr` route takes no paging parameters and sends no `Link` header (`per_page=1`, `page=2`,
+`first=2` and `limit=2` each returned all eight threads on PR #1, 2026-11-04, #12), so nothing says
+whether a long PR's list is complete; the hook therefore requires every review comment REST returns
+(paginated) to appear in some thread's `comment_ids`, and denies when one does not.
 `.github/scripts/tests/pre-merge-copilot-gate.test.sh` runs it against stub `gh` and `git` in CI,
 the allow path included; deleting either the head-review or the pin check makes it fail.
 
@@ -425,13 +429,32 @@ Caveats worth knowing before trusting it:
   <sha>` (seven characters or more) on `gh pr merge` — and denies a merge without one, given twice,
   or naming a different commit. That is not belt-and-braces: every other check here describes the
   moment the hook ran, and the merge happens afterwards.
-- **Run the merge as a standalone command — no pipes, no `;`, no `&&`, no quotes.** The hook refuses
-  anything with quotes or shell metacharacters, because it cannot read those with certainty.
-- The `if` filters match the command text, so *any* Bash call starting `gh api` or containing
-  `gh pr merge` runs the hook — including a heredoc that merely mentions one, which it then denies.
-  For a `gh api` call that is not a merge it allows at once, without a network call. Testing the hook
-  or editing text that quotes a merge command means doing it from a script file rather than inline.
-  Over-matching is the safe direction; don't loosen it.
+- **Run the merge as a standalone command, starting with `gh`, on one line — no pipes, no `;`, no
+  `&&`, no quotes, no `#`, no braces other than `{owner}`/`{repo}`.** The hook refuses any command
+  naming `gh` and `merge` that contains those, because it cannot read it with certainty.
+- **The filter is `Bash(*gh*)` because `if` matches a prefix.** Claude Code compares `if` with the
+  start of each subcommand, after stripping leading `VAR=value` assignments and splitting `&&`/`;`/`|`
+  chains. Reproduced on 2026-11-04 (#12) with harmless `gh pr merge --help` calls: under the old
+  `Bash(gh pr merge*)` and `Bash(gh api*)` filters, `GH_HOST=github.com gh …` and `cd . && gh …`
+  reached the hook, but `command gh …`, `env gh …` and `/usr/local/bin/gh …` ran without it. Under
+  `Bash(*gh*)` all three reached it — the change to `if` took effect without a restart. The hook's
+  own step 1 then decides, coarsely on purpose: a command is a **candidate** when `gh` and `merge`
+  both appear as words anywhere in it, in any case, after quotes and backslashes are removed. A
+  candidate must be written plainly — no quotes, `#`, line breaks or tabs, braces other than
+  `{owner}`/`{repo}`, commas or shell metacharacters — and be `gh pr merge …` or
+  `gh api … pulls/<n>/merge …` from its first word; anything else is denied, not parsed. Spotting
+  bypass spellings one at a time lost repeatedly on #46 (`/usr/local/bin/gh`, `merge>log`, a `#`
+  comment carrying another PR's pin, a newline joining two commands, `${IFS}` and brace expansion,
+  `gh pr -R x merge`), which is why. So a path to gh, `env gh`, `command gh` or `GH_HOST=… gh` is
+  refused for a merge, and any Bash call whose text names `gh` and `merge` as words — a heredoc, a
+  commit message, `grep -n gh.*merge` — is denied. For anything that is not a
+  merge it allows at once, without a network call; but because every such call now runs `jq`,
+  `sed` and `awk`, a broken one of those denies every Bash call mentioning `gh`, not only merges.
+  Testing the hook or editing text that quotes a merge command means doing it from a script file
+  rather than inline. Over-matching is the safe direction; don't loosen it. The `if` filter itself
+  is covered only by the live check above, not by the CI test, which calls the hook directly. It
+  guards against a mistaken merge, not a determined one: a command that never spells both words (a
+  shell variable, `xargs gh <file`, a `gh` alias, `curl` to the API) is invisible to it.
 - **The REST reviews list can lag** (above). The lag only makes the gate deny a merge it would allow;
   wait and re-check.
 
@@ -665,7 +688,7 @@ Zendesk ──302──> /zendesk/callback?code&state ──> exchange code ─�
 
 1. **RBAC backstop** — `ToolAuthorizer.EnsureAuthorizedAsync(verb)`: GET → read, POST/PUT/PATCH → write, DELETE → delete. Tools keep that mapping faithful: reads (macro preview included) are GETs, and **a write tool never issues a DELETE** — `Add_user_to_organization` moves a user with a `PUT`, for instance — so the write tier never needs the delete tier.
 2. **Credential** — the caller's own `Authorization` header from `ZendeskCredentialProvider`, per request; the shared `HttpClient` is never mutated.
-3. **Audit** — `LogAction` per upstream call; record ids captured from the **raw** body by `AuditRecordIds` before any tool reshapes it.
+3. **Audit** — `LogAction` per upstream call; record ids captured from the **raw** body by `AuditRecordIds` before any tool reshapes it, or, when the body names none, from the request URL or a bulk update's request body (below).
 4. **Errors** — a non-2xx becomes `HttpRequestException` carrying Zendesk's body (truncated to 1 KB), which `ToolErrorResult` surfaces: `{"error":"RecordInvalid","details":…}` is what the model needs to correct its call. The server-side record logs status and resource type only.
 
 **Credential boundaries.** The base URL decides where the caller's token goes, and tool arguments can come from a model that has just read untrusted ticket content:
@@ -675,7 +698,9 @@ Zendesk ──302──> /zendesk/callback?code&state ──> exchange code ─�
 - Inlined article images are capped at 2 MB each and 8 MB per call, and only in the main body — a base64 copy per translation per image could otherwise cost gigabytes on the single replica.
 - `ZendeskService.Segment()` escapes caller strings used in paths; `BuildUrl` escapes every query value.
 
-**`AuditRecordIds` for Zendesk shapes:** ids are numbers (rendered as raw text); the primary collection is the first array of objects in the body (`tickets`, `results`, `articles` — Zendesk serialises it before sideloads such as `users`), `meta`/`links` ignored; a single record is bare or wrapped (`{"ticket":{…}}`). The mutation-URL fallback accepts only a **numeric** last segment — Zendesk paths also end in locales and collection names, and recording `en-gb` as a record id would be a fabricated identifier.
+**`AuditRecordIds` for Zendesk shapes:** ids are numbers (rendered as raw text); the primary collection is the first array of objects in the body (`tickets`, `results`, `articles` — Zendesk serialises it before sideloads such as `users`), `meta`/`links` ignored; a single record is bare or wrapped (`{"ticket":{…}}`). The mutation-URL fallback accepts only a **numeric** last segment — Zendesk paths also end in locales and collection names, and recording `en-gb` as a record id would be a fabricated identifier. A bulk update answers with a background job rather than the records, so for `PUT …/update_many` the last fallback reads the ids from the request body's `{"tickets":[{"id":…}]}` (all whole numbers or nothing; `ZendeskService` passes the body's JSON to it). Those are the tickets the write was *sent* for, not proof each changed. A `job_status` is never read as a record: its own id is a job token, so only a finished job's `results[].id` count.
+
+**Bulk updates.** `Bulk_update_tickets` follows Swifteq's `bulk_update_tickets` schema (read 2026-11-04): `ticket_ids` with `changes`, or `tickets` with a change per entry (`changes` then adds to each; a field in both is an error). It takes no comment, CC or attachment: those stay with `Update_ticket`. Without `confirmation` it previews: one `show_many` read, each ticket as `will_change` (`from`/`to` per field), `unchanged` or `cannot_change` (missing, hidden, or closed with anything but tags), and a `confirmation`. That is an HMAC, under a key held only in process memory, over the caller, the normalised batch (order-free: tickets, fields and tags sorted), `solve_incidents` and every ticket's `updated_at`, valid 30 minutes. A write without it, with a different batch, or after any ticket changed is refused; a restart means previewing again. The write is one `PUT /api/v2/tickets/update_many` with `{"tickets":[…]}`, each entry carrying only what differs plus `safe_update`/`updated_stamp`, and tags as the whole new list from that read (the per-entry form's handling of `additional_tags` is undocumented, and the single-ticket PUT ignores it). It then polls `job_statuses/{id}` every `JobStatusPollInterval` up to `MaxJobStatusPolls` times; a failure while polling is reported as `unknown`, never thrown, and the caller's cancellation no longer applies, since the write has gone. A ticket counts as `changed` only when the job reports success **and** a fresh `show_many` shows the change, otherwise `failed` or `not_confirmed`, and `undo` gives the previous values in the `tickets` shape (the custom status where the ticket had one). What it cannot restore is warned about and left out: a return to New, an unset priority, incidents a solved problem solved, a problem link a type change dropped; an entry with nothing left is omitted, because passed back it would be refused. Solving a problem ticket that has unsolved linked incidents needs `solve_incidents`, as in Swifteq and `Update_ticket`; each problem ticket being solved costs one paged read of its incidents.
 
 **Paging.** Tools that page for the caller pass Zendesk's cursor through (`after_cursor` → `page[after]`, `pagination_info {has_more, next_cursor, page_size}`). `GetAllPagesAsync` pages on the server's behalf (sideloads merged) up to `MaxAutoPageFetches`, marking the audit record truncated when it stops early. A page envelope it cannot read (not an object, or a `meta` of the wrong shape) throws `ZendeskResponseFormatException` rather than returning a silently short result; an optional `beforeNextPage` callback runs before each later page and may throw to stop paging (`Bulk_get_ticket_conversations` stops at its deadline that way, never cancelling a request in flight). Analytics tools read at most `MaxAnalyticsTickets` tickets and refuse beyond it, saying how to split the range.
 
@@ -708,7 +733,7 @@ Ticket comments, article bodies and user fields are written by customers and can
 | Area | File | Tools |
 |---|---|---|
 | Connection | `ConnectionTools.cs` | `Get_zendesk_connection`, `Get_zendesk_connect_link`, `Disconnect_zendesk` |
-| Tickets | `TicketsTools.cs`, `TicketConversationsTools.cs`, `TicketAttachmentsTools.cs` | `Search_tickets`, `Count_tickets`, `Get_ticket`, `Get_ticket_conversation`, `Bulk_get_ticket_conversations`, `Create_ticket`, `Update_ticket`, `Get_ticket_attachment`, `Request_ticket_attachment_upload` |
+| Tickets | `TicketsTools.cs`, `TicketsBulkTools.cs`, `TicketConversationsTools.cs`, `TicketAttachmentsTools.cs` | `Search_tickets`, `Count_tickets`, `Get_ticket`, `Get_ticket_conversation`, `Bulk_get_ticket_conversations`, `Create_ticket`, `Update_ticket`, `Bulk_update_tickets`, `Get_ticket_attachment`, `Request_ticket_attachment_upload` |
 | Reporting | `AnalyticsTools.cs`, `SatisfactionTools.cs`, `TicketSla.cs` | `Get_ticket_metrics_summary`, `Get_sla_summary`, `Get_sla_queue`, `Get_satisfaction_ratings` |
 | Macros | `MacrosTools.cs` | `Search_macros`, `Preview_macro`, `Apply_macro`, `Create_macro`, `Update_macro`, `Set_macros_active` |
 | People | `UsersTools.cs`, `OrganizationsTools.cs` | `Search_users`, `Find_agent_by_name`, `Search_organizations`, `Add_user_to_organization` |
