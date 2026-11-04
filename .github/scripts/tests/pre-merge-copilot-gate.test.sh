@@ -89,21 +89,34 @@ new_case; unset CLAUDE_CODE_REMOTE; expect_allow "local session reads threads th
 new_case; echo '{"number":7,"head":{"sha":"'"$HEAD_SHA"'"},"user":{"login":"dependabot[bot]"}}' >"$F/${REPO}_pulls_7.json"
 rm "$F/${REPO}_pulls_7_reviews.json"; expect_allow "Dependabot is exempt (no reviews needed)" "$REST"
 
-# --- gh reached by another spelling (the settings.json filter is `Bash(*gh*)`; step 1 decides) ----
-new_case; expect_allow "absolute path to gh, pinned" "/usr/local/bin/gh api -X PUT repos/{owner}/{repo}/pulls/7/merge -f merge_method=squash -f sha=$HEAD_SHA"
-new_case; expect_deny "absolute path to gh pr merge, unpinned" "/usr/local/bin/gh pr merge 7 --squash" "--match-head-commit $HEAD_SHA"
-new_case; expect_deny "command gh api, unpinned" "command gh api -X PUT repos/{owner}/{repo}/pulls/7/merge -f merge_method=squash" "add -f sha=$HEAD_SHA"
-new_case; expect_deny "env gh pr merge, unpinned" "env gh pr merge 7 --squash" "--match-head-commit $HEAD_SHA"
-new_case; expect_deny "GH_HOST=… gh api, unpinned" "GH_HOST=github.com gh api -X PUT repos/{owner}/{repo}/pulls/7/merge -f merge_method=squash" "add -f sha=$HEAD_SHA"
+# --- gh reached by another spelling: a candidate must be one of the two forms, written plainly --
+PLAIN="written from its first word"
+META="cannot read it with certainty"
+new_case; expect_deny "absolute path to gh, pinned" "/usr/local/bin/gh api -X PUT repos/{owner}/{repo}/pulls/7/merge -f merge_method=squash -f sha=$HEAD_SHA" "$PLAIN"
+new_case; expect_deny "absolute path to gh pr merge" "/usr/local/bin/gh pr merge 7 --squash" "$PLAIN"
+new_case; expect_deny "command gh api" "command gh api -X PUT repos/{owner}/{repo}/pulls/7/merge -f merge_method=squash" "$PLAIN"
+new_case; expect_deny "env gh pr merge" "env gh pr merge 7 --squash" "$PLAIN"
+new_case; expect_deny "GH_HOST=… gh api" "GH_HOST=github.com gh api -X PUT repos/{owner}/{repo}/pulls/7/merge -f merge_method=squash" "$PLAIN"
+new_case; expect_deny "gh pr -R x merge" "gh pr -R acme/widget merge 7 --squash" "$PLAIN"
+new_case; expect_deny "gh pr --repo=x merge" "gh pr --repo=acme/widget merge 7 --squash" "$PLAIN"
+new_case; expect_deny "uppercase GH" "GH pr merge 7 --squash" "$PLAIN"
 new_case; expect_allow "a command that merely contains gh" "git log --grep=ghost"
 new_case; expect_allow "a word ending in gh is not gh" "sigh pr merge 7"
-for spelt in '\gh pr merge 7 --squash' '"gh" pr merge 7 --squash' "'gh' api -X PUT repos/{owner}/{repo}/pulls/7/merge" 'true;gh pr merge 7 --squash' '(gh pr merge 7 --squash)' 'x|gh pr merge 7' "true&&gh api -X PUT repos/{owner}/{repo}/pulls/7/merge -f merge_method=squash"; do
-	new_case; expect_deny "gh after a metacharacter: $spelt" "$spelt" "quotes or shell metacharacters"
-done
-for spelt in 'gh pr merge>/tmp/merge.log --squash' 'gh pr merge;' '(gh pr merge)' 'gh pr "merge" 7' 'g\h pr merge 7' "gh api -X PUT repos/{owner}/{repo}/pulls/7/merge>/dev/null"; do
-	new_case; expect_deny "a delimiter or quote around the merge word: $spelt" "$spelt" "quotes or shell metacharacters"
-done
 new_case; expect_allow "a word starting with merge is not merge" "gh pr merged-list"
+new_case; expect_allow "gh without merge is not gated" "gh pr view 7 --json mergeable"
+NL=$'\n'; TAB=$'\t'
+for spelt in '\gh pr merge 7 --squash' '"gh" pr merge 7 --squash' "'gh' api -X PUT repos/{owner}/{repo}/pulls/7/merge" \
+	'true;gh pr merge 7 --squash' '(gh pr merge 7 --squash)' 'x|gh pr merge 7' "true&&gh api -X PUT repos/{owner}/{repo}/pulls/7/merge -f merge_method=squash" \
+	'gh pr merge>/tmp/merge.log --squash' 'gh pr merge;' '(gh pr merge)' 'gh pr "merge" 7' 'g\h pr merge 7' "gh api -X PUT repos/{owner}/{repo}/pulls/7/merge>/dev/null" \
+	"gh api -X PUT repos/{owner}/{repo}/pulls/8/merge -f merge_method=squash #gh pr merge 7 --match-head-commit $HEAD_SHA" \
+	"gh pr merge 8 --squash #gh pr merge 7 --squash --match-head-commit $HEAD_SHA" \
+	"gh api -X PUT repos/{owner}/{repo}/pulls/7/merge -f merge_method=squash # -f sha=$HEAD_SHA" \
+	"gh api -X PUT repos/{owner}/{repo}/pulls/8/merge -f merge_method=squash${NL}gh pr merge 7 --squash --match-head-commit $HEAD_SHA" \
+	"gh pr merge 8 --squash${NL}gh pr merge 7 --squash --match-head-commit $HEAD_SHA" \
+	"gh${TAB}pr${TAB}merge 7 --squash" \
+	'gh${IFS}pr${IFS}merge 7 --squash' 'gh {pr,merge} 7 --squash' '{gh,pr,merge} 7 --squash' 'gh {api,-X,PUT,repos/x/y/pulls/7/merge}'; do
+	new_case; expect_deny "a merge not written plainly: $spelt" "$spelt" "$META"
+done
 
 # --- not a merge: no gating -----------------------------------------------------------------------
 new_case; expect_allow "an unrelated gh api call" "gh api repos/{owner}/{repo}/pulls/7"

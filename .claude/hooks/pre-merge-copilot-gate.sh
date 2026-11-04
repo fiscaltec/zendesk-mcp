@@ -54,27 +54,42 @@ COPILOT_LOGINS='["Copilot","copilot-pull-request-reviewer[bot]","copilot-pull-re
 # 1. Is this a merge at all? (Bash regex — no external grep, so a broken grep can't fail open.)
 # ---------------------------------------------------------------------------------------------
 form=""
-# Detection reads a copy with quotes and backslashes removed, so `"gh" pr merge`, `g\h pr merge`
-# and `gh pr "merge"` are seen as the shell runs them. A merge word counts when anything that
-# cannot continue a word bounds it on both sides — a space, `/`, `;`, `&`, `|`, `(`, `)`, `<`, `>`
-# — not only a space: `(gh pr merge)` and `gh pr merge>log` run gh too. Step 2 then refuses
-# every such form for its metacharacters, on the original command. Over-matching only denies;
-# under-matching allowed an unpinned merge (#12, and Copilot on #46).
+# Spotting every shell spelling of a merge one at a time has lost twice (#12, Copilot on #46,
+# then a `#` comment, a newline, `${IFS}`, brace expansion and `gh pr -R x merge` in the
+# pre-review). So detection is deliberately coarse, and reading is deliberately strict:
+#   * a command is a CANDIDATE when `gh` and `merge` both appear as words anywhere in it, in any
+#     case, after quotes and backslashes are removed (`"gh"`, `g\h`, `GH`, `{gh,pr,merge}`);
+#   * a candidate must then be written plainly — no quotes, `#`, control characters (newline,
+#     tab), braces other than gh's `{owner}`/`{repo}` placeholders, commas or shell
+#     metacharacters — and be one of the two gated forms from its first word.
+# Anything else that names gh and merge is denied rather than parsed. Over-matching only denies.
 probe=${cmd//[\"\'\\]/}
+probe=${probe,,}
 nw='[^[:alnum:]_-]'
-if [[ "$probe" =~ (^|$nw)gh[[:space:]]+pr[[:space:]]+merge($nw|$) ]]; then
+[[ "$probe" =~ (^|$nw)gh($nw|$) ]] || allow
+
+# A GraphQL merge mutation is a merge by another route: refuse it rather than parse it. A query
+# read from a file (-F query=@file) or a body (--input) could carry one unseen.
+[[ "$probe" =~ (mergepullrequest|enablepullrequestautomerge) ]] \
+	&& deny "merging through a GraphQL mutation is not gated; use the REST form: gh api -X PUT repos/{owner}/{repo}/pulls/<n>/merge -f merge_method=squash -f sha=<head> (failing closed)"
+[[ "$probe" =~ (^|$nw)graphql($nw|$) ]] && [[ "$probe" =~ (=@|[[:space:]]--input([[:space:]=]|$)) ]] \
+	&& deny "a GraphQL request whose query comes from a file or --input cannot be checked for a merge mutation; pass the query inline (failing closed)"
+
+[[ "$probe" =~ (^|$nw)merge($nw|$) ]] || allow
+
+plain=${cmd//\{owner\}/}
+plain=${plain//\{repo\}/}
+case "$plain" in
+*[\"\'\`\$\;\|\&\<\>\(\)\\\#\{\},]* | *[[:cntrl:]]*)
+	deny "the command names gh and merge but contains quotes or shell metacharacters (a comment, a line break and braces count), so this gate cannot read it with certainty. Write the merge plainly on one line, e.g. gh api -X PUT repos/{owner}/{repo}/pulls/<n>/merge -f merge_method=squash -f sha=<head> (failing closed)" ;;
+esac
+if [[ "$cmd" =~ ^[[:space:]]*gh[[:space:]]+pr[[:space:]]+merge([[:space:]]|$) ]]; then
 	form="gh-pr-merge"
-elif [[ "$probe" =~ (^|$nw)gh[[:space:]]+api($nw|$) ]]; then
-	# A GraphQL merge mutation is a merge by another route: refuse it rather than parse it.
-	[[ "$probe" =~ (mergePullRequest|enablePullRequestAutoMerge) ]] \
-		&& deny "merging through a GraphQL mutation is not gated; use the REST form: gh api -X PUT repos/{owner}/{repo}/pulls/<n>/merge -f merge_method=squash -f sha=<head> (failing closed)"
-	# A GraphQL query read from a file (-F query=@file) or a body (--input) is invisible here, so
-	# it could carry that mutation unseen: refuse it rather than allow what cannot be read.
-	[[ "$probe" =~ (^|[[:space:]])graphql([[:space:]]|$) ]] && [[ "$probe" =~ (=@|[[:space:]]--input([[:space:]=]|$)) ]] \
-		&& deny "a GraphQL request whose query comes from a file or --input cannot be checked for a merge mutation; pass the query inline (failing closed)"
-	[[ "$probe" =~ pulls/[^[:space:]]*/merge ]] && form="rest-merge"
+elif [[ "$cmd" =~ ^[[:space:]]*gh[[:space:]]+api[[:space:]] ]] && [[ "$cmd" =~ pulls/[^[:space:]]*/merge ]]; then
+	form="rest-merge"
+else
+	deny "the command names gh and merge but is not one of the two gated forms written from its first word (gh pr merge … or gh api … pulls/<n>/merge …); a path to gh, a wrapper (env, command, exec), a flag before merge or any other shape is refused. Write it plainly, e.g. gh api -X PUT repos/{owner}/{repo}/pulls/<n>/merge -f merge_method=squash -f sha=<head> (failing closed)"
 fi
-[ -n "$form" ] || allow
 
 # ---------------------------------------------------------------------------------------------
 # 2. Read the command with certainty or not at all.
