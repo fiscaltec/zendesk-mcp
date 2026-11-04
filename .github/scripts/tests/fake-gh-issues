@@ -12,6 +12,11 @@
 #                 for a login it cannot assign)
 #   lose-unassigns optional; DELETE .../assignees reports success but changes nothing
 #   no-repo       optional; GET repos/{owner}/{repo} answers 404 (wrong or invisible repository)
+#   lose-removes  optional; DELETE .../labels/<name> reports success but changes nothing
+#   is-pr         optional; the issue is a pull request (GET carries a pull_request key)
+#
+# Only issue 11 exists; any other number answers 404, so a script addressing the wrong issue fails.
+# DELETE .../labels/ with an empty name removes EVERY label, as GitHub's endpoint does.
 #   stderr-notice optional; every issue/label call prints a notice on stderr and still succeeds
 #
 # Like real gh, -f with no -X means POST. Label and login lookups are case-insensitive, as GitHub's
@@ -53,7 +58,8 @@ field() { local f; for f in ${fields[@]+"${fields[@]}"}; do [[ "$f" == "$1="* ]]
 lines_json() { jq -Rn --arg k "$2" '[inputs | select(length > 0) | {($k): .}]' < "$1"; }
 issue_json() {
 	jq -n --argjson l "$(lines_json "$D/labels" name)" --argjson a "$(lines_json "$D/assignees" login)" \
-		'{number: 1, labels: $l, assignees: $a}'
+		--argjson pr "$([ -f "$D/is-pr" ] && echo true || echo false)" \
+		'{number: 11, labels: $l, assignees: $a} + (if $pr then {pull_request: {}} else {} end)'
 }
 remove_line() { grep -vxF -- "$2" "$1" > "$1.tmp"; mv "$1.tmp" "$1"; }
 out() { jq -r "$expr" <<< "$1"; }
@@ -66,6 +72,9 @@ fi
 prefix='repos/{owner}/{repo}/'
 [[ "$path" == "$prefix"* ]] || { echo "fake-gh-issues: unexpected path $path" >&2; exit 2; }
 rest=${path#"$prefix"}
+if [[ "$rest" == issues/* ]] && ! [[ "$rest" =~ ^issues/11(/|$) ]]; then
+	echo "gh: Not Found (HTTP 404)" >&2; exit 1
+fi
 
 case "$method $rest" in
 "GET labels/"*)
@@ -84,8 +93,9 @@ case "$method $rest" in
 	out "$(lines_json "$D/labels" name)" ;;
 "DELETE issues/"+([0-9])"/labels/"*)
 	name=$(urldecode "${rest##*/labels/}")
+	if [ -z "$name" ]; then : > "$D/labels"; out '[]'; exit 0; fi
 	grep -qxF -- "$name" "$D/labels" || { echo "gh: Label does not exist (HTTP 404)" >&2; exit 1; }
-	remove_line "$D/labels" "$name"
+	[ -f "$D/lose-removes" ] || remove_line "$D/labels" "$name"
 	out "$(lines_json "$D/labels" name)" ;;
 "POST issues/"+([0-9])"/assignees")
 	if [ ! -f "$D/lose-assigns" ]; then

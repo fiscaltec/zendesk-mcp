@@ -17,8 +17,8 @@ Hard rules, each learnt the hard way:
 
 - **REST only — `gh api`, never `gh issue …`.** `gh issue create/edit/view` are GraphQL underneath and
   fail in a cloud session with `HTTP 403: GitHub GraphQL is not available from Claude Code sessions`.
-  `gh api` works in both cloud and local sessions. (The GitHub MCP connector also works in the cloud,
-  but `CLAUDE.md` standardises on `gh`.)
+  `gh api` works in both cloud and local sessions. Use it rather than the GitHub MCP connector's
+  tools, so one set of commands works everywhere.
 - **Never put customer data in an issue** — no ticket, user or organisation content, names, email
   addresses, subjects or comment text. Issues are visible to everyone with repository access and
   outlive the data. Describe *shapes* ("a ticket whose `via.channel` is `api` and has no
@@ -56,9 +56,9 @@ Settle these before drafting. Ask the person only for what you cannot establish 
    |---|---|---|---|
    | `feature` | a new tool or capability | `feature.yml` | `feat:` |
    | `bug` | something does not work as documented | `bug.yml` | `fix:` |
-   | `tech-debt` | refactoring, upgrades, test gaps, tooling, clean-up | `tech-debt.yml` | `chore:` (or `refactor:`) |
+   | `tech-debt` | refactoring, upgrades, test gaps, tooling, clean-up | `tech-debt.yml` | `chore:` (or `refactor:`; `test:` for test-only work, as #8) |
    | `security` | hardening, a vulnerability, a compliance gap | `security.yml` | `fix:` |
-   | `ops` | Azure, deployment, configuration, Entra | `ops.yml` | `chore:` (or `ci:`) |
+   | `ops` | Azure, deployment, configuration, Entra | `ops.yml` | `chore:` (or `ci:`; `test:` for live validation work, as #4–#6) |
    | `documentation` | prose for **humans**: `CLAUDE.md`, `README.md`, `ACCESS.md`, `docs/` | `documentation.yml` | `docs:` |
    | `content` | copy an **LLM** reads: tool `[Description]` and `Title` values, `ZendeskServerInstructions.Text` | `content.yml` | `docs:` |
    | `ux` | the experience of a person using the server (sign-in, connect pages, error wording they see) | none — use the tech-debt sections | `feat:` or `fix:` |
@@ -170,7 +170,9 @@ and labels so a title starting with `@` or a digit is not reinterpreted.
 is defined enough to start and nothing blocks it; `status: blocked` if it waits on another issue or a
 person — then add a comment saying exactly what it waits for. Every label must already exist:
 **a label GitHub does not know is silently created**, so check a spelling you are unsure of with
-`gh api 'repos/{owner}/{repo}/labels/<url-encoded name>'` first. Do not assign anyone at creation;
+`gh api 'repos/{owner}/{repo}/labels/<url-encoded name>' --jq .name` first. GitHub's lookup ignores
+case, so the printed name must equal what you will send, character for character. Do not assign
+anyone at creation;
 assignment follows the status (`CLAUDE.md` → *Lifecycle*).
 
 ## Step 4 — Verify
@@ -195,8 +197,9 @@ Fix anything wrong with `gh api -X PATCH 'repos/{owner}/{repo}/issues/<number>' 
 ## Afterwards — moving the issue through its lifecycle
 
 Status changes go through `.claude/scripts/issue-status.sh`, which works over REST, adds the new
-label before removing the old one, refuses a label the repository lacks, assigns the owner while the
-issue is `in-progress` and unassigns otherwise, and reads the result back:
+label before removing the old one, refuses a label the repository lacks, refuses a pull request
+number, assigns the maintainer (`$ISSUE_ASSIGNEE`, default `searledan`) while the issue is
+`in-progress` and unassigns otherwise, and reads the result back:
 
 ```bash
 bash .claude/scripts/issue-status.sh <number> in-progress   # starting work: assigns searledan

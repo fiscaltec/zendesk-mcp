@@ -145,14 +145,14 @@ that assumes prior conversation is an issue that cannot be worked.
 3. Branch `<cc-type>/<short-description>`, where `<cc-type>` is the **Conventional-Commits** type used
    in the PR title — not the issue's type label. They map loosely: `feature` → `feat/…`,
    `documentation`/`content` → `docs/…`, `tech-debt` → `chore/…` or `refactor/…`, `bug` → `fix/…`,
-   `ops` → `ci/…` or `chore/…`.
+   `ops` → `ci/…` or `chore/…`; validation and test-only work of either type → `test/…`.
 4. Reference `#<n>` in commits where relevant.
 5. Open the PR with **`Closes #<n>`**. `.github/workflows/pr-title.yml` enforces the
    Conventional-Commits prefix on the PR *title*, and `main` takes squash merges — so the PR title
    becomes the commit subject on `main`. On squash-merge the issue auto-closes; flip it to
    `status: complete` then (`bash .claude/scripts/issue-status.sh <n> complete`), so a finished issue ends up *closed + `status: complete`*, distinguishable
    from one closed as won't-fix or duplicate.
-6. If work stalls, `bash .claude/scripts/issue-status.sh <n> blocked` (which unassigns the owner) and
+6. If work stalls, `bash .claude/scripts/issue-status.sh <n> blocked` (which unassigns the maintainer) and
    comment exactly what it is waiting for.
 
 **What actually gates a merge** — the `Secure branches` ruleset (id `26057156`), applied here on

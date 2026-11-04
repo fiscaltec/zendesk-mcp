@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Moves a GitHub issue to one `status:` label, and assigns or unassigns the issue owner to match,
+# Moves a GitHub issue to one `status:` label, and assigns or unassigns the maintainer to match,
 # over REST, so it works in a Claude Code cloud session (where `gh issue edit` is GraphQL and
 # refused). Ported from searledan/spendy's `.claude/scripts/github.mjs issue-status`; the assignee
 # rule is this repository's (CLAUDE.md -> GitHub issues -> Lifecycle).
@@ -54,7 +54,13 @@ command -v jq >/dev/null || die "jq is required"
 command -v gh >/dev/null || die "gh is required"
 
 target="status: $status"
-enc() { jq -rn --arg s "$1" '$s | @uri'; }
+# URL-encodes one path segment. An empty result is fatal: `DELETE .../labels/` with no name is
+# GitHub's "remove every label" endpoint, so a failed encoding must never reach a request.
+enc() {
+	local e
+	e=$(jq -rn --arg s "$1" '$s | @uri') && [ -n "$e" ] || die "could not URL-encode '$1'"
+	printf '%s' "$e"
+}
 # Status labels of an issue, lower-cased prefix match; one per line.
 STATUS_LABELS='.labels[].name | select(ascii_downcase | startswith("status: "))'
 
@@ -68,7 +74,8 @@ nwo=$(gh api "$repo" --jq .full_name) && [ -n "$nwo" ] \
 # stderr goes to a file, so a notice gh prints on a successful call cannot pollute the name.
 errf=$(mktemp) || die "could not create a temporary file"
 trap 'rm -f "$errf"' EXIT
-if ! got=$(gh api "$repo/labels/$(enc "$target")" --jq .name 2>"$errf"); then
+target_seg=$(enc "$target") || exit 1
+if ! got=$(gh api "$repo/labels/$target_seg" --jq .name 2>"$errf"); then
 	if grep -q "HTTP 404" "$errf"; then
 		die "the label '$target' does not exist in $nwo; refusing to add it, which would create it"
 	fi
@@ -76,16 +83,19 @@ if ! got=$(gh api "$repo/labels/$(enc "$target")" --jq .name 2>"$errf"); then
 fi
 [ "$got" = "$target" ] || die "$nwo's label is spelt '$got', not '$target'; refusing to continue"
 
-current=$(gh api "$repo/issues/$issue" --jq "$STATUS_LABELS") \
-	|| die "could not read issue #$issue"
+# The issues endpoint also answers for pull requests; refuse those rather than relabel a PR.
+current=$(gh api "$repo/issues/$issue" \
+	--jq "if .pull_request then error(\"#$issue is a pull request\") else $STATUS_LABELS end") \
+	|| die "could not read issue #$issue, or it is a pull request"
 
 gh api -X POST "$repo/issues/$issue/labels" -f "labels[]=$target" --jq '.[].name' >/dev/null \
 	|| die "could not add '$target' to #$issue"
 
 while IFS= read -r name; do
 	[ -z "$name" ] || [ "$name" = "$target" ] && continue
-	gh api -X DELETE "$repo/issues/$issue/labels/$(enc "$name")" --jq '.[].name' >/dev/null \
-		|| die "added '$target' but could not remove '$name' from #$issue; it now has both -- re-run"
+	seg=$(enc "$name") || exit 1
+	gh api -X DELETE "$repo/issues/$issue/labels/$seg" --jq '.[].name' >/dev/null \
+		|| die "added '$target' but could not remove '$name' from #$issue; its labels are now uncertain -- re-run to correct"
 done <<< "$current"
 
 if [ -n "$assignee" ]; then

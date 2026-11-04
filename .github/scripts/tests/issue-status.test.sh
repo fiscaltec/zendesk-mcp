@@ -101,7 +101,7 @@ check "ISSUE_ASSIGNEE= makes no assignee call" '! calls | grep -q assignees'
 
 # ---------------------------------------------------------------- usage errors: no API call at all
 
-for args in "" "11" "11 done" "11 In-Progress" "abc ready" "0 ready" "11 ready extra"; do
+for args in "" "11" "11 done" "11 In-Progress" "abc ready" "0 ready" "11abc ready" "11/1 ready" "11 ready extra"; do
 	new_case $'bug\nstatus: ready' ''
 	# shellcheck disable=SC2086
 	run $args
@@ -201,7 +201,7 @@ check "a mixed-case status label is removed" '[ "$RC" = 0 ] && [ "$(labels)" = "
 new_case $'bug\nStatus: Blocked\nstatus: ready' ''
 echo 'DELETE repos/{owner}/{repo}/issues/11/labels/Status' > "$FAKE_GH_DIR/fail"
 run 11 in-progress
-check "a mixed-case status label that cannot be removed fails" '[ "$RC" = 1 ]'
+check "a mixed-case status label that cannot be removed fails at the removal" '[ "$RC" = 1 ] && grep -q "could not remove .Status: Blocked." <<< "$OUT"'
 
 # The per-call message for a refused removal, not only the read-back's.
 new_case $'bug\nstatus: ready' ''
@@ -238,7 +238,55 @@ check "an unreadable repository fails before any write, without blaming the labe
 
 new_case $'bug\nstatus: ready' ''
 run 11 in-progress
-check "the result names the repository reached" 'grep -q "^example/repo#11 -> status: in-progress" <<< "$OUT"'
+check "the result line is exact, assignees included" '[ "$OUT" = "example/repo#11 -> status: in-progress (assignees: searledan)" ]'
+
+# A removal that reports success but does not land: only the read-back's "exactly one" catches it.
+new_case $'bug\nstatus: ready' ''
+touch "$FAKE_GH_DIR/lose-removes"
+run 11 in-progress
+check "a removal that did not land fails on read-back" '[ "$RC" = 1 ] && grep -q "reads back with status label" <<< "$OUT"'
+
+# ISSUE_ASSIGNEE= on the in-progress path: no assignee call, and success.
+new_case $'bug\nstatus: ready' ''
+ISSUE_ASSIGNEE= run 11 in-progress
+check "ISSUE_ASSIGNEE= with in-progress succeeds without assigning" \
+	'[ "$RC" = 0 ] && [ "$(labels)" = "bug,status: in-progress" ] && [ -z "$(assignees)" ] && ! calls | grep -q assignees'
+
+# ISSUE_ASSIGNEE on the unassign path removes that login, not the default.
+new_case $'bug\nstatus: in-progress' $'searledan\nsomeone-else'
+ISSUE_ASSIGNEE=someone-else run 11 complete
+check "ISSUE_ASSIGNEE is honoured when unassigning" '[ "$RC" = 0 ] && [ "$(assignees)" = searledan ]'
+
+# A pull request number is refused before any write.
+new_case $'bug\nstatus: ready' ''
+touch "$FAKE_GH_DIR/is-pr"
+run 11 complete
+check "a pull request is refused before any write" \
+	'[ "$RC" = 1 ] && grep -q "pull request" <<< "$OUT" && ! calls | grep -qE "^(POST|DELETE)"'
+
+# A near-miss label is not a status label.
+new_case $'bug\nstatus:wip\nstatus: ready' ''
+run 11 in-progress
+check "a label like status:wip is left alone" '[ "$RC" = 0 ] && [ "$(labels)" = "bug,status: in-progress,status:wip" ]'
+
+# The label lookup is sent URL-encoded.
+new_case $'bug\nstatus: ready' ''
+run 11 in-progress
+check "the label lookup is URL-encoded" 'calls | grep -qF "GET repos/{owner}/{repo}/labels/status%3A%20in-progress"'
+
+# Encoding that yields nothing must never become DELETE .../labels/ (GitHub: remove every label).
+new_case $'bug\npriority: low\nstatus: ready' ''
+REALJQ=$(command -v jq)
+cat > "$CASE/bin/jq" <<EOF
+#!/usr/bin/env bash
+# Breaks @uri for one label name only; everything else is the real jq.
+if [ "\$*" = "-rn --arg s status: ready \\\$s | @uri" ]; then exit 0; fi
+exec "$REALJQ" "\$@"
+EOF
+chmod +x "$CASE/bin/jq"
+run 11 in-progress
+check "an empty encoding fails without removing every label" \
+	'[ "$RC" = 1 ] && grep -q "could not URL-encode" <<< "$OUT" && [ "$(labels)" = "bug,priority: low,status: in-progress,status: ready" ]'
 
 echo "issue-status: $pass passed, $fail failed"
 [ "$fail" = 0 ]
