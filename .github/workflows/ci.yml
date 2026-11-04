@@ -79,6 +79,12 @@ jobs:
         if: ${{ !cancelled() }}
         run: bash .github/scripts/tests/pre-merge-copilot-gate.test.sh
 
+      # The push and secret-file guards (.claude/hooks/guard-*.sh) never blocked anything while they
+      # read environment variables Claude Code does not set (#13); this feeds them real hook input.
+      - name: Test the guard hooks
+        if: ${{ !cancelled() }}
+        run: bash .github/scripts/tests/guard-hooks.test.sh
+
       - name: Upload test results
         if: always()
         uses: actions/upload-artifact@v7
