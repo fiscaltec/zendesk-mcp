@@ -701,4 +701,26 @@ public class MacrosToolsTests
 
         await act.Should().ThrowAsync<HttpRequestException>().WithMessage("*403*");
     }
+
+    // ---------------------------------------------------------------- MacroPlaceholders
+
+    [Fact]
+    public async Task RenderPlaceholders_DynamicContentAlone_IsInTheRequestersLanguage()
+    {
+        // Nothing else in the text names the requester, but dynamic content is chosen by their locale,
+        // so they are still fetched.
+        var (fake, zendesk) = Build(r => r.Path switch
+        {
+            "/api/v2/dynamic_content/items" => FakeResponse.Json(DynamicContent),
+            "/api/v2/users/show_many" => FakeResponse.Json("""{"users":[{"id":500,"name":"Ann Smith","locale_id":8}]}"""),
+            _ => FakeResponse.NotFound(),
+        });
+        using var _ = fake;
+
+        var rendered = await MacroPlaceholders.RenderAsync(zendesk, "<p>{{dc.refund_policy}}</p>", Parse("""{"id":42,"requester_id":500}"""), CancellationToken.None);
+
+        rendered.Html.Should().Be("<p>Rückerstattungen dauern zehn Tage</p>");
+        rendered.Unresolved.Should().BeEmpty();
+        fake.Requests.Single(r => r.Path == "/api/v2/users/show_many").Url.Query.Should().Contain("500");
+    }
 }

@@ -36,9 +36,11 @@ public static partial class MacroPlaceholders
         var used = matches.Select(m => m.Groups[1].Value.Trim()).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
         var lower = used.Select(u => u.ToLowerInvariant()).ToList();
 
-        // Fetch only what the text refers to.
+        // Fetch only what the text refers to. Dynamic content needs the requester too: its variant is
+        // chosen by their locale.
         var userIds = new List<long>();
-        if (lower.Any(u => u.StartsWith("ticket.requester.", StringComparison.Ordinal)) && ToolJson.Long(ticket["requester_id"]) is { } requesterId)
+        if (lower.Any(u => u.StartsWith("ticket.requester.", StringComparison.Ordinal) || u.StartsWith("dc.", StringComparison.Ordinal))
+            && ToolJson.Long(ticket["requester_id"]) is { } requesterId)
         {
             userIds.Add(requesterId);
         }
