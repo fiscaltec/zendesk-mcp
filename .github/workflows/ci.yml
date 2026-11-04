@@ -79,6 +79,27 @@ jobs:
         if: ${{ !cancelled() }}
         run: bash .github/scripts/tests/pre-merge-copilot-gate.test.sh
 
+      # The push and secret-file guards (.claude/hooks/guard-*.sh) never blocked anything while they
+      # read environment variables Claude Code does not set (#13); this feeds them real hook input.
+      - name: Test the guard hooks
+        if: ${{ !cancelled() }}
+        run: bash .github/scripts/tests/guard-hooks.test.sh
+
+      # macOS ships bash 3.2, where `set -u` treats an empty array as unbound: a crash there once let
+      # a push through (the hook now fails closed on any error), so the suite runs under 3.2 too.
+      - name: Test the guard hooks under bash 3.2
+        if: ${{ !cancelled() }}
+        run: >-
+          docker run --rm -v "$PWD:/w" -w /w bash:3.2
+          sh -c 'apk add --no-cache git jq >/dev/null && bash .github/scripts/tests/guard-hooks.test.sh'
+
+      # .claude/scripts/issue-status.sh moves issues between status labels over REST. A regression
+      # could leave an issue with no status or quietly create a stray label, so it is gated too.
+      # Runs against a stateful stub `gh`; needs only bash and jq.
+      - name: Test the issue-status script
+        if: ${{ !cancelled() }}
+        run: bash .github/scripts/tests/issue-status.test.sh
+
       - name: Upload test results
         if: always()
         uses: actions/upload-artifact@v7
