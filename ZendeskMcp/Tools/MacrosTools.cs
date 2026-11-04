@@ -433,7 +433,7 @@ public static class MacrosTools
             return null;
         }
 
-        if (me is null)
+        if (me is not { } myId)
         {
             return null;
         }
@@ -442,8 +442,9 @@ public static class MacrosTools
         foreach (var audit in audits.Items)
         {
             if (RepeatGuard.Timestamp(audit["created_at"]) is { } at && at >= from
-                && ToolJson.Long(audit["author_id"]) == me
-                && (audit["events"] as JsonArray ?? []).Any(e => ToolJson.String(e?["type"]) == "AgentMacroReference" && ToolJson.Long(e?["macro_id"]) == macroId))
+                && ToolJson.Long(audit["author_id"]) == myId
+                && (audit["events"] as JsonArray ?? []).OfType<JsonNode>()
+                    .Any(e => ToolJson.String(e["type"]) == "AgentMacroReference" && ToolJson.Long(e["macro_id"]) == macroId))
             {
                 return true;
             }

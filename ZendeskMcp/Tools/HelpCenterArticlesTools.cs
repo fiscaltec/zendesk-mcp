@@ -375,19 +375,19 @@ public static partial class HelpCenterArticlesTools
             return (false, null);
         }
 
-        if (me is null)
+        if (me is not { } myId)
         {
             return (false, null);
         }
 
         var from = since - RepeatGuard.ClockSkew;
-        foreach (var candidate in page["articles"] as JsonArray ?? [])
+        foreach (var candidate in (page["articles"] as JsonArray ?? []).OfType<JsonNode>())
         {
-            if (string.Equals(ToolJson.String(candidate?["title"])?.Trim(), title.Trim(), StringComparison.Ordinal)
-                && string.Equals(ToolJson.String(candidate?["locale"]), locale, StringComparison.OrdinalIgnoreCase)
-                && ToolJson.Long(candidate?["author_id"]) == me
-                && RepeatGuard.Timestamp(candidate?["created_at"]) is { } at && at >= from
-                && ToolJson.Long(candidate?["id"]) is { } id)
+            if (string.Equals(ToolJson.String(candidate["title"])?.Trim(), title.Trim(), StringComparison.Ordinal)
+                && string.Equals(ToolJson.String(candidate["locale"]), locale, StringComparison.OrdinalIgnoreCase)
+                && ToolJson.Long(candidate["author_id"]) == myId
+                && RepeatGuard.Timestamp(candidate["created_at"]) is { } at && at >= from
+                && ToolJson.Long(candidate["id"]) is { } id)
             {
                 return (true, id);
             }
