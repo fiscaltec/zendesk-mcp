@@ -106,6 +106,34 @@ public class AuditRecordIdsTests
     }
 
     [Fact]
+    public void Extract_NamesTheWrappedRecord_NotItsSideloads()
+    {
+        // Get_ticket always asks for `include=users,organizations`, so its response is one wrapped
+        // record with arrays beside it. Those arrays are sideloads: taking the first of them would
+        // record the requester and assignee as the records read, and miss the ticket itself.
+        const string raw = """{"ticket":{"id":101,"subject":"A","tags":["login"]},"users":[{"id":701},{"id":501}],"organizations":[{"id":601}]}""";
+
+        var result = AuditRecordIds.Extract(raw);
+
+        result.Ids.Should().Equal("101");
+        result.RecordsFetched.Should().Be(1);
+        result.IdsAvailable.Should().BeTrue();
+    }
+
+    [Fact]
+    public void Extract_NamesTheWrappedRecord_WhenItsSideloadsAreEmpty()
+    {
+        // An empty sideload must not read as an empty result set either: the ticket was still read.
+        const string raw = """{"ticket":{"id":101},"users":[],"organizations":[]}""";
+
+        var result = AuditRecordIds.Extract(raw);
+
+        result.Ids.Should().Equal("101");
+        result.RecordsFetched.Should().Be(1);
+        result.IdsAvailable.Should().BeTrue();
+    }
+
+    [Fact]
     public void Extract_NamesTheRecordOnABareGetByIdResponse()
     {
         var result = AuditRecordIds.Extract("""{"id":42,"name":"Acme","tags":["vip"]}""");
