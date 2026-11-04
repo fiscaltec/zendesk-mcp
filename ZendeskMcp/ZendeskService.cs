@@ -178,15 +178,24 @@ public partial class ZendeskService
                 after = page["meta"]?["after_cursor"]?.GetValue<string>();
             }
 
-            if (!hasMore || (offset is null && string.IsNullOrEmpty(after)) || items.Count >= maxItems)
+            if (!hasMore || (offset is null && string.IsNullOrEmpty(after)))
             {
                 break;
             }
 
+            // The page cap is checked before the caller's item cap: when both are reached on the same
+            // page (full pages, maxItems = pageSize × MaxAutoPageFetches) the read still stopped at the
+            // page cap with more to come, and the audit record and counter must say so. A stop at the
+            // item cap alone is the caller's own bound, which it reports from HasMore.
             if (pages >= _options.MaxAutoPageFetches)
             {
                 _auditContext?.MarkPagerTruncated();
                 _metrics?.PagerTruncated(ResourceTypeOf(BuildUrl(path, null, null)));
+                break;
+            }
+
+            if (items.Count >= maxItems)
+            {
                 break;
             }
         }

@@ -88,6 +88,28 @@ public class PerformanceMetricsTests
     }
 
     [Fact]
+    public async Task Pager_CountsATruncation_WhenThePageCapAndTheItemCapAreReachedTogether()
+    {
+        // Full 100-item pages against maxItems 1,000 and the default ten-page cap (Find_agent_by_name's
+        // shape): the counter must not miss the stop just because the item cap was reached on the
+        // same page.
+        using var capture = new MetricCapture();
+        var pages = Enumerable.Range(0, 11).Select(n => FullPage(n, 100, hasMore: true)).ToArray();
+        var (client, _) = TestHelpers.CreateMockHttpClientPaged(pages);
+        using var _client = client;
+        var service = TestHelpers.BuildZendeskService(client, metrics: capture.Metrics);
+
+        await service.GetAllPagesAsync("/api/v2/tickets", null, "tickets", maxItems: 1000);
+
+        capture.Total("zendesk.autopager.truncations", ("resource", "/api/v2/tickets")).Should().Be(1);
+    }
+
+    // A page of `size` tickets, each with its own id, saying whether another page follows.
+    private static string FullPage(int number, int size, bool hasMore) =>
+        "{\"tickets\":[" + string.Join(',', Enumerable.Range(number * size + 1, size).Select(id => $"{{\"id\":{id}}}"))
+        + "],\"meta\":{\"has_more\":" + (hasMore ? "true" : "false") + ",\"after_cursor\":" + (hasMore ? "\"more\"" : "null") + "}}";
+
+    [Fact]
     public async Task Pager_TagsTheFixedResourceKind_NeverTheCallersIdInThePath()
     {
         // An organisation's tickets are paged from `organizations/{organizationId}/tickets`, so the
