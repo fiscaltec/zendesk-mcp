@@ -20,7 +20,7 @@ git -C <vitally-mcp clone> fetch origin main && git -C <vitally-mcp clone> log -
 That lists vitally-mcp's non-source changes since this audit; decide each as #10 did, then move the commit named here. Run on 2026-11-04, it listed nothing: the one later commit, `fdc6f5e` (#197), touches only the two `.csproj` files. ⚠️ The clone must hold history back to `0c6d4e1`: in a `--depth 1` clone the command fails with `fatal: bad revision` (exit 128), which is not "no drift". Check the exit status, not just the empty output. Source drift (a fix to a shared component such as the OAuth proxy, `ToolAuthorizer` or the Graph resolver) is out of this command's scope: list it with the same range over `-- VitallyMcp`, and read each commit, since the code here was ported and renamed rather than copied file for file.
 
 **Key characteristics:**
-- 45 tools over tickets, KPI/SLA/CSAT reporting, macros, users and organisations, configuration and the Help Center — see *Tools*.
+- 46 tools over tickets, KPI/SLA/CSAT reporting, macros, users and organisations, configuration and the Help Center — see *Tools*.
 - **Per-user Zendesk OAuth.** Every Zendesk call is made with the signed-in person's own Zendesk token. There is no shared Zendesk credential in a deployed target, so Zendesk attributes every change to the agent and applies their role, group and brand restrictions. This is the main architectural difference from vitally-mcp, which calls Vitally with one shared key.
 - **Two OAuth relationships, never mixed:** Entra signs people in to *this server* (`/oauth/*`, unchanged from vitally-mcp); Zendesk OAuth lets the server act *as them* (`/zendesk/connect`, `/zendesk/callback`).
 - **Streamable HTTP transport** (MCP 2026-07-28), stateless, on `ModelContextProtocol.AspNetCore`.
@@ -490,7 +490,7 @@ Added for Zendesk:
 | `AddDistributedMemoryCache()` | backs the two above — **in-memory, so single replica** (below) |
 | `app.MapZendeskConnect()`, `app.MapZendeskUploads()` | `/zendesk/connect`, `/zendesk/callback`, `PUT /uploads/{slot}` — mapped before `UseAuthentication` and not behind the bearer requirement, because a browser or curl has no Entra token; each authenticates with a capability issued to a signed-in tool caller |
 
-⚠️ **Single replica is a correctness constraint, not a cost choice.** The `/oauth/*` proxy state (inherited from vitally-mcp), connect links, connect attempts and upload slots all live in process memory, and a token removed on one replica stays cached on another for up to `Zendesk:TokenCacheDuration`. `containerapps.tf` pins `max_replicas = 1`. Scaling out means registering a shared `IDistributedCache` (Redis) first and moving the OAuth proxy's `IMemoryCache` state onto it — a registration change for the Zendesk parts, a small code change for the proxy.
+⚠️ **Single replica is a correctness constraint, not a cost choice.** The `/oauth/*` proxy state (inherited from vitally-mcp), connect links, connect attempts, upload slots and `Bulk_get_ticket_conversations`'s two-calls-at-once gate (`TicketConversationsTools.Gate`, which is per account only because there is one process) all live in process memory, and a token removed on one replica stays cached on another for up to `Zendesk:TokenCacheDuration`. `containerapps.tf` pins `max_replicas = 1`. Scaling out means registering a shared `IDistributedCache` (Redis) first and moving the OAuth proxy's `IMemoryCache` state onto it — a registration change for the Zendesk parts, a small code change for the proxy.
 
 ### The Entra façade, RBAC, logging and audit — as vitally-mcp
 
@@ -529,7 +529,8 @@ here, in `ZendeskMetrics`):
 - **Calls that fail before a response have no duration.** A timeout, a DNS failure or a refused
   connection never reaches `LogAction`, so there is no `ZendeskUpstreamCall` row. (A non-2xx
   response is different: `SendAsync` logs it, with its duration, before throwing.) Timeouts are the slowest calls of
-  all; look for them in the failure records. The clock also starts *after* the caller's credential
+  all; look for them in the failure records (`Bulk_get_ticket_conversations` reports a timed-out
+  ticket in its result, and logs it as `Tool call partly failed` with the correlation id). The clock also starts *after* the caller's credential
   is resolved, so a cold Key Vault read of the person's token, or a token refresh, shows in the
   tool-call duration and in no upstream one. The same goes for recovery after a `401`: the rejected
   call and its retry each get a row, and the `OnTokenRejectedAsync` refresh between them is in
@@ -676,7 +677,7 @@ Zendesk ──302──> /zendesk/callback?code&state ──> exchange code ─�
 
 **`AuditRecordIds` for Zendesk shapes:** ids are numbers (rendered as raw text); the primary collection is the first array of objects in the body (`tickets`, `results`, `articles` — Zendesk serialises it before sideloads such as `users`), `meta`/`links` ignored; a single record is bare or wrapped (`{"ticket":{…}}`). The mutation-URL fallback accepts only a **numeric** last segment — Zendesk paths also end in locales and collection names, and recording `en-gb` as a record id would be a fabricated identifier.
 
-**Paging.** Tools that page for the caller pass Zendesk's cursor through (`after_cursor` → `page[after]`, `pagination_info {has_more, next_cursor, page_size}`). `GetAllPagesAsync` pages on the server's behalf (sideloads merged) up to `MaxAutoPageFetches`, marking the audit record truncated when it stops early. Analytics tools read at most `MaxAnalyticsTickets` tickets and refuse beyond it, saying how to split the range.
+**Paging.** Tools that page for the caller pass Zendesk's cursor through (`after_cursor` → `page[after]`, `pagination_info {has_more, next_cursor, page_size}`). `GetAllPagesAsync` pages on the server's behalf (sideloads merged) up to `MaxAutoPageFetches`, marking the audit record truncated when it stops early. A page envelope it cannot read (not an object, or a `meta` of the wrong shape) throws `ZendeskResponseFormatException` rather than returning a silently short result; an optional `beforeNextPage` callback runs before each later page and may throw to stop paging (`Bulk_get_ticket_conversations` stops at its deadline that way, never cancelling a request in flight). Analytics tools read at most `MaxAnalyticsTickets` tickets and refuse beyond it, saying how to split the range.
 
 **Rate limits.** Zendesk's budget is per *account* (200–2,500 requests a minute by plan) and shared with every other integration. The handler retries `429` on `Retry-After` and warns as `X-Rate-Limit-Remaining` runs low; analytics tools bound their own concurrency.
 
@@ -698,7 +699,7 @@ Ticket comments, article bodies and user fields are written by customers and can
 
 - One `[McpServerToolType] public static class` per area in `ZendeskMcp/Tools/`; methods `public static async Task<string>` returning compact JSON (a `CallToolResult` only for non-text content — `Get_ticket_attachment` returns an image block); first parameter `ZendeskService zendesk`, last `CancellationToken`.
 - Names in vitally-mcp's style (`Search_tickets`). **Parameters are snake_case and match Swifteq's schema**, so prompts written for either server work with both.
-- All four hints set explicitly, `ReadOnly` xor `Destructive`. `Get_`/`List_`/`Search_`/`Count_`/`Find_`/`Preview_`/`Export_` are read tools (`zendesk:read`, read-only, idempotent); everything that changes Zendesk is `zendesk:write`. **`Disconnect_zendesk` is the one deliberate exception** — destructive in annotation, read tier in policy — because it touches only the caller's own connection and every person who can use anything must be able to manage that. For the same reason `ReadOnlyToolFilter` keeps it in read-only mode, the emergency lock-down, when cutting one's own connection matters most; its revoke goes through `ZendeskOAuthClient`, so the read-only verb check never applied to it (found 2026-11-04, when staging offered no way to disconnect).
+- All four hints set explicitly, `ReadOnly` xor `Destructive`. `Get_`/`List_`/`Search_`/`Count_`/`Find_`/`Preview_`/`Export_`/`Bulk_get_` are read tools (`zendesk:read`, read-only, idempotent); everything that changes Zendesk is `zendesk:write`. **`Disconnect_zendesk` is the one deliberate exception** — destructive in annotation, read tier in policy — because it touches only the caller's own connection and every person who can use anything must be able to manage that. For the same reason `ReadOnlyToolFilter` keeps it in read-only mode, the emergency lock-down, when cutting one's own connection matters most; its revoke goes through `ZendeskOAuthClient`, so the read-only verb check never applied to it (found 2026-11-04, when staging offered no way to disconnect).
 - Validate arguments and throw `ArgumentException` naming the parameter — the message reaches the model.
 - Shared helpers: `ToolJson` (query pairs, picking fields, pagination block, page-size and id validation, feature refusal), `TicketSearchQuery` (the ticket filters shared by Search/Count/metrics/SLA tools; `channel` reuses `TicketCountHelpers.Channels`, so a channel filter selects exactly its `group_by channel` group, and `custom_fields` is checked against the account's field definitions before any search — tools build the query with `TicketSearchHelpers.BuildQueryAsync`, not `TicketSearchQuery.Build`), `TicketSla` (the `sla` object shared by Get_ticket, Search_tickets, Get_sla_queue and Get_sla_summary).
 
@@ -707,7 +708,7 @@ Ticket comments, article bodies and user fields are written by customers and can
 | Area | File | Tools |
 |---|---|---|
 | Connection | `ConnectionTools.cs` | `Get_zendesk_connection`, `Get_zendesk_connect_link`, `Disconnect_zendesk` |
-| Tickets | `TicketsTools.cs`, `TicketAttachmentsTools.cs` | `Search_tickets`, `Count_tickets`, `Get_ticket`, `Get_ticket_conversation`, `Create_ticket`, `Update_ticket`, `Get_ticket_attachment`, `Request_ticket_attachment_upload` |
+| Tickets | `TicketsTools.cs`, `TicketConversationsTools.cs`, `TicketAttachmentsTools.cs` | `Search_tickets`, `Count_tickets`, `Get_ticket`, `Get_ticket_conversation`, `Bulk_get_ticket_conversations`, `Create_ticket`, `Update_ticket`, `Get_ticket_attachment`, `Request_ticket_attachment_upload` |
 | Reporting | `AnalyticsTools.cs`, `SatisfactionTools.cs`, `TicketSla.cs` | `Get_ticket_metrics_summary`, `Get_sla_summary`, `Get_sla_queue`, `Get_satisfaction_ratings` |
 | Macros | `MacrosTools.cs` | `Search_macros`, `Preview_macro`, `Apply_macro`, `Create_macro`, `Update_macro`, `Set_macros_active` |
 | People | `UsersTools.cs`, `OrganizationsTools.cs` | `Search_users`, `Find_agent_by_name`, `Search_organizations`, `Add_user_to_organization` |
