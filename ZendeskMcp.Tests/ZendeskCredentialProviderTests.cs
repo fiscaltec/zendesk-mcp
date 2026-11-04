@@ -333,9 +333,10 @@ public class ZendeskCredentialProviderTests
     public async Task Revoke_StillPropagatesTheCallersOwnCancellation()
     {
         using var stalled = new HttpClient(new StalledHandler()) { Timeout = Timeout.InfiniteTimeSpan };
+        using var cache = new Microsoft.Extensions.Caching.Memory.MemoryCache(new Microsoft.Extensions.Caching.Memory.MemoryCacheOptions());
         var client = new ZendeskOAuthClient(new TestHelpers.SingleClientFactory(stalled),
             Microsoft.Extensions.Options.Options.Create(new ZendeskServerOptions { Subdomain = "example" }),
-            new Microsoft.Extensions.Caching.Memory.MemoryCache(new Microsoft.Extensions.Caching.Memory.MemoryCacheOptions()),
+            cache,
             Microsoft.Extensions.Logging.Abstractions.NullLogger<ZendeskOAuthClient>.Instance);
         using var cts = new CancellationTokenSource(TimeSpan.FromMilliseconds(100));
 
