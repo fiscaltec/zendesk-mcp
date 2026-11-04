@@ -22,6 +22,7 @@ does not change.
 | `https://vitally.fiscaltec.com` | `https://zendesk-mcp.fiscaltec.com` |
 | `vitally-prod-rg-uksouth`, `vitally-prod-ca-uksouth`, `vitally-staging-ca-uksouth` | `zendesk-prod-rg-uksouth`, `zendesk-prod-ca-uksouth`, `zendesk-staging-ca-uksouth` |
 | `sg-vitally-*` | `sg-zendesk-*` |
+| any Key Vault it names (`vitally-prod-kv-uksouth`) | `zendesk-prod-kv-uksouth`, written through *Writing a secret to the vault* below |
 | `docs/runbooks/rotate-helpers.sh` | the same file here, with `APP` and `RG` set for this app |
 
 ## Entra app
@@ -34,6 +35,8 @@ does not change.
   admits the IT & Security Department only.
 - **Admin consent**: grant tenant-wide consent for `openid profile email offline_access mcp.access`
   once, when the estate is built (`docs/runbooks/build-the-estate.md`, Phase 10): `az ad app permission admin-consent --id <appId>`.
+  Phase 10's Verify then re-checks that Gate 1 is still the department group alone; remove any
+  direct assignment consent leaves behind, or that person can sign in whatever their department.
 - **Client secret**: create it out of band so it never lands in Terraform state. Store it in Key
   Vault as `entra-mcp-client-secret` with an expiry of 180 days or less, and copy it into both
   Container Apps as `entra-oauth-client-secret`. To rotate, follow vitally-mcp's verified procedure
