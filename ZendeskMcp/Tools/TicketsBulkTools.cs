@@ -150,7 +150,7 @@ public static class TicketsBulkTools
         [Description("The change for every ticket: with ticket_ids, or with tickets to add it to each entry (a field set both here and in an entry is an error).")] BulkTicketChange? changes = null,
         [Description("One entry per ticket with its own changes, 1 to 100 tickets, e.g. a different subject on each. Pass this or ticket_ids, not both.")] BulkTicketEntry[]? tickets = null,
         [Description("The confirmation from the preview of this same batch, once the person has said yes. Leave it out to preview.")] string? confirmation = null,
-        [Description("Required when the batch solves a problem ticket: Zendesk then also solves each of its unsolved linked incidents and runs their triggers, which can email their requesters. Only set it after telling the person.")] bool? solve_incidents = null,
+        [Description("Required when the batch solves a problem ticket that has unsolved linked incidents: Zendesk then also solves each of them and runs their triggers, which can email their requesters. Only set it after telling the person.")] bool? solve_incidents = null,
         CancellationToken cancellationToken = default)
     {
         var plan = Plan(ticket_ids, changes, tickets);
@@ -165,7 +165,7 @@ public static class TicketsBulkTools
         var willChange = new List<Planned>();
         var unchanged = new List<long>();
         var cannotChange = new JsonArray();
-        var problems = new List<long>();
+        var problems = new List<string>();
         foreach (var (id, change) in plan)
         {
             if (!found.TryGetValue(id, out var ticket))
@@ -187,26 +187,37 @@ public static class TicketsBulkTools
                 continue;
             }
 
+            // Solving a problem ticket solves its unsolved linked incidents too, so those are counted
+            // (as Update_ticket does) and only a problem that has some needs solve_incidents.
+            var solvesIncidents = false;
             if (await SolvesProblemAsync(zendesk, ticket, change, solvingStatuses, cancellationToken))
             {
-                problems.Add(id);
+                var incidents = await zendesk.GetAllPagesAsync($"/api/v2/tickets/{id.ToString(CultureInfo.InvariantCulture)}/incidents", null, "tickets",
+                    maxItems: 1000, cancellationToken: cancellationToken);
+                var unsolved = incidents.Items.Count(i => ToolJson.String(i["status"]) is not ("solved" or "closed"));
+
+                // A list cut short says nothing about the incidents past the cut, so it is never read
+                // as "none unsolved".
+                if (unsolved > 0 || incidents.HasMore)
+                {
+                    solvesIncidents = true;
+                    problems.Add($"{id.ToString(CultureInfo.InvariantCulture)} ({unsolved}{(incidents.HasMore ? " or more" : string.Empty)} unsolved)");
+                }
             }
 
-            willChange.Add(new Planned(id, change, ticket, diff));
+            willChange.Add(new Planned(id, change, ticket, diff, solvesIncidents));
         }
 
         var refusals = new List<string>();
         if (problems.Count > 0 && solve_incidents != true)
         {
-            // Update_ticket counts the incidents first; for up to a hundred tickets that would be a
-            // hundred more reads, so any open problem ticket being solved needs the confirmation.
-            refusals.Add($"Ticket(s) {Join(problems)} are problem tickets; solving them also solves all of their unsolved linked incidents and runs their triggers, which can email their requesters. Tell the person, then call again with solve_incidents: true.");
+            refusals.Add($"Problem ticket(s) {string.Join(", ", problems)} have unsolved linked incidents; solving them also solves each of those incidents and runs their triggers, which can email their requesters. Tell the person, then call again with solve_incidents: true.");
         }
 
         var warnings = new List<string>();
         if (problems.Count > 0 && solve_incidents == true)
         {
-            warnings.Add($"Solving problem ticket(s) {Join(problems)} also solves their unsolved linked incidents.");
+            warnings.Add($"Solving problem ticket(s) {string.Join(", ", problems)} also solves their unsolved linked incidents.");
         }
 
         var material = Material(zendesk.BaseUrl, await TicketWriteHelpers.CallerKeyAsync(zendesk, cancellationToken), plan, found, solve_incidents == true);
@@ -305,7 +316,7 @@ public static class TicketsBulkTools
         return (await OutcomeAsync(zendesk, willChange, job, jobId, unreadable, unchanged, failed, warnings)).ToJsonString();
     }
 
-    private sealed record Planned(long Id, Change Change, JsonNode Ticket, JsonObject Diff);
+    private sealed record Planned(long Id, Change Change, JsonNode Ticket, JsonObject Diff, bool SolvesIncidents);
 
     /// <summary>One ticket's change, validated and in Zendesk's field names.</summary>
     private sealed class Change
@@ -793,7 +804,7 @@ public static class TicketsBulkTools
                         entry["status"] = value!["from"]?.DeepClone();
                     }
 
-                    if (ToolJson.String(value!["to"]) == "solved" && ToolJson.String(planned.Ticket["type"]) == "problem")
+                    if (planned.SolvesIncidents)
                     {
                         warnings.Add($"Undoing problem ticket {planned.Id} does not reopen the incidents solving it solved.");
                     }

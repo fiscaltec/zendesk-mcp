@@ -525,14 +525,19 @@ public class TicketsBulkToolsTests
 
     // ---------- solving problem tickets ----------
 
+    private const string OneUnsolvedIncident = """{"tickets":[{"id":201,"status":"open"},{"id":202,"status":"solved"}],"meta":{"has_more":false}}""";
+
+    private static FakeResponse? Incidents(RecordedRequest r, string body = OneUnsolvedIncident) =>
+        r.Path == "/api/v2/tickets/101/incidents" ? Json(body) : null;
+
     [Fact]
-    public async Task SolvingProblemTicketsNeedsSolveIncidents()
+    public async Task SolvingAProblemTicketWithUnsolvedIncidentsNeedsSolveIncidents()
     {
         const string problem = """{"tickets":[{"id":101,"type":"problem","status":"open","updated_at":"x"},{"id":102,"type":"incident","status":"open","updated_at":"y"}]}""";
-        using var fake = BulkFake(problem);
+        using var fake = BulkFake(problem, extra: r => Incidents(r));
 
         var preview = JsonNode.Parse(await TicketsBulkTools.BulkUpdateTickets(Service(fake), [101, 102], new BulkTicketChange { Status = "solved" }))!;
-        preview["would_refuse"]!.AsArray().Should().ContainSingle(r => r!.GetValue<string>().Contains("101") && r.GetValue<string>().Contains("solve_incidents"));
+        preview["would_refuse"]!.AsArray().Should().ContainSingle(r => r!.GetValue<string>().Contains("101 (1 unsolved)") && r.GetValue<string>().Contains("solve_incidents"));
         preview["confirmation"].Should().BeNull();
 
         var result = await PreviewThenConfirm(c => TicketsBulkTools.BulkUpdateTickets(Service(fake), [101, 102], new BulkTicketChange { Status = "solved" },
@@ -543,12 +548,26 @@ public class TicketsBulkToolsTests
     }
 
     [Fact]
+    public async Task SolvingAProblemTicketWithNoUnsolvedIncidentsNeedsNoConfirmation()
+    {
+        // As Swifteq: solve_incidents is asked for only when solving would actually solve incidents.
+        const string problem = """{"tickets":[{"id":101,"type":"problem","status":"open","updated_at":"x"}]}""";
+        using var fake = BulkFake(problem, extra: r => Incidents(r, """{"tickets":[{"id":202,"status":"solved"}],"meta":{"has_more":false}}"""));
+
+        var preview = JsonNode.Parse(await TicketsBulkTools.BulkUpdateTickets(Service(fake), [101], new BulkTicketChange { Status = "solved" }))!;
+
+        fake.Requests.Should().Contain(r => r.Path == "/api/v2/tickets/101/incidents");
+        preview["would_refuse"]!.AsArray().Should().BeEmpty();
+        preview["confirmation"].Should().NotBeNull();
+    }
+
+    [Fact]
     public async Task ACustomStatusInTheSolvedCategoryCountsAsSolving()
     {
         const string problem = """{"tickets":[{"id":101,"type":"problem","status":"open"}]}""";
         using var fake = BulkFake(problem, extra: r => r.Path == "/api/v2/custom_statuses/55"
             ? Json("""{"custom_status":{"id":55,"status_category":"solved"}}""")
-            : null);
+            : Incidents(r));
 
         var preview = JsonNode.Parse(await TicketsBulkTools.BulkUpdateTickets(Service(fake), [101], new BulkTicketChange { CustomStatusId = 55 }))!;
 
@@ -556,16 +575,17 @@ public class TicketsBulkToolsTests
     }
 
     [Fact]
-    public async Task NotSolving_AProblemTicketNeedsNoConfirmation()
+    public async Task NotSolving_AProblemTicketNeedsNoConfirmation_AndNoIncidentRead()
     {
-        // Negative control for the two above: the confirmation is about solving, not about problem tickets.
+        // Negative control for the above: the confirmation is about solving, not about problem tickets.
         const string problem = """{"tickets":[{"id":101,"type":"problem","status":"open"}]}""";
-        using var fake = BulkFake(problem);
+        using var fake = BulkFake(problem, extra: r => Incidents(r));
 
         var preview = JsonNode.Parse(await TicketsBulkTools.BulkUpdateTickets(Service(fake), [101], Priority("high")))!;
 
         preview["would_refuse"]!.AsArray().Should().BeEmpty();
         preview["confirmation"].Should().NotBeNull();
+        fake.Requests.Should().NotContain(r => r.Path.EndsWith("/incidents", StringComparison.Ordinal));
     }
 
     // ---------- the two shapes ----------
