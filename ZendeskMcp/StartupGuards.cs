@@ -66,6 +66,32 @@ public static class StartupGuards
     }
 
     /// <summary>
+    /// Refuses <c>Authorization:Enabled=false</c> anywhere but local development. It switches off
+    /// every tier check — any signed-in person could then call any tool, writes included — and
+    /// nothing else would refuse it in a deployed target (#12, inherited from vitally-mcp).
+    /// </summary>
+    /// <remarks>
+    /// Allowed with <c>OAuth:NoAuth</c>, which bypasses the checks anyway, and in the Development
+    /// environment with no Key Vault, for running per-user OAuth locally without the Entra tier
+    /// groups. A deployed target has a Key Vault and runs in Production, so it is refused by either.
+    /// </remarks>
+    public static void EnsureAuthorizationIsOn(string? authorizationEnabled, string? keyVaultUri, bool noAuth, bool isDevelopment)
+    {
+        if (!bool.TryParse(authorizationEnabled, out var enabled) || enabled || noAuth)
+        {
+            return;
+        }
+
+        if (!string.IsNullOrWhiteSpace(keyVaultUri) || !isDevelopment)
+        {
+            throw new InvalidOperationException(
+                "Authorization:Enabled=false is refused outside local development (OAuth:NoAuth=true, or the Development " +
+                "environment with no Zendesk:KeyVaultUri): it lets any signed-in person call any tool, writes included. " +
+                "Remove it, and grant access through the Entra tier groups.");
+        }
+    }
+
+    /// <summary>
     /// Resolves the upstream OIDC discovery document once at startup so a provider that is
     /// unreachable — or publishing a document missing an endpoint the proxy needs — refuses to
     /// start. Two of those endpoints are republished to MCP clients in our RFC 8414 document, so

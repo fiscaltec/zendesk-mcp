@@ -117,6 +117,12 @@ days. A deleted name cannot be set again, so that person could not reconnect unt
 passed. A tombstone version reads as "not connected" and keeps the name usable. Older versions still
 hold the old token, which is why revoking at Zendesk comes first.
 
+A value that is neither a token nor exactly that tombstone — hand-edited, truncated — is **not** read
+as "not connected" (#12). The server logs an error naming the object id and secret version, and on
+that person's next call (or reconnect) revokes whatever token it can read from the value and writes a
+tombstone. If the log then says the grant *"may still be live at Zendesk"*, nothing in the value could
+be revoked: find the token under Admin Centre → APIs → OAuth tokens and delete it there.
+
 ## Read-only and the feature switches
 
 - `Authorization__ReadOnly=true` denies every create and update for everyone and hides the write

@@ -32,6 +32,10 @@ public sealed class ZendeskOAuthClient(
     private readonly ZendeskServerOptions _options = options.Value;
     private readonly TimeProvider _time = timeProvider ?? TimeProvider.System;
 
+    // An access token this close to expiry is refreshed before a revocation, so the revocation cannot
+    // reach Zendesk after it expires and come back 401.
+    private static readonly TimeSpan RevokeSkew = TimeSpan.FromMinutes(1);
+
     /// <summary>The Zendesk authorisation URL for one connect attempt.</summary>
     public string BuildAuthorizeUrl(string redirectUri, string state, string codeVerifier)
     {
@@ -138,6 +142,49 @@ public sealed class ZendeskOAuthClient(
             logger.LogWarning("Zendesk token revocation failed: {FailureType}", ex.GetType().Name);
             return false;
         }
+    }
+
+    /// <summary>
+    /// Revokes a whole grant that is being discarded, not just its access token. Returns whether the
+    /// grant is now known to be dead at Zendesk.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Zendesk answers 401 to revoking an expired access token, which <see cref="RevokeAsync"/> counts
+    /// as revoked — while the refresh token, and so the grant, stays live. So a grant whose access
+    /// token has expired (or is about to) and that has a refresh token is refreshed first, and the
+    /// renewed access token is revoked. A refresh Zendesk refuses outright means the grant is already
+    /// dead. Any other refresh failure is reported as not revoked rather than falling back to the
+    /// expired token, whose 401 would read as success.
+    /// </para>
+    /// <para>
+    /// The renewed grant is never stored: every caller is discarding this grant. That is the
+    /// difference from <see cref="ZendeskCredentialProvider.DisconnectAsync"/>, which keeps the
+    /// person's grant stored until the revocation is attempted and stops on a transient failure.
+    /// </para>
+    /// </remarks>
+    public async Task<bool> RevokeGrantAsync(ZendeskUserToken grant, CancellationToken cancellationToken)
+    {
+        var accessToken = grant.AccessToken;
+        if (!string.IsNullOrWhiteSpace(grant.RefreshToken)
+            && (string.IsNullOrWhiteSpace(accessToken) || grant.NeedsRefresh(_time.GetUtcNow(), RevokeSkew)))
+        {
+            try
+            {
+                accessToken = (await RefreshAsync(grant.RefreshToken, cancellationToken)).AccessToken;
+            }
+            catch (ZendeskOAuthException ex) when (ex.Error is "invalid_grant" or "invalid_token" or "unauthorized_client")
+            {
+                return true;
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                logger.LogWarning("Could not refresh a discarded Zendesk grant to revoke it: {FailureType}", ex.GetType().Name);
+                return false;
+            }
+        }
+
+        return !string.IsNullOrWhiteSpace(accessToken) && await RevokeAsync(accessToken, cancellationToken);
     }
 
     /// <summary>Builds the stored record from a token response and the identity it was checked against.</summary>

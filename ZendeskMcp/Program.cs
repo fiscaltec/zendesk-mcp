@@ -321,6 +321,9 @@ StartupGuards.EnsureDevelopmentTokenIsLocal(
     zendeskSection["DevelopmentAccessToken"] is { Length: > 0 } developmentAccessToken ? developmentAccessToken : zendeskSection["DevelopmentApiToken"],
     zendeskSection["KeyVaultUri"], noAuth, builder.Environment.IsDevelopment());
 StartupGuards.EnsureIdentityBindingIsOn(zendeskSection["RequireEmailMatch"], noAuth);
+StartupGuards.EnsureAuthorizationIsOn(
+    builder.Configuration.GetSection(ToolAuthorizationOptions.SectionName)["Enabled"],
+    zendeskSection["KeyVaultUri"], noAuth, builder.Environment.IsDevelopment());
 
 if (!noAuth)
 {
