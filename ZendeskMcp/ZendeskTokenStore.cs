@@ -155,9 +155,16 @@ public sealed class KeyVaultZendeskTokenStore(
             // rather than escaping as an exception nothing logs or tombstones.
             _ = stored?.Count;
         }
-        catch (Exception ex) when (ex is JsonException or ArgumentException or InvalidOperationException)
+        catch (JsonException)
         {
             throw new ZendeskStoredTokenUnreadableException(salvaged: null);
+        }
+        catch (Exception ex) when (ex is ArgumentException or InvalidOperationException)
+        {
+            // Duplicate keys: valid JSON, so the tokens may still be readable. Never a usable grant —
+            // which value a duplicated member means is ambiguous — but a token named exactly once is
+            // salvaged for revocation (Copilot on #48).
+            throw new ZendeskStoredTokenUnreadableException(SalvageDuplicateKeyed(value));
         }
 
         if (stored is null)
@@ -215,6 +222,34 @@ public sealed class KeyVaultZendeskTokenStore(
             ZendeskEmail: string.Empty,
             ZendeskRole: string.Empty,
             ConnectedAt: DateTimeOffset.MinValue);
+    }
+
+    private static ZendeskUserToken? SalvageDuplicateKeyed(string value)
+    {
+        try
+        {
+            using var document = JsonDocument.Parse(value);
+            if (document.RootElement.ValueKind != JsonValueKind.Object)
+            {
+                return null;
+            }
+
+            var stored = new JsonObject();
+            foreach (var name in new[] { "access_token", "refresh_token" })
+            {
+                var values = document.RootElement.EnumerateObject().Where(p => p.Name == name).ToList();
+                if (values.Count == 1 && values[0].Value.ValueKind == JsonValueKind.String)
+                {
+                    stored[name] = values[0].Value.GetString();
+                }
+            }
+
+            return Salvage(stored);
+        }
+        catch (JsonException)
+        {
+            return null;
+        }
     }
 
     private static string? StringMember(JsonObject stored, string name) =>

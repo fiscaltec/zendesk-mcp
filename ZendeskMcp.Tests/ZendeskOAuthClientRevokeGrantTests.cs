@@ -40,7 +40,9 @@ public sealed class ZendeskOAuthClientRevokeGrantTests : IDisposable
 
         (await Build(zendesk.Client).RevokeGrantAsync(TestHelpers.SampleToken("old", Expired, "r1"), default)).Should().BeTrue();
 
-        zendesk.Requests.Should().NotContain(r => r.Path == Revoke);
+        // The access token is still revoked, belt and braces: it has not been tried, and with the
+        // refresh token known dead even its 401 would settle it.
+        zendesk.Requests.Should().ContainSingle(r => r.Path == Revoke).Which.Headers["Authorization"].Should().Be("Bearer old");
     }
 
     [Fact]
@@ -71,6 +73,42 @@ public sealed class ZendeskOAuthClientRevokeGrantTests : IDisposable
 
         zendesk.Requests.Where(r => r.Path == Revoke).Select(r => r.Headers["Authorization"])
             .Should().Equal("Bearer refused", "Bearer renewed");
+    }
+
+    [Fact]
+    public async Task ARefusedRefresh_StillRevokesAnAccessTokenNotYetTried()
+    {
+        // A damaged stored value can pair a good access token with a broken refresh token.
+        using var zendesk = TestHelpers.CreateFakeZendesk(r => r.Path == TokenEndpoint
+            ? FakeResponse.WithStatus(HttpStatusCode.BadRequest, "{\"error\":\"invalid_grant\"}")
+            : FakeResponse.WithStatus(HttpStatusCode.NoContent, string.Empty));
+        var salvaged = new ZendeskUserToken("good-access", "broken-refresh", DateTimeOffset.UnixEpoch, null, 0, string.Empty, string.Empty, DateTimeOffset.MinValue);
+
+        (await Build(zendesk.Client).RevokeGrantAsync(salvaged, default)).Should().BeTrue();
+
+        zendesk.Requests.Should().ContainSingle(r => r.Path == Revoke).Which.Headers["Authorization"].Should().Be("Bearer good-access");
+    }
+
+    [Fact]
+    public async Task ARenewedTokenAnswering401_IsNotTakenAsRevoked()
+    {
+        using var zendesk = TestHelpers.CreateFakeZendesk(r => r.Path == TokenEndpoint
+            ? FakeResponse.Json("{\"access_token\":\"renewed\",\"refresh_token\":\"r2\",\"expires_in\":7200}")
+            : FakeResponse.WithStatus(HttpStatusCode.Unauthorized));
+
+        (await Build(zendesk.Client).RevokeGrantAsync(TestHelpers.SampleToken("old", Expired, "r1"), default)).Should().BeFalse();
+
+        zendesk.Requests.Count(r => r.Path == TokenEndpoint).Should().Be(1, "one refresh, never a loop");
+    }
+
+    [Fact]
+    public async Task ATimeout_IsAnUnconfirmedRevocation_NotACancellation()
+    {
+        // HttpClient's own timeout throws TaskCanceledException although the caller did not cancel.
+        using var zendesk = TestHelpers.CreateFakeZendesk(_ => throw new TaskCanceledException("timed out"));
+
+        (await Build(zendesk.Client).RevokeGrantAsync(TestHelpers.SampleToken("old", Expired, "r1"), default)).Should().BeFalse();
+        (await Build(zendesk.Client).RevokeGrantAsync(TestHelpers.SampleToken("live", refreshToken: null), default)).Should().BeFalse();
     }
 
     [Fact]

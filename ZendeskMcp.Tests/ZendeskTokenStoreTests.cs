@@ -107,6 +107,7 @@ public class ZendeskTokenStoreTests
     [InlineData("{\"access_token\":\"a1\",\"refresh_token\":\"r1\",\"zendesk_user_id\":\"x\"}", "a1", "r1")]
     [InlineData("{\"refresh_token\":\"r1\"}", null, "r1")]
     [InlineData("{\"access_token\":\"a1\",\"access_token\":\"a1\"}", null, null)]
+    [InlineData("{\"access_token\":\"a1\",\"refresh_token\":\"r1\",\"zendesk_role\":\"agent\",\"zendesk_role\":\"admin\"}", "a1", "r1")]
     [InlineData("{\"revoked\":true,\"revoked\":true}", null, null)]
     public void Parse_RefusesAnythingElse_SalvagingTheTokensForRevocation(string value, string? access, string? refresh)
     {
