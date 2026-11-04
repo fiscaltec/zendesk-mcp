@@ -77,6 +77,7 @@ public static class TicketCountHelpers
                 return new GroupPlan(Fixed("ticket_type", ["question", "incident", "problem", "task"]), false, "(none)", []);
 
             case "channel":
+                RefuseIf(filters.Channels is { Count: > 0 }, "channel");
                 return new GroupPlan(
                     Channels.Select(c => new GroupValue(JsonValue.Create(c.Channel), c.Channel, $"via:{c.SearchValue}")).ToList(),
                     true, "(other)", []);
@@ -226,6 +227,11 @@ public static class TicketCountHelpers
         if (filters.CustomFieldId == id)
         {
             throw new ArgumentException("group_by custom_field cannot be combined with a custom_field_id filter on the same field.");
+        }
+
+        if (filters.CustomFields?.Any(c => c?.Id == id) == true)
+        {
+            throw new ArgumentException("group_by custom_field cannot be combined with a custom_fields condition on the same field.");
         }
 
         var response = await zendesk.GetAsync($"/api/v2/ticket_fields/{Id(id)}", cancellationToken: cancellationToken);

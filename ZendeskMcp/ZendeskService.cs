@@ -99,8 +99,17 @@ public partial class ZendeskService
     /// (<c>/api/v2/guide/permission_groups</c> does, 30 a page). When a page carries no <c>meta</c>
     /// but a <c>next_page</c> URL, its <c>page</c> and <c>per_page</c> values are followed; only those
     /// two integers are taken from it, never its host or path.
+    /// <para>
+    /// A page that is not an object, or a <c>meta</c> whose <c>has_more</c> or <c>after_cursor</c> has
+    /// an unexpected type, throws <see cref="ZendeskResponseFormatException"/>: guessing would turn a
+    /// malformed page into a silently short result.
+    /// </para>
     /// </remarks>
-    public async Task<PagedItems> GetAllPagesAsync(string path, IEnumerable<KeyValuePair<string, string?>>? query, string arrayProperty, int maxItems, string? brandUrl = null, int pageSize = 100, CancellationToken cancellationToken = default)
+    /// <param name="beforeNextPage">
+    /// Called before each page after the first; it may throw to stop paging (Bulk_get_ticket_conversations
+    /// stops at its deadline this way, so no request already in flight is cancelled).
+    /// </param>
+    public async Task<PagedItems> GetAllPagesAsync(string path, IEnumerable<KeyValuePair<string, string?>>? query, string arrayProperty, int maxItems, string? brandUrl = null, int pageSize = 100, CancellationToken cancellationToken = default, Action? beforeNextPage = null)
     {
         var items = new List<JsonNode>();
         var baseQuery = (query ?? []).Where(kv => kv.Key is not "page[size]" and not "page[after]" and not "page" and not "per_page").ToList();
@@ -127,7 +136,14 @@ public partial class ZendeskService
                 }
             }
 
-            var page = await GetAsync(path, pageQuery, brandUrl, cancellationToken);
+            if (pages > 0)
+            {
+                beforeNextPage?.Invoke();
+            }
+
+            var page = await GetAsync(path, pageQuery, brandUrl, cancellationToken) as JsonObject
+                ?? throw new ZendeskResponseFormatException($"A page of {ResourceTypeOf(BuildUrl(path, null, null))} was not a JSON object.");
+            var resource = ResourceTypeOf(BuildUrl(path, null, null));
             pages++;
 
             if (page[arrayProperty] is JsonArray array)
@@ -174,8 +190,24 @@ public partial class ZendeskService
             else
             {
                 offset = null;
-                hasMore = page["meta"]?["has_more"]?.GetValue<bool>() == true;
-                after = page["meta"]?["after_cursor"]?.GetValue<string>();
+                var meta = page["meta"] switch
+                {
+                    null => null,
+                    JsonObject metaObject => metaObject,
+                    _ => throw new ZendeskResponseFormatException($"A page of {resource}: meta was not a JSON object."),
+                };
+                hasMore = meta?["has_more"] switch
+                {
+                    null => false,
+                    JsonValue more when more.TryGetValue<bool>(out var flag) => flag,
+                    _ => throw new ZendeskResponseFormatException($"A page of {resource}: meta.has_more was not true or false."),
+                };
+                after = meta?["after_cursor"] switch
+                {
+                    null => null,
+                    JsonValue cursor when cursor.TryGetValue<string>(out var text) => text,
+                    _ => throw new ZendeskResponseFormatException($"A page of {resource}: meta.after_cursor was not a string."),
+                };
             }
 
             if (!hasMore || (offset is null && string.IsNullOrEmpty(after)) || items.Count >= maxItems)
@@ -652,6 +684,16 @@ public partial class ZendeskService
 
     // A failure log must never change what the call returns: it sits just before the exception that
     // carries Zendesk's explanation to the client.
+    /// <summary>
+    /// Records a failure a tool absorbed into its result rather than threw (Bulk_get_ticket_conversations
+    /// reports a timed-out or unreadable ticket per ticket), so it still reaches the failure records.
+    /// The exception TYPE and the correlation id only, never its message, as for every failure log.
+    /// </summary>
+    public void LogAbsorbedFailure(string tool, Exception exception) =>
+        LogBestEffort(() => _logger.LogError(
+            "Tool call partly failed: {Tool} absorbed {ExceptionType} into its result correlation={CorrelationId}",
+            tool, exception.GetType().Name, _auditContext?.CorrelationId ?? "none"));
+
     private static void LogBestEffort(Action write)
     {
         try
@@ -670,6 +712,13 @@ public partial class ZendeskService
 
 /// <summary>Items gathered across pages, with the cursor to continue from when the pager stopped early.</summary>
 public sealed record PagedItems(IReadOnlyList<JsonNode> Items, string? NextCursor, bool HasMore, int PagesFetched, JsonObject Sideloads);
+
+/// <summary>
+/// Zendesk answered successfully, but in a shape this server cannot read. Not surfaced to the model
+/// (it gets the SDK's generic message and the failure is logged), except where a tool reports it per
+/// record, as Bulk_get_ticket_conversations does.
+/// </summary>
+public sealed class ZendeskResponseFormatException(string message) : Exception(message);
 
 /// <summary>A downloaded file.</summary>
 public sealed record DownloadedFile(byte[] Content, string? ContentType);
