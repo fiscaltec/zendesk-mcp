@@ -49,12 +49,14 @@ public sealed class KeyVaultZendeskTokenStore(
     private const string TombstoneValue = "{\"revoked\":true}";
     private readonly ZendeskServerOptions _options = options.Value;
 
-    // Per person, bumped at the start and end of every save and removal, so GetAsync can tell that a
-    // write overlapped its vault read. Process-local, like the cache it guards (the app runs one
-    // replica); a few bytes per person who has ever written a grant. The gate makes "check the
-    // generation, then fill the cache" atomic against "bump it, then set the cache".
-    private readonly ConcurrentDictionary<string, long> _generations = new(StringComparer.Ordinal);
-    private readonly object _generationGate = new();
+    // Per person: a generation, bumped at the start and end of every save and removal, and the number
+    // of those writes still in flight. Together they let GetAsync tell that a write overlapped its
+    // vault read — the generation catches a write that began or ended during the read, the count one
+    // that spans it. Process-local, like the cache they guard (the app runs one replica); a few bytes
+    // per person who has ever written a grant. Every access is under the gate, which makes "check,
+    // then fill the cache" atomic against "begin or end a write, then set the cache".
+    private readonly Dictionary<string, WriteState> _writes = new(StringComparer.Ordinal);
+    private readonly object _writeGate = new();
 
     public string SecretName(string objectId) => $"{_options.TokenSecretPrefix}{objectId}";
 
@@ -71,7 +73,12 @@ public sealed class KeyVaultZendeskTokenStore(
         metrics?.CacheLookup("user_token", hit: false);
 
         // Taken before the vault read, so a save or removal that overlaps the read is detectable below.
-        var generation = Generation(objectId);
+        long generation;
+        lock (_writeGate)
+        {
+            generation = StateFor(objectId).Generation;
+        }
+
         ZendeskUserToken? token;
         try
         {
@@ -92,15 +99,18 @@ public sealed class KeyVaultZendeskTokenStore(
         }
 
         // Cached only if nothing has filled the entry meanwhile (a save caches before its vault write
-        // completes) and no save or removal for this person began or finished during the read. The
+        // completes), no save or removal for this person began or finished during the read, and none
+        // is still in flight — the entry a pending save cached can expire or be evicted before its
+        // write lands, and a read in that window sees the old version with the generation unchanged. The
         // provider's first read runs outside the person's lock, so without this a slow cache-miss read
         // could land after a refresh saved the rotated grant (or a disconnect wrote its tombstone) and
         // put the older state back: a spent refresh token, whose next use fails invalid_grant and
         // disconnects the person. The reader still gets what it read; a stale access token meets a
         // 401, which OnTokenRejectedAsync resolves against the newer stored grant.
-        lock (_generationGate)
+        lock (_writeGate)
         {
-            if (Generation(objectId) == generation && !cache.TryGetValue(CacheKey(objectId), out _))
+            var state = StateFor(objectId);
+            if (state.Generation == generation && state.Active == 0 && !cache.TryGetValue(CacheKey(objectId), out _))
             {
                 cache.Set(CacheKey(objectId), new CachedToken(token), _options.TokenCacheDuration);
             }
@@ -122,9 +132,9 @@ public sealed class KeyVaultZendeskTokenStore(
 
         // Cached BEFORE the write: after a refresh, Zendesk has already spent the old refresh token, so
         // if the vault write fails this replica must still hold the new one rather than the spent one.
-        lock (_generationGate)
+        lock (_writeGate)
         {
-            Advance(objectId);
+            BeginWrite(objectId);
             cache.Set(CacheKey(objectId), new CachedToken(token), _options.TokenCacheDuration);
         }
 
@@ -134,11 +144,12 @@ public sealed class KeyVaultZendeskTokenStore(
         }
         finally
         {
-            // Again once the write is over, so a read that began while it was in flight — and may have
-            // seen the previous version — is not cached either.
-            lock (_generationGate)
+            // Whether or not the write landed, so a failed write cannot leave later reads uncached, and
+            // a read that began while it was in flight — and may have seen the previous version — is
+            // not cached either.
+            lock (_writeGate)
             {
-                Advance(objectId);
+                EndWrite(objectId);
             }
         }
     }
@@ -149,22 +160,53 @@ public sealed class KeyVaultZendeskTokenStore(
         secret.Properties.ContentType = "application/json";
         secret.Properties.Tags["kind"] = "zendesk-user-token";
         secret.Properties.Tags["revoked"] = "true";
-        lock (_generationGate)
+        lock (_writeGate)
         {
-            Advance(objectId);
+            BeginWrite(objectId);
         }
 
-        await secrets.SetSecretAsync(secret, cancellationToken);
-        lock (_generationGate)
+        var written = false;
+        try
         {
-            Advance(objectId);
-            cache.Set(CacheKey(objectId), new CachedToken(null), _options.TokenCacheDuration);
+            await secrets.SetSecretAsync(secret, cancellationToken);
+            written = true;
+        }
+        finally
+        {
+            lock (_writeGate)
+            {
+                EndWrite(objectId);
+                if (written)
+                {
+                    cache.Set(CacheKey(objectId), new CachedToken(null), _options.TokenCacheDuration);
+                }
+            }
         }
     }
 
-    private long Generation(string objectId) => _generations.TryGetValue(objectId, out var value) ? value : 0;
+    // The three below are called with _writeGate held.
+    private WriteState StateFor(string objectId) =>
+        _writes.TryGetValue(objectId, out var state) ? state : _writes[objectId] = new WriteState();
 
-    private void Advance(string objectId) => _generations.AddOrUpdate(objectId, 1, (_, value) => value + 1);
+    private void BeginWrite(string objectId)
+    {
+        var state = StateFor(objectId);
+        state.Generation++;
+        state.Active++;
+    }
+
+    private void EndWrite(string objectId)
+    {
+        var state = StateFor(objectId);
+        state.Generation++;
+        state.Active--;
+    }
+
+    private sealed class WriteState
+    {
+        public long Generation;
+        public int Active;
+    }
 
     public static ZendeskUserToken? Parse(string? value)
     {
