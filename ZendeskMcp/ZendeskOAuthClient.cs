@@ -141,24 +141,41 @@ public sealed class ZendeskOAuthClient(
             return true;
         }
 
+        // From here on the caller's cancellation is not honoured: once the refresh is sent, Zendesk
+        // may already have spent the old refresh token, and the renewed grant would then be live with
+        // nobody holding it. A bounded token of its own finishes the job instead.
+        using var cleanup = new CancellationTokenSource(GrantCleanupTimeout);
         TokenResponse renewed;
         try
         {
-            renewed = await RefreshAsync(refreshToken, cancellationToken);
+            renewed = await RefreshAsync(refreshToken, cleanup.Token);
         }
-        catch (ZendeskOAuthException ex) when (ex.Error is "invalid_grant" or "invalid_token" or "unauthorized_client")
+        // Only these say the refresh token itself is dead. unauthorized_client is about this OAuth
+        // client's configuration, and the grant could work again once that is corrected.
+        catch (ZendeskOAuthException ex) when (ex.Error is "invalid_grant" or "invalid_token")
         {
             return true;
         }
-        catch (Exception ex) when (ex is not OperationCanceledException || !cancellationToken.IsCancellationRequested)
+        catch (Exception ex)
         {
             logger.LogWarning("Could not renew a rejected Zendesk grant to revoke it: {FailureType}", ex.GetType().Name);
             return false;
         }
 
-        // Just issued, so a 401 now would be unexplained: unconfirmed, not revoked.
-        return await SendRevocationAsync(renewed.AccessToken, cancellationToken) == RevocationResult.Revoked;
+        try
+        {
+            // Just issued, so a 401 now would be unexplained: unconfirmed, not revoked.
+            return await SendRevocationAsync(renewed.AccessToken, cleanup.Token) == RevocationResult.Revoked;
+        }
+        catch (OperationCanceledException)
+        {
+            logger.LogWarning("Revoking a renewed Zendesk grant did not finish within {Timeout}", GrantCleanupTimeout);
+            return false;
+        }
     }
+
+    /// <summary>How long revoking a rejected grant through its refresh token may take, whatever the caller does.</summary>
+    internal static readonly TimeSpan GrantCleanupTimeout = TimeSpan.FromSeconds(30);
 
     /// <summary>
     /// Revokes one access token at Zendesk. Returns whether that access token is now known to be

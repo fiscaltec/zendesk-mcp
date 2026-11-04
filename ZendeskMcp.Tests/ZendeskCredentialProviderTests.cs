@@ -413,6 +413,68 @@ public class ZendeskCredentialProviderTests
         zendesk.Requests.Should().ContainSingle();
     }
 
+    [Fact]
+    public async Task Disconnect_WhenTheRefreshIsRefusedAsUnauthorizedClient_SaysTheRevocationIsUnconfirmed()
+    {
+        // unauthorized_client is about the OAuth client's configuration, not the refresh token: the
+        // grant may work again once the client is fixed, so it is not proof that the grant is dead.
+        using var zendesk = TestHelpers.CreateFakeZendesk(request => request.Path switch
+        {
+            "/oauth/tokens" => FakeResponse.WithStatus(HttpStatusCode.BadRequest, "{\"error\":\"unauthorized_client\"}"),
+            _ => FakeResponse.WithStatus(HttpStatusCode.Unauthorized, "{\"error\":\"invalid_token\"}"),
+        });
+        var (service, store) = TestHelpers.BuildUserZendeskService(zendesk.Client, TestHelpers.SampleToken("rejected", refreshToken: "r1"));
+
+        var outcome = await service.Credentials.DisconnectAsync(TestContext.Current.CancellationToken);
+
+        outcome.Should().Be(DisconnectOutcome.ForgottenButNotRevoked);
+        (await store.GetAsync(TestHelpers.TestObjectId)).Should().BeNull();
+    }
+
+    [Fact]
+    public async Task RevokeGrant_FinishesRevokingTheRenewedGrantWhenTheCallerCancelsAfterTheRefresh()
+    {
+        // Once the refresh has been sent, Zendesk may already have spent the old refresh token, so the
+        // renewed grant is the only live one: it must be revoked even if the caller has since given up.
+        using var cts = new CancellationTokenSource();
+        var handler = new CancelOnRefreshHandler(cts);
+        using var http = new HttpClient(handler);
+        using var cache = new Microsoft.Extensions.Caching.Memory.MemoryCache(new Microsoft.Extensions.Caching.Memory.MemoryCacheOptions());
+        var client = new ZendeskOAuthClient(new TestHelpers.SingleClientFactory(http),
+            Microsoft.Extensions.Options.Options.Create(new ZendeskServerOptions { Subdomain = "example", OAuthClientId = "id", DevelopmentOAuthClientSecret = "secret" }),
+            cache, Microsoft.Extensions.Logging.Abstractions.NullLogger<ZendeskOAuthClient>.Instance);
+
+        var revoked = await client.RevokeGrantAsync("rejected", "r1", cts.Token);
+
+        revoked.Should().BeTrue();
+        cts.IsCancellationRequested.Should().BeTrue("the caller cancelled while the refresh was in flight");
+        handler.Seen.Should().Equal("DELETE Bearer rejected", "POST", "DELETE Bearer renewed");
+    }
+
+    // Refuses the first revocation, cancels the caller's token when the refresh arrives, then answers it.
+    private sealed class CancelOnRefreshHandler(CancellationTokenSource caller) : HttpMessageHandler
+    {
+        public List<string> Seen { get; } = [];
+
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+        {
+            if (request.Method == HttpMethod.Post)
+            {
+                Seen.Add("POST");
+                caller.Cancel();
+                return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)
+                {
+                    Content = new StringContent("{\"access_token\":\"renewed\",\"refresh_token\":\"r2\",\"expires_in\":7200,\"token_type\":\"bearer\"}",
+                        System.Text.Encoding.UTF8, "application/json"),
+                });
+            }
+
+            var bearer = request.Headers.Authorization!.Parameter;
+            Seen.Add($"DELETE Bearer {bearer}");
+            return Task.FromResult(new HttpResponseMessage(bearer == "rejected" ? HttpStatusCode.Unauthorized : HttpStatusCode.NoContent));
+        }
+    }
+
     // Never answers: a request through it ends only when HttpClient.Timeout or the caller cancels.
     private sealed class StalledHandler : HttpMessageHandler
     {
