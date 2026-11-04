@@ -14,8 +14,8 @@ there is no sandbox), as the signed-in person. Two independent things stop it wr
 - its own Zendesk OAuth client, `fiscal_zendesk_mcp_staging`, whose allowed scopes are `read` only,
   so Zendesk refuses a write made with a staging token even if the guard were lifted.
 
-Nothing in this runbook lifts either, and nothing here changes production. Step 3 changes **your own**
-Entra group membership for a few minutes and restores it.
+Nothing in this runbook lifts either, and nothing here changes production. Step 3 can change **your own**
+Entra group membership for a few minutes, and restores exactly what it removed.
 
 ## Before you start
 
@@ -81,7 +81,7 @@ client: stop and check `Zendesk__OAuthClientId` on `zendesk-staging-ca-uksouth`.
 Verify (the refusal is a Warning; the revoke logs only if it fails):
 
 ```bash
-q 'AppTraces | where TimeGenerated > ago(1h) and AppRoleName == "zendesk-staging-ca-uksouth" and (Message has "Refused a Zendesk connection" or Message has "revocation returned" or Message has "status code 40") | project TimeGenerated, SeverityLevel, Message'
+q 'AppTraces | where TimeGenerated > ago(1h) and AppRoleName == "zendesk-staging-ca-uksouth" and (Message has "Refused a Zendesk connection" or Message has "revocation returned" or Message has "Setting HTTP status code 403") | project TimeGenerated, SeverityLevel, Message'
 ```
 
 Expect `Refused a Zendesk connection for <oid>: <reason> (Zendesk user <other id>)` and a `403`, and
@@ -97,36 +97,49 @@ The **email-mismatch** branch needs a second login that is an **agent** with a d
 2026-11-04 only an end user was available, so only the role branch was seen live; the mismatch branch
 shares the refuse-and-revoke code and is covered by `ZendeskConnectEndpointsTests`.
 
-## 3 — Tiers: a reader sees and gets only read tools
+## 3 — Tiers: a reader gets only read access
 
-Either have a colleague who holds only the **read** tier do this step, or move yourself to the read
-tier for a few minutes. To move yourself (needs a role that can change group membership):
+⚠️ **On staging the tool list cannot show the tier.** `Authorization__ReadOnly=true` hides the write
+tools from **every** caller, so an admin sees the same 28 tools as a reader there. On staging the only
+evidence of the tier is the audit record's `AuditPermissionTier` (below). To see the tool list differ
+by tier, do this step against **production**, which is not read-only (that is where it was run on
+2026-11-04); the step makes no writes either way.
+
+Either have a colleague who holds only the **read** tier do it, or move yourself to the read tier for
+a few minutes. To move yourself (needs a role that can change group membership), record your
+**direct** memberships first and change only those:
 
 ```bash
 ME=$(az ad user show --id <you>@fiscaltec.com --query id -o tsv)
-for g in sg-zendesk-readers sg-zendesk-editors sg-zendesk-admins; do printf '%s direct=%s\n' $g "$(az ad group member check -g $g --member-id $ME --query value -o tsv)"; done   # note these
-az ad group member remove -g sg-zendesk-editors --member-id $ME; az ad group member remove -g sg-zendesk-admins --member-id $ME
+for g in sg-zendesk-editors sg-zendesk-admins; do [ "$(az ad group member check -g $g --member-id $ME --query value -o tsv)" = true ] && echo $g; done > ~/zendesk-tier-groups.txt
+cat ~/zendesk-tier-groups.txt   # the groups you are a DIRECT member of; only these are removed and restored
+while read -r g; do az ad group member remove -g "$g" --member-id "$ME" && echo "removed from $g"; done < ~/zendesk-tier-groups.txt
 ```
+
+If you hold editor or admin through a **nested** group (a department), removing direct membership
+does not drop the tier: the check below will still show write or delete, and only a colleague who
+holds read alone can do this step.
 
 Wait a minute (`Authorization:LiveGroupCacheSeconds` is 60), reconnect the server in the client so it
 re-reads `tools/list`, then:
 
-1. List the server's tools. Expect **only** read tools — `Get_`/`List_`/`Search_`/`Count_`/`Find_`/
-   `Preview_`/`Export_`, plus `Get_zendesk_connect_link` and `Disconnect_zendesk` — **28** of 45 at
-   the time of writing. No `Create_`, `Update_`, `Set_`, `Apply_`, `Add_` or `Request_` tool.
+1. **Production only:** list the server's tools. Expect **only** read tools — `Get_`/`List_`/
+   `Search_`/`Count_`/`Find_`/`Preview_`/`Export_`, plus `Get_zendesk_connect_link` and
+   `Disconnect_zendesk` — **28** of 45 at the time of writing. No `Create_`, `Update_`, `Set_`,
+   `Apply_`, `Add_` or `Request_` tool. (On staging you will see the same 28 whatever your tier.)
 2. Run a read, e.g. *search for three tickets created this week*.
 
-Verify the tier the server used:
+Verify the tier the server used, and do not go on until it shows `zendesk:read` alone (an editor or
+admin shows `zendesk:delete,zendesk:read,zendesk:write`):
 
 ```bash
 q 'AppEvents | where TimeGenerated > ago(1h) and Name == "ZendeskToolCall" and tostring(Properties.AuditUserId) == "<oid>" | project TimeGenerated, AppRoleName, tool=tostring(Properties.McpToolName), tier=tostring(Properties.AuditPermissionTier), outcome=tostring(Properties.AuditOutcome)'
 ```
 
-Expect `zendesk:read` alone (an editor or admin shows `zendesk:delete,zendesk:read,zendesk:write`).
-**Restore** the groups you noted:
+**Restore** exactly the groups you removed:
 
 ```bash
-az ad group member add -g sg-zendesk-editors --member-id $ME; az ad group member add -g sg-zendesk-admins --member-id $ME
+while read -r g; do az ad group member add -g "$g" --member-id "$ME" && echo "restored to $g"; done < ~/zendesk-tier-groups.txt && rm ~/zendesk-tier-groups.txt
 ```
 
 Zendesk's **own** restrictions (an agent limited to some groups sees only their tickets) are a
@@ -144,7 +157,7 @@ Verify the refreshed token was **persisted**, not only cached (wait 10 minutes f
 q 'AzureDiagnostics | where ResourceProvider == "MICROSOFT.KEYVAULT" and TimeGenerated > ago(1h) and id_s has "zendesk-staging-user-<oid>" | project TimeGenerated, OperationName, httpStatusCode_d | order by TimeGenerated asc'
 ```
 
-Expect a `SecretSet` 200 seconds before the successful call. A refused refresh logs
+Expect a `SecretSet` (status 200) a few seconds before the successful call. A refused refresh logs
 `Zendesk refused to refresh the token for <oid> (<error code>); forgetting the grant` and returns a
 connect link.
 
