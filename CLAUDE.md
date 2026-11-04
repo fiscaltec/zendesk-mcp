@@ -597,7 +597,7 @@ Dropped from Swifteq's set: `get_usage` and `submit_mcp_feedback` (Swifteq billi
 
 xUnit v3 on **Microsoft.Testing.Platform** (not VSTest): `global.json` selects the runner, the test project is an `Exe`, and VSTest-only flags (`--filter "FullyQualifiedName~…"`, `--logger`, `--collect`) are rejected — use `--filter-class` / `--filter-method`, `--report-trx`, `--coverage`.
 
-⚠️ **Run the tests in a shell without the dev-mode variables.** The host-based tests build the app with `WebApplicationFactory`, which reads environment variables, so `OAuth__NoAuth`, `Authorization__ReadOnly`, `Zendesk__DevelopmentAccessToken` and friends left over from running the server locally override the tests' own configuration — about 100 tests fail for that reason alone. CI does not set them. Clear them first, e.g. `env -u OAuth__NoAuth -u Authorization__ReadOnly -u Zendesk__DevelopmentAccessToken -u Zendesk__Subdomain -u ASPNETCORE_ENVIRONMENT dotnet test --solution ZendeskMcp.sln -c Debug`. #8 makes the tests immune and removes this paragraph.
+The tests are immune to a shell set up to run the server locally: `AmbientConfiguration`, a module initialiser in the test assembly, clears any inherited variable under the sections `Program.cs` reads (`OAuth__`, `Authorization__`, `Zendesk__`, `Audit__`, `ToolsListCache__`, `ApplicationInsights__`, `Logging__`), plus `ASPNETCORE_ENVIRONMENT`, `AllowedHosts` and `OTEL_*`, before any test runs, so the variables used to run the server locally cannot change the results (#8). It changes only the test process's environment; fixtures set their own values afterwards.
 
 | Area | Tests |
 |---|---|
