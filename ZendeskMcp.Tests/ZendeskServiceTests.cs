@@ -315,4 +315,38 @@ public class ZendeskServiceTests
     {
         ZendeskService.Segment("en-gb/../../users").Should().Be("en-gb%2F..%2F..%2Fusers");
     }
+
+    [Theory]
+    [InlineData("""[]""")]
+    [InlineData("""{"tickets":[],"meta":"none"}""")]
+    [InlineData("""{"tickets":[],"meta":{"has_more":"yes"}}""")]
+    [InlineData("""{"tickets":[],"meta":{"has_more":true,"after_cursor":7}}""")]
+    public async Task GetAllPagesAsync_RefusesAMalformedPage_RatherThanReturningAShortResult(string page)
+    {
+        using var zendesk = TestHelpers.CreateFakeZendesk(_ => FakeResponse.Json(page));
+        var service = TestHelpers.BuildZendeskService(zendesk.Client);
+
+        var act = () => service.GetAllPagesAsync("/api/v2/tickets", null, "tickets", maxItems: 100);
+
+        await act.Should().ThrowAsync<ZendeskResponseFormatException>();
+    }
+
+    [Fact]
+    public async Task GetAllPagesAsync_CallsBeforeNextPage_OnlyBeforeLaterPages_AndStopsWhenItThrows()
+    {
+        using var zendesk = TestHelpers.CreateFakeZendesk(_ => FakeResponse.Json("""{"tickets":[{"id":1}],"meta":{"has_more":true,"after_cursor":"c"}}"""));
+        var service = TestHelpers.BuildZendeskService(zendesk.Client);
+        var calls = 0;
+
+        var act = () => service.GetAllPagesAsync("/api/v2/tickets", null, "tickets", maxItems: 100, beforeNextPage: () =>
+        {
+            if (++calls == 2)
+            {
+                throw new TimeoutException("stop");
+            }
+        });
+
+        await act.Should().ThrowAsync<TimeoutException>();
+        zendesk.Requests.Should().HaveCount(2, "the first page needs no check, and the third was never requested");
+    }
 }
