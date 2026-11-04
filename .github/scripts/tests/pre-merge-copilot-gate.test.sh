@@ -43,7 +43,8 @@ new_case() {
 	       {\"user\":{\"login\":\"copilot-pull-request-reviewer[bot]\"},\"submitted_at\":\"2026-10-02T09:00:00Z\",\"commit_id\":\"$HEAD_SHA\"},
 	       {\"user\":{\"login\":\"someone-else\"},\"submitted_at\":\"2026-10-03T09:00:00Z\",\"commit_id\":\"$OLD_SHA\"}]" \
 		>"$F/${REPO}_pulls_7_reviews.json"
-	echo '[{"resolved":true,"outdated":false,"comment_ids":[1]}]' >"$F/${REPO}_pulls_7_ccr_review_threads.json"
+	echo '[{"resolved":true,"outdated":false,"comment_ids":[1,2]}]' >"$F/${REPO}_pulls_7_ccr_review_threads.json"
+	echo '[{"id":1,"in_reply_to_id":null},{"id":2,"in_reply_to_id":1}]' >"$F/${REPO}_pulls_7_comments.json"
 	echo '{"data":{"repository":{"pullRequest":{"reviewThreads":{"nodes":[{"isResolved":true}],"pageInfo":{"hasNextPage":false}}}}}}' >"$F/graphql.json"
 }
 
@@ -87,6 +88,14 @@ new_case; expect_allow "gh pr merge from the branch, pinned" "gh pr merge --squa
 new_case; unset CLAUDE_CODE_REMOTE; expect_allow "local session reads threads through GraphQL" "$REST"
 new_case; echo '{"number":7,"head":{"sha":"'"$HEAD_SHA"'"},"user":{"login":"dependabot[bot]"}}' >"$F/${REPO}_pulls_7.json"
 rm "$F/${REPO}_pulls_7_reviews.json"; expect_allow "Dependabot is exempt (no reviews needed)" "$REST"
+
+# --- gh reached by another spelling (the settings.json filter is `Bash(*gh*)`; step 1 decides) ----
+new_case; expect_allow "absolute path to gh, pinned" "/usr/local/bin/gh api -X PUT repos/{owner}/{repo}/pulls/7/merge -f merge_method=squash -f sha=$HEAD_SHA"
+new_case; expect_deny "absolute path to gh pr merge, unpinned" "/usr/local/bin/gh pr merge 7 --squash" "--match-head-commit $HEAD_SHA"
+new_case; expect_deny "command gh api, unpinned" "command gh api -X PUT repos/{owner}/{repo}/pulls/7/merge -f merge_method=squash" "add -f sha=$HEAD_SHA"
+new_case; expect_deny "env gh pr merge, unpinned" "env gh pr merge 7 --squash" "--match-head-commit $HEAD_SHA"
+new_case; expect_deny "GH_HOST=… gh api, unpinned" "GH_HOST=github.com gh api -X PUT repos/{owner}/{repo}/pulls/7/merge -f merge_method=squash" "add -f sha=$HEAD_SHA"
+new_case; expect_allow "a command that merely contains gh" "git log --grep=ghost"
 
 # --- not a merge: no gating -----------------------------------------------------------------------
 new_case; expect_allow "an unrelated gh api call" "gh api repos/{owner}/{repo}/pulls/7"
@@ -136,9 +145,22 @@ new_case; rm "$F/${REPO}_pulls_7_reviews.json"; expect_deny "reviews refused" "$
 # --- threads --------------------------------------------------------------------------------------
 new_case; echo '[{"resolved":true,"comment_ids":[1]},{"resolved":false,"outdated":true,"comment_ids":[2]}]' >"$F/${REPO}_pulls_7_ccr_review_threads.json"
 expect_deny "an unresolved outdated thread (cloud)" "$REST" "1 unresolved review thread"
-new_case; jq -n '[range(100) | {resolved:true,comment_ids:[.]}]' >"$F/${REPO}_pulls_7_ccr_review_threads.json"
-expect_deny "100 threads (cloud): tail unverifiable" "$REST" "cannot verify the tail"
+new_case; jq -n '[range(1; 31) | {resolved:true,comment_ids:[.]}]' >"$F/${REPO}_pulls_7_ccr_review_threads.json"
+jq -n '[range(1; 32) | {id:., in_reply_to_id:null}]' >"$F/${REPO}_pulls_7_comments.json"
+expect_deny "thread list cut short at 30 (cloud): a comment in no thread" "$REST" "1 review comment(s) on PR #7 belong to no thread"
+new_case; jq -n '[range(1; 151) | {resolved:true,comment_ids:[.]}]' >"$F/${REPO}_pulls_7_ccr_review_threads.json"
+jq -n '[range(1; 151) | {id:., in_reply_to_id:null}]' >"$F/${REPO}_pulls_7_comments.json"
+expect_allow "150 threads, every comment in one (cloud)" "$REST"
+new_case; echo '[{"resolved":true,"comment_ids":[1]}]' >"$F/${REPO}_pulls_7_ccr_review_threads.json"
+expect_deny "a reply missing from the thread list (cloud)" "$REST" "belong to no thread"
+new_case; echo '[]' >"$F/${REPO}_pulls_7_ccr_review_threads.json"; echo '[]' >"$F/${REPO}_pulls_7_comments.json"
+expect_allow "no threads and no comments (cloud)" "$REST"
+new_case; rm "$F/${REPO}_pulls_7_comments.json"; expect_deny "review comments refused (cloud)" "$REST" "could not read the review comments"
 new_case; rm "$F/${REPO}_pulls_7_ccr_review_threads.json"; expect_deny "threads refused (cloud)" "$REST" "could not read review threads"
+new_case; echo '{"not":"a list"}' >"$F/${REPO}_pulls_7_ccr_review_threads.json"; expect_deny "threads unreadable (cloud)" "$REST" "could not read review threads"
+new_case; unset CLAUDE_CODE_REMOTE
+echo '{"data":{"repository":{"pullRequest":{"reviewThreads":{"nodes":[{"isResolved":true}],"pageInfo":{"hasNextPage":true}}}}}}' >"$F/graphql.json"
+expect_deny "more than 100 threads (local)" "$REST" "cannot verify the tail"
 new_case; unset CLAUDE_CODE_REMOTE
 echo '{"data":{"repository":{"pullRequest":{"reviewThreads":{"nodes":[{"isResolved":false}],"pageInfo":{"hasNextPage":false}}}}}}' >"$F/graphql.json"
 expect_deny "an unresolved thread (local)" "$REST" "1 unresolved review thread"
