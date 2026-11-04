@@ -179,19 +179,16 @@ public sealed class StartupGuardsTests : IDisposable
     }
 
     [Theory]
-    [InlineData("false", "https://kv.vault.azure.net/", false, false, true)] // a deployed target
-    [InlineData("false", null, false, false, true)]                          // sign-in on, Production, no vault
-    [InlineData("False", "https://kv.vault.azure.net/", false, true, true)]  // a vault looks deployed even in Development
-    [InlineData("false", null, false, true, false)]                          // local per-user OAuth without tier groups
-    [InlineData("false", null, true, false, false)]                          // NoAuth bypasses the checks anyway
-    [InlineData("true", "https://kv.vault.azure.net/", false, false, false)]
-    [InlineData(null, "https://kv.vault.azure.net/", false, false, false)]   // unset means on
-    public void EnsureAuthorizationIsOn_RefusesSwitchingOffTheTierChecksOutsideLocalDevelopment(
-        string? setting, string? keyVaultUri, bool noAuth, bool isDevelopment, bool refused)
+    [InlineData("false", false, true)]  // sign-in on: refused wherever it runs, local development included
+    [InlineData("False", false, true)]
+    [InlineData("false", true, false)]  // NoAuth bypasses the checks anyway
+    [InlineData("true", false, false)]
+    [InlineData(null, false, false)]    // unset means on
+    public void EnsureAuthorizationIsOn_RefusesSwitchingOffTheTierChecksOutsideNoAuth(string? setting, bool noAuth, bool refused)
     {
         // Authorization:Enabled=false lets any signed-in person call any tool, writes included, and
         // until #12 nothing refused it in a deployed target.
-        var act = () => StartupGuards.EnsureAuthorizationIsOn(setting, keyVaultUri, noAuth, isDevelopment);
+        var act = () => StartupGuards.EnsureAuthorizationIsOn(setting, noAuth);
 
         if (refused)
         {

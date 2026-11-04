@@ -322,8 +322,7 @@ StartupGuards.EnsureDevelopmentTokenIsLocal(
     zendeskSection["KeyVaultUri"], noAuth, builder.Environment.IsDevelopment());
 StartupGuards.EnsureIdentityBindingIsOn(zendeskSection["RequireEmailMatch"], noAuth);
 StartupGuards.EnsureAuthorizationIsOn(
-    builder.Configuration.GetSection(ToolAuthorizationOptions.SectionName)["Enabled"],
-    zendeskSection["KeyVaultUri"], noAuth, builder.Environment.IsDevelopment());
+    builder.Configuration.GetSection(ToolAuthorizationOptions.SectionName)["Enabled"], noAuth);
 
 if (!noAuth)
 {
