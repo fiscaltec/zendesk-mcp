@@ -100,6 +100,47 @@ public class ZendeskConnectEndpointsTests
     }
 
     [Fact]
+    public async Task ABrowserThatGivesUpDuringTheCodeExchange_StillHasTheIssuedGrantRevoked()
+    {
+        // The exchange runs on a token of its own, so a grant Zendesk issues reaches UnkeptGrant even
+        // when the browser has gone, and is revoked rather than lost while live (#13).
+        using var factory = new Factory(zendeskEmail: "agent@example.com") { SlowPath = ("/oauth/tokens", TimeSpan.FromMilliseconds(400)) };
+        using var client = factory.CreateClient(new WebApplicationFactoryClientOptions { AllowAutoRedirect = false });
+        var state = await StartAsync(factory, client, "agent@example.com");
+
+        using var abandon = new CancellationTokenSource();
+        using var request = new HttpRequestMessage(HttpMethod.Get, $"/zendesk/callback?code=c&state={state}");
+        request.Headers.Add("Cookie", $"zendesk_connect_state={state}");
+        var callback = client.SendAsync(request, abandon.Token);
+        await WaitUntilAsync(() => factory.ZendeskRequests.Any(r => r.Path == "/oauth/tokens"));
+        await abandon.CancelAsync();
+        await FluentActions.Awaiting(() => callback).Should().ThrowAsync<OperationCanceledException>();
+
+        await WaitUntilAsync(() => factory.Revocations.Count > 0);
+        factory.Revocations.Should().Equal("issued-access");
+        (await factory.Store.GetAsync(ObjectId, TestContext.Current.CancellationToken)).Should().BeNull();
+    }
+
+    [Fact]
+    public async Task AReconnectWhoseStoreFailsAfterTheWriteLanded_RevokesBothGrants_AndForgetsTheConnection()
+    {
+        // SaveAsync has overwritten the previous grant before it fails. Revoking only the new grant
+        // would leave the previous one neither stored nor revoked, and the store holding a revoked
+        // token (#13).
+        using var factory = new Factory(zendeskEmail: "agent@example.com");
+        using var client = factory.CreateClient(new WebApplicationFactoryClientOptions { AllowAutoRedirect = false });
+        await factory.Store.SaveAsync(ObjectId, TestHelpers.SampleToken("previous-access"), TestContext.Current.CancellationToken);
+        var state = await StartAsync(factory, client, "agent@example.com");
+        factory.AfterSave = () => throw new InvalidOperationException("the vault write reported a failure after landing");
+
+        var callback = await GetWithCookieAsync(client, $"/zendesk/callback?code=c&state={state}", state);
+
+        callback.StatusCode.Should().Be(HttpStatusCode.ServiceUnavailable);
+        factory.Revocations.Should().BeEquivalentTo(["issued-access", "previous-access"]);
+        (await factory.Store.GetAsync(ObjectId, TestContext.Current.CancellationToken)).Should().BeNull("the store must not keep a revoked grant");
+    }
+
+    [Fact]
     public async Task ADifferentZendeskLogin_IsRefused_RevokedAndNotStored()
     {
         using var factory = new Factory(zendeskEmail: "someone.else@example.com");
@@ -344,6 +385,9 @@ public class ZendeskConnectEndpointsTests
         /// <summary>A path the stub never answers: the request ends only when it is cancelled or times out.</summary>
         public string? StallPath { get; init; }
 
+        /// <summary>A path the stub answers only after a delay, giving up if the request is cancelled first.</summary>
+        public (string Path, TimeSpan Delay)? SlowPath { get; init; }
+
         /// <summary>Overrides the OAuth client's 15 s timeout, so a test can make a stalled call time out.</summary>
         public TimeSpan? OAuthTimeout { get; init; }
 
@@ -406,6 +450,11 @@ public class ZendeskConnectEndpointsTests
                 if (recorded.Path == owner.StallPath)
                 {
                     await Task.Delay(Timeout.Infinite, cancellationToken);
+                }
+
+                if (owner.SlowPath is { } slow && recorded.Path == slow.Path)
+                {
+                    await Task.Delay(slow.Delay, cancellationToken);
                 }
 
                 var json = recorded.Path switch
