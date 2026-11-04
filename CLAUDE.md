@@ -20,7 +20,7 @@ git -C <vitally-mcp clone> fetch origin main && git -C <vitally-mcp clone> log -
 That lists vitally-mcp's non-source changes since this audit; decide each as #10 did, then move the commit named here. Run on 2026-11-04, it listed nothing: the one later commit, `fdc6f5e` (#197), touches only the two `.csproj` files. ⚠️ The clone must hold history back to `0c6d4e1`: in a `--depth 1` clone the command fails with `fatal: bad revision` (exit 128), which is not "no drift". Check the exit status, not just the empty output. Source drift (a fix to a shared component such as the OAuth proxy, `ToolAuthorizer` or the Graph resolver) is out of this command's scope: list it with the same range over `-- VitallyMcp`, and read each commit, since the code here was ported and renamed rather than copied file for file.
 
 **Key characteristics:**
-- 47 tools over tickets, KPI/SLA/CSAT reporting, macros, users and organisations, configuration and the Help Center — see *Tools*.
+- 48 tools over tickets, KPI/SLA/CSAT reporting, macros, users and organisations, configuration and the Help Center — see *Tools*.
 - **Per-user Zendesk OAuth.** Every Zendesk call is made with the signed-in person's own Zendesk token. There is no shared Zendesk credential in a deployed target, so Zendesk attributes every change to the agent and applies their role, group and brand restrictions. This is the main architectural difference from vitally-mcp, which calls Vitally with one shared key.
 - **Two OAuth relationships, never mixed:** Entra signs people in to *this server* (`/oauth/*`, unchanged from vitally-mcp); Zendesk OAuth lets the server act *as them* (`/zendesk/connect`, `/zendesk/callback`).
 - **Streamable HTTP transport** (MCP 2026-07-28), stateless, on `ModelContextProtocol.AspNetCore`.
@@ -712,7 +712,7 @@ Zendesk ──302──> /zendesk/callback?code&state ──> exchange code ─�
 
 ### Account-wide feature switches
 
-`Zendesk:Features` — `AllowPublicReplies`, `AllowArticlePublishing`, `AllowHelpCenterStructureChanges`, `AllowMacroChanges`, `AllowUserAndOrganizationChanges`, all **off** by default in the application and all **on** in FISCAL's deployment (Terraform defaults, decided 2026-10-28) — guard the actions whose effect reaches beyond the agent: customers' inboxes, the public Help Center (published articles and who can view an article, and categories and sections, which have no draft state), every agent's macros, who can read an organisation's tickets. `ToolJson.RequireFeature` refuses with a message naming the setting so the model reports a setting rather than retrying. They sit on top of the Entra tier and the agent's Zendesk role; they do not replace either.
+`Zendesk:Features` — `AllowPublicReplies`, `AllowArticlePublishing`, `AllowHelpCenterStructureChanges`, `AllowMacroChanges`, `AllowUserAndOrganizationChanges`, all **off** by default in the application and all **on** in FISCAL's deployment (Terraform defaults, decided 2026-10-28) — guard the actions whose effect reaches beyond the agent: customers' inboxes (public comments, CCs, public macro replies and public merge comments), the public Help Center (published articles and who can view an article, and categories and sections, which have no draft state), every agent's macros, who can read an organisation's tickets. `ToolJson.RequireFeature` refuses with a message naming the setting so the model reports a setting rather than retrying. They sit on top of the Entra tier and the agent's Zendesk role; they do not replace either.
 
 ### Repeat guards
 
@@ -746,7 +746,7 @@ Ticket comments, article bodies and user fields are written by customers and can
 | Area | File | Tools |
 |---|---|---|
 | Connection | `ConnectionTools.cs` | `Get_zendesk_connection`, `Get_zendesk_connect_link`, `Disconnect_zendesk` |
-| Tickets | `TicketsTools.cs`, `TicketsBulkTools.cs`, `TicketConversationsTools.cs`, `TicketAttachmentsTools.cs` | `Search_tickets`, `Count_tickets`, `Get_ticket`, `Get_ticket_conversation`, `Bulk_get_ticket_conversations`, `Create_ticket`, `Update_ticket`, `Bulk_update_tickets`, `Get_ticket_attachment`, `Request_ticket_attachment_upload` |
+| Tickets | `TicketsTools.cs`, `TicketsBulkTools.cs`, `TicketMergeTools.cs`, `TicketConversationsTools.cs`, `TicketAttachmentsTools.cs` | `Search_tickets`, `Count_tickets`, `Get_ticket`, `Get_ticket_conversation`, `Bulk_get_ticket_conversations`, `Create_ticket`, `Update_ticket`, `Bulk_update_tickets`, `Merge_tickets`, `Get_ticket_attachment`, `Request_ticket_attachment_upload` |
 | Reporting | `AnalyticsTools.cs`, `SatisfactionTools.cs`, `TicketSla.cs` | `Get_ticket_metrics_summary`, `Get_sla_summary`, `Get_sla_queue`, `Get_satisfaction_ratings` |
 | Macros | `MacrosTools.cs` | `Search_macros`, `Preview_macro`, `Apply_macro`, `Create_macro`, `Update_macro`, `Set_macros_active` |
 | People | `UsersTools.cs`, `OrganizationsTools.cs` | `Search_users`, `Find_agent_by_name`, `Search_organizations`, `Add_user_to_organization` |
