@@ -13,7 +13,7 @@ namespace ZendeskMcp.Tests;
 /// soft-deleted name cannot be set again until purged — a delete would make disconnect-then-reconnect
 /// fail for the whole retention period.
 /// </summary>
-public class ZendeskTokenStoreTests
+public class ZendeskTokenStoreTests : IDisposable
 {
     private const string ObjectId = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
 
@@ -126,7 +126,7 @@ public class ZendeskTokenStoreTests
         // before its last one. If the entry the save cached is evicted or expires in that window, the
         // read finds the cache empty and the vault still old — and would cache the spent grant (#13).
         var vault = new StatefulVault(TestHelpers.SampleToken("old", refreshToken: "spent"));
-        var cache = new MemoryCache(new MemoryCacheOptions());
+        using var cache = new MemoryCache(new MemoryCacheOptions());
         var store = Build(vault.Secrets.Object, cache);
 
         var save = store.SaveAsync(ObjectId, TestHelpers.SampleToken("new", refreshToken: "rotated"), TestContext.Current.CancellationToken);
@@ -158,7 +158,7 @@ public class ZendeskTokenStoreTests
         // The active-write count is released in a finally: a failed write must not leave every later
         // read uncached (and so reaching Key Vault on every call).
         var vault = new StatefulVault(TestHelpers.SampleToken("old")) { FailWrites = true };
-        var cache = new MemoryCache(new MemoryCacheOptions());
+        using var cache = new MemoryCache(new MemoryCacheOptions());
         var store = Build(vault.Secrets.Object, cache);
         vault.ReleaseWrites();
 
@@ -221,10 +221,27 @@ public class ZendeskTokenStoreTests
         KeyVaultZendeskTokenStore.Parse(value).Should().BeNull();
     }
 
-    private static KeyVaultZendeskTokenStore Build(SecretClient secrets, IMemoryCache? cache = null) =>
-        new(secrets, cache ?? new MemoryCache(new MemoryCacheOptions()),
+    // Caches made here are owned by the test class and disposed with it.
+    private readonly List<MemoryCache> _caches = [];
+
+    public void Dispose()
+    {
+        foreach (var cache in _caches)
+        {
+            cache.Dispose();
+        }
+    }
+
+    private KeyVaultZendeskTokenStore Build(SecretClient secrets, IMemoryCache? cache = null) =>
+        new(secrets, cache ?? Owned(new MemoryCache(new MemoryCacheOptions())),
             Options.Create(new ZendeskServerOptions { Subdomain = "acme" }),
             NullLogger<KeyVaultZendeskTokenStore>.Instance);
+
+    private MemoryCache Owned(MemoryCache cache)
+    {
+        _caches.Add(cache);
+        return cache;
+    }
 
     // The first read of the secret waits until released and then answers with `stale`; later reads
     // answer at once with the same. Writes succeed.
