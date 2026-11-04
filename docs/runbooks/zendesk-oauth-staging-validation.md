@@ -134,9 +134,9 @@ Wait a minute (`Authorization:LiveGroupCacheSeconds` is 60), reconnect the serve
 re-reads `tools/list`, then:
 
 1. **Production only:** list the server's tools. Expect **only** read tools — `Get_`/`List_`/
-   `Search_`/`Count_`/`Find_`/`Preview_`/`Export_`, plus `Bulk_get_ticket_conversations`,
-   `Get_zendesk_connect_link` and `Disconnect_zendesk` — **29** of 47 at the time of writing. No `Create_`,
-   `Update_`, `Set_`, `Apply_`, `Add_`, `Merge_` or `Request_` tool. (On staging you will see the same 29
+   `Search_`/`Count_`/`Find_`/`Preview_`/`Export_`/`Bulk_get_`, plus `Get_zendesk_connect_link` and
+   `Disconnect_zendesk` — **29** of 48 at the time of writing. No `Create_`, `Update_`,
+   `Bulk_update_`, `Merge_`, `Set_`, `Apply_`, `Add_` or `Request_` tool. (On staging you will see the same 29
    whatever your tier.)
 2. Run a read, e.g. *search for three tickets created this week*.
 
