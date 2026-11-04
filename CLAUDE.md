@@ -632,9 +632,10 @@ both are normal, so check its image before concluding anything from how it behav
 | Case | What the train does | How you know |
 |---|---|---|
 | **Pinned**: `STAGING_PINNED` on the `staging` GitHub environment is non-empty | Skips staging and ships production. The value is the reason, printed as a notice on every run that cuts a tag while it is set | `gh variable list --env staging` |
-| **Absent**: `check-serving-revisions.sh` exit 3, because `az` says the app does not exist | Skips staging and ships production | the gate job's `Staging absent` notice. ⚠️ A wrong `CONTAINER_APP` on the `staging` environment reads the same way |
+| **Absent**: `check-serving-revisions.sh` exit 3, because `az` says the app does not exist | Skips staging and ships production | the gate job's `Staging absent` notice. ⚠️ A wrong `CONTAINER_APP` on the `staging` environment (it must be `zendesk-staging-ca-uksouth`) reads the same way if no app has that name. If it names another **existing** app (both apps are in `zendesk-prod-rg-uksouth`), the gate says deploy and the train's staging job rolls **that** app |
 
-Anything else the gate cannot establish fails the run, rather than skipping. Pin staging whenever it
+Anything else the gate cannot establish, a wrong `RESOURCE_GROUP` included, fails the run rather
+than skipping. Pin staging whenever it
 is running something ahead of production, such as a branch mid-validation, which the next nightly tag
 would otherwise overwrite:
 
@@ -661,9 +662,10 @@ the same ones against its identically shaped gate.
 `deploy.yml` runs `.github/scripts/verify-oauth-metadata.sh <origin>` after the revision is live and
 before the rollback step, so a failure reverts the revision. `/health` == 200 and unauthenticated
 `/mcp` == 401 both stay green while the metadata documents are wrong. A wrong `issuer`, a broken
-`issuer` ↔ `authorization_servers` pairing, a bad `jwks_uri`, an `/oauth/authorize` pointed at the
-wrong upstream, a dropped `iss` flag, a null-serialised optional, or (added here, not in vitally-mcp) a
-`resource` that names another target would each break every MCP client at its next sign-in **and
+`issuer` ↔ `authorization_servers` pairing, a bad `jwks_uri`, an `authorization_endpoint` that is not
+this origin's `/oauth/authorize`, a dropped `iss` flag, a null-serialised optional in the
+protected-resource documents, or (added here, not in vitally-mcp) a `resource` that names another
+target would each break every MCP client at its next sign-in **and
 deploy green** (vitally-mcp#110).
 
 Run it by hand against any origin; that is why it is a script and not inline YAML:
@@ -687,11 +689,11 @@ Things about it that are deliberate, and should not be "tidied":
   after the final attempt.
 - **No normalisation anywhere.** Trailing slashes and case are compared literally, because that is
   what clients do.
-- **A first manual run against staging can fail spuriously.** Staging scales to zero, the script
-  retries each fetch only twice, and a cold start can burn both. The symptom is `200 but the body is
-  not valid JSON` on the protected-resource documents. CI never sees it, because the `/health` smoke
-  runs first and warms the replica. Run `curl <origin>/health` before reading anything into a manual
-  failure.
+- **A cold staging start prints alarming lines, not usually a failure.** Staging scales to zero and
+  the script retries each fetch only twice, so a cold start can print `200 but the body is not valid
+  JSON` fetch lines. The whole set retries six times (`ATTEMPTS`), so it fails only if the cold start
+  outlasts every attempt. CI warms the replica with the `/health` smoke first; by hand, run
+  `curl <origin>/health` before reading anything into a failure.
 - **It is invoked through `bash`**, not by its executable bit. An edit on Windows with
   `core.filemode=false` can silently drop the mode.
 
@@ -699,16 +701,22 @@ Things about it that are deliberate, and should not be "tidied":
 
 Re-run these after any change to the Entra app, the `OAuth__*` settings or the proxy. Together they
 cover every failure mode except "a real person cannot sign in", which needs a person (#4's runbook).
-All but the first are `curl` against the public origin, so they run anywhere, a cloud session
-included. All seven were run against staging on 2026-11-04, with the negative controls shown.
+Steps 3–7 are `curl` against the public origin, so they run anywhere, a cloud session included. Steps
+1 and 3–7 were run against staging on 2026-11-04, with the negative controls shown.
 
 1. `bash .github/scripts/verify-oauth-metadata.sh <origin>` (above).
-2. The app **starting at all** proves `StartupGuards` fetched Entra's discovery document and matched
-   its `issuer` to `OAuth:Authority`. A wrong authority is a boot failure, not a sign-in failure.
+2. The new revision **starting at all** proves `StartupGuards` fetched Entra's discovery document and
+   matched its `issuer` to `OAuth:Authority`. A wrong authority is a boot failure, not a sign-in
+   failure. ⚠️ The public origin cannot show this: if the new revision fails to boot, the previous one
+   may still be serving, and every curl here passes. Check the revision itself
+   (`az containerapp revision list -n <app> -g zendesk-prod-rg-uksouth --query "[].{name:name, health:properties.healthState, traffic:properties.trafficWeight}"`).
 3. `POST /oauth/register` (any `client_name`, a loopback `redirect_uris`) returns a `client_id`. This
    is the shared Entra appId, by design: every client gets the same one.
-4. `GET /oauth/authorize?…` with a loopback `redirect_uri`, a PKCE challenge and
-   `resource=<origin>/` answers **302**. Assert on the `Location` query: the host is
+4. `GET /oauth/authorize?…` answers **302** given every parameter: `response_type=code`, the
+   `client_id` from step 3, a loopback `redirect_uri`, a `state` (without one it is **400** `Missing
+   redirect_uri or state`), a real 43-character S256 `code_challenge` with
+   `code_challenge_method=S256` (Entra rejects a short one with `AADSTS501491` at step 5), a `scope`,
+   and `resource=<origin>/`. Assert on the `Location` query: the host is
    `login.microsoftonline.com`, **`resource` is absent**, `scope` carries
    `https://zendesk-mcp.fiscaltec.com/mcp.access` after the client's own scopes, and `redirect_uri` is
    the origin's own `/oauth/callback`. The scope names production's App ID URI on **both** targets,
@@ -740,12 +748,17 @@ configuration. There is no other provider to revert to.
   passes, because none of them presents the secret. It surfaces only at `/oauth/token`, as
   `invalid_client`, for everyone at once. Both targets send the Container App secret
   `entra-oauth-client-secret`, a **copy** of Key Vault's `entra-mcp-client-secret`, so changing the
-  vault alone changes nothing the app sends (vitally-mcp#138).
+  vault alone changes nothing the app sends (vitally-mcp#138). And `az containerapp secret set` does
+  not roll a revision: production's warm replica keeps the old value until restarted, which
+  staging's cold starts hide.
 - **Zendesk:** existing connections keep working until their access token expires, because the
-  secret is used only to connect, refresh and revoke. Then each refresh fails with `invalid_client`.
+  secret is used only to connect, refresh and revoke. Then each refresh fails, by Zendesk's OAuth
+  documentation with `invalid_client` (docs-checked, not live-tested).
   That is deliberately not among the errors that forget a grant (`ZendeskCredentialProvider`), so
   the call fails with the SDK's generic error, nobody is disconnected, and fixing the secret recovers
-  everyone. New connections fail at once.
+  everyone, once the app's cached copy expires (`TokenCacheDuration`, 5 minutes) or the revision
+  restarts. New connections fail at once. See `docs/runbooks/entra-and-zendesk-oauth.md`, *Rotate the
+  client secret*.
 
 Verify a secret change by signing in and connecting, never by a health probe.
 
