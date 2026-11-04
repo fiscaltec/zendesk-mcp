@@ -341,6 +341,158 @@ public class MacrosToolsTests
         fake.Requests.Count(r => r.Method == HttpMethod.Put).Should().Be(2);
     }
 
+    // ------------------------------------------------- Apply_macro: a lost response (#12)
+
+    private const string Me = """{"user":{"id":900,"name":"Agent","email":"agent@example.com","role":"agent"}}""";
+
+    // ApplyRoutes, with the PUT answered by `put` (counting each one), the connected user, and the
+    // ticket's audits answered by `audits`.
+    private static Func<RecordedRequest, FakeResponse> LostResponseRoutes(Func<int, FakeResponse> put, Func<FakeResponse> audits)
+    {
+        var inner = ApplyRoutes(ReplyMacro());
+        var puts = 0;
+        return r => (r.Method.Method, r.Path) switch
+        {
+            ("PUT", "/api/v2/tickets/42") => put(++puts),
+            ("GET", "/api/v2/users/me") => FakeResponse.Json(Me),
+            ("GET", "/api/v2/tickets/42/audits") => audits(),
+            _ => inner(r),
+        };
+    }
+
+    private static FakeResponse Applied() =>
+        FakeResponse.Json("""{"ticket":{"id":42},"audit":{"events":[]}}""");
+
+    private static FakeResponse Audits(long authorId, long macroId, DateTimeOffset at) => FakeResponse.Json(
+        "{\"audits\":[{\"id\":1,\"author_id\":" + authorId + ",\"created_at\":\"" + at.ToString("yyyy-MM-ddTHH:mm:ssZ", System.Globalization.CultureInfo.InvariantCulture)
+        + "\",\"events\":[{\"type\":\"Comment\"},{\"type\":\"AgentMacroReference\",\"macro_id\":" + macroId + "}]}],\"meta\":{\"has_more\":false}}");
+
+    [Fact]
+    public async Task ApplyMacro_ResponseLost_AndTheTicketShowsItApplied_IsAlreadyApplied()
+    {
+        // The case the guard exists for: Zendesk applied it, the answer never came back (here a 503),
+        // and the retry must not send the customer the same reply again.
+        var (fake, zendesk) = Build(LostResponseRoutes(n => n == 1 ? FakeResponse.WithStatus(HttpStatusCode.ServiceUnavailable) : Applied(),
+            () => Audits(900, 10, DateTimeOffset.UtcNow)));
+        using var _ = fake;
+        using var cache = new MemoryCache(new MemoryCacheOptions());
+
+        var first = () => MacrosTools.ApplyMacro(zendesk, cache, ticket_id: 42, macro_id: 10);
+        await first.Should().ThrowAsync<HttpRequestException>();
+        var retry = Parse(await MacrosTools.ApplyMacro(zendesk, cache, ticket_id: 42, macro_id: 10));
+
+        retry["result"]!.GetValue<string>().Should().Be("already_applied");
+        retry["warnings"]![0]!.GetValue<string>().Should().Contain("history shows it was applied");
+        fake.Requests.Count(r => r.Method == HttpMethod.Put).Should().Be(1, "the retry sent nothing");
+    }
+
+    [Fact]
+    public async Task ApplyMacro_ResponseLost_AndTheTicketDoesNotShowIt_AppliesIt()
+    {
+        foreach (var audits in new Func<FakeResponse>[]
+        {
+            () => FakeResponse.Json("""{"audits":[],"meta":{"has_more":false}}"""),
+            () => Audits(901, 10, DateTimeOffset.UtcNow),                    // another agent applied it
+            () => Audits(900, 11, DateTimeOffset.UtcNow),                    // a different macro
+            () => Audits(900, 10, DateTimeOffset.UtcNow.AddHours(-1)),       // long before this attempt
+        })
+        {
+            var (fake, zendesk) = Build(LostResponseRoutes(n => n == 1 ? FakeResponse.WithStatus(HttpStatusCode.ServiceUnavailable) : Applied(), audits));
+            using var _ = fake;
+            using var cache = new MemoryCache(new MemoryCacheOptions());
+
+            var first = () => MacrosTools.ApplyMacro(zendesk, cache, ticket_id: 42, macro_id: 10);
+            await first.Should().ThrowAsync<HttpRequestException>();
+            var retry = Parse(await MacrosTools.ApplyMacro(zendesk, cache, ticket_id: 42, macro_id: 10));
+
+            retry["result"]!.GetValue<string>().Should().Be("applied");
+            fake.Requests.Count(r => r.Method == HttpMethod.Put).Should().Be(2);
+        }
+    }
+
+    [Fact]
+    public async Task ApplyMacro_ResponseLost_AndTheHistoryCannotBeRead_IsRefused()
+    {
+        foreach (var audits in new Func<FakeResponse>[]
+        {
+            () => FakeResponse.WithStatus(HttpStatusCode.ServiceUnavailable),
+            () => FakeResponse.Json("""{"audits":[],"meta":{"has_more":true,"after_cursor":"x"}}"""),
+        })
+        {
+            var (fake, zendesk) = Build(LostResponseRoutes(_ => FakeResponse.WithStatus(HttpStatusCode.ServiceUnavailable), audits));
+            using var _ = fake;
+            using var cache = new MemoryCache(new MemoryCacheOptions());
+
+            var first = () => MacrosTools.ApplyMacro(zendesk, cache, ticket_id: 42, macro_id: 10);
+            await first.Should().ThrowAsync<HttpRequestException>();
+            var retry = () => MacrosTools.ApplyMacro(zendesk, cache, ticket_id: 42, macro_id: 10);
+
+            (await retry.Should().ThrowAsync<ArgumentException>()).WithMessage("*could not confirm*apply_again*");
+            fake.Requests.Count(r => r.Method == HttpMethod.Put).Should().Be(1, "an unconfirmed retry must not send again");
+        }
+    }
+
+    [Fact]
+    public async Task ApplyMacro_RefusedByZendesk_ForgetsTheAttempt_AndARetryNeedsNoLookup()
+    {
+        var (fake, zendesk) = Build(LostResponseRoutes(n => n == 1 ? FakeResponse.WithStatus(HttpStatusCode.Conflict) : Applied(),
+            () => FakeResponse.WithStatus(HttpStatusCode.ServiceUnavailable)));
+        using var _ = fake;
+        using var cache = new MemoryCache(new MemoryCacheOptions());
+
+        var first = () => MacrosTools.ApplyMacro(zendesk, cache, ticket_id: 42, macro_id: 10);
+        await first.Should().ThrowAsync<HttpRequestException>();
+        var retry = Parse(await MacrosTools.ApplyMacro(zendesk, cache, ticket_id: 42, macro_id: 10));
+
+        retry["result"]!.GetValue<string>().Should().Be("applied", "a 409 proves nothing was written");
+        fake.Requests.Should().NotContain(r => r.Path == "/api/v2/tickets/42/audits");
+    }
+
+    [Fact]
+    public async Task ApplyMacro_ARetryWhileTheFirstWriteIsStillWaiting_IsRefused()
+    {
+        // An MCP client that gives up does not cancel the server's request, so a lookup made now could
+        // find nothing and the first write land afterwards: two replies (pre-review on the #12 PR).
+        using var entered = new ManualResetEventSlim();
+        using var release = new ManualResetEventSlim();
+        var (fake, zendesk) = Build(LostResponseRoutes(_ =>
+        {
+            entered.Set();
+            release.Wait(TimeSpan.FromSeconds(10));
+            return Applied();
+        }, () => FakeResponse.Json("""{"audits":[],"meta":{"has_more":false}}""")));
+        using var _ = fake;
+        using var cache = new MemoryCache(new MemoryCacheOptions());
+
+        var first = Task.Run(() => MacrosTools.ApplyMacro(zendesk, cache, ticket_id: 42, macro_id: 10));
+        entered.Wait(TimeSpan.FromSeconds(10)).Should().BeTrue();
+        var retry = () => MacrosTools.ApplyMacro(zendesk, cache, ticket_id: 42, macro_id: 10);
+        (await retry.Should().ThrowAsync<ArgumentException>()).WithMessage("*still waiting for Zendesk*");
+        release.Set();
+
+        Parse(await first)["result"]!.GetValue<string>().Should().Be("applied");
+        fake.Requests.Count(r => r.Method == HttpMethod.Put).Should().Be(1);
+        fake.Requests.Should().NotContain(r => r.Path == "/api/v2/tickets/42/audits", "an in-flight call is not looked up");
+    }
+
+    [Fact]
+    public async Task ApplyMacro_ATimedOutOrCancelledWrite_IsPending()
+    {
+        // HttpClient's timeout, or a client giving up mid-write, arrives as TaskCanceledException and
+        // leaves the outcome unknown, exactly as a lost response does.
+        var (fake, zendesk) = Build(LostResponseRoutes(n => n == 1 ? throw new TaskCanceledException("timed out") : Applied(),
+            () => Audits(900, 10, DateTimeOffset.UtcNow)));
+        using var _ = fake;
+        using var cache = new MemoryCache(new MemoryCacheOptions());
+
+        var first = () => MacrosTools.ApplyMacro(zendesk, cache, ticket_id: 42, macro_id: 10);
+        await first.Should().ThrowAsync<OperationCanceledException>();
+        var retry = Parse(await MacrosTools.ApplyMacro(zendesk, cache, ticket_id: 42, macro_id: 10));
+
+        retry["result"]!.GetValue<string>().Should().Be("already_applied");
+        fake.Requests.Count(r => r.Method == HttpMethod.Put).Should().Be(1);
+    }
+
     [Fact]
     public async Task ApplyMacro_PublicTrue_IsRefusedWhenPublicRepliesAreOff()
     {

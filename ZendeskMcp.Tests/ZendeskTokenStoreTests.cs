@@ -90,12 +90,71 @@ public class ZendeskTokenStoreTests
 
     [Theory]
     [InlineData("{\"revoked\":true}")]
-    [InlineData("not json")]
     [InlineData("")]
-    [InlineData("{\"access_token\":\"\"}")]
-    public void Parse_TreatsAnythingWithoutAnAccessTokenAsNotConnected(string value)
+    [InlineData("   ")]
+    public void Parse_ReadsATombstoneOrNothingAsNotConnected(string value)
     {
         KeyVaultZendeskTokenStore.Parse(value).Should().BeNull();
+    }
+
+    [Theory]
+    [InlineData("not json", null, null)]
+    [InlineData("[1,2]", null, null)]
+    [InlineData("{}", null, null)]
+    [InlineData("{\"access_token\":\"\"}", null, null)]
+    [InlineData("{\"revoked\":true,\"refresh_token\":\"r1\"}", null, "r1")]
+    [InlineData("{\"access_token\":\"a1\",\"expires_at\":\"not a date\"}", "a1", null)]
+    [InlineData("{\"access_token\":\"a1\",\"refresh_token\":\"r1\",\"zendesk_user_id\":\"x\"}", "a1", "r1")]
+    [InlineData("{\"refresh_token\":\"r1\"}", null, "r1")]
+    [InlineData("{\"access_token\":\"a1\",\"access_token\":\"a1\"}", null, null)]
+    [InlineData("{\"access_token\":\"a1\",\"refresh_token\":\"r1\",\"zendesk_role\":\"agent\",\"zendesk_role\":\"admin\"}", "a1", "r1")]
+    [InlineData("{\"revoked\":true,\"revoked\":true}", null, null)]
+    public void Parse_RefusesAnythingElse_SalvagingTheTokensForRevocation(string value, string? access, string? refresh)
+    {
+        // Read as "not connected", such a value let a reconnect replace the grant inside it without
+        // revoking it (#12). Whatever tokens it holds are kept, for revocation only.
+        var act = () => KeyVaultZendeskTokenStore.Parse(value);
+
+        var thrown = act.Should().Throw<ZendeskStoredTokenUnreadableException>().Which;
+        thrown.Message.Should().NotContain("a1").And.NotContain("r1");
+        if (access is null && refresh is null)
+        {
+            thrown.Salvaged.Should().BeNull();
+            return;
+        }
+
+        thrown.Salvaged!.AccessToken.Should().Be(access ?? string.Empty);
+        thrown.Salvaged.RefreshToken.Should().Be(refresh);
+        if (refresh is not null)
+        {
+            thrown.Salvaged.ExpiresAt.Should().Be(DateTimeOffset.UnixEpoch,
+                "an untrusted expiry is treated as expired, so a revocation refreshes first");
+        }
+    }
+
+    [Fact]
+    public async Task Get_OfAnUnreadableSecret_Throws_LogsTheVersion_AndCachesNothing()
+    {
+        var secrets = new Mock<SecretClient>();
+        var secret = SecretModelFactory.KeyVaultSecret(
+            SecretModelFactory.SecretProperties(new Uri($"https://kv.vault.azure.net/secrets/zendesk-user-{ObjectId}/v123"), version: "v123"),
+            "{\"access_token\":\"live-token\",\"expires_at\":\"not a date\"}");
+        secrets.Setup(s => s.GetSecretAsync($"zendesk-user-{ObjectId}", null, It.IsAny<SecretContentType?>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync(Response.FromValue(secret, Mock.Of<Response>()));
+        var logger = new CapturingLogger<KeyVaultZendeskTokenStore>();
+        using var cache = new MemoryCache(new MemoryCacheOptions());
+        var store = new KeyVaultZendeskTokenStore(secrets.Object, cache,
+            Options.Create(new ZendeskServerOptions { Subdomain = "acme" }), logger);
+
+        var first = () => store.GetAsync(ObjectId);
+        (await first.Should().ThrowAsync<ZendeskStoredTokenUnreadableException>()).Which.Salvaged!.AccessToken.Should().Be("live-token");
+        var second = () => store.GetAsync(ObjectId);
+        await second.Should().ThrowAsync<ZendeskStoredTokenUnreadableException>("caching it as not connected is the defect");
+
+        secrets.Verify(s => s.GetSecretAsync(It.IsAny<string>(), null, It.IsAny<SecretContentType?>(), It.IsAny<CancellationToken>()), Times.Exactly(2));
+        logger.Entries.Should().HaveCount(2).And.OnlyContain(e => e.Level == Microsoft.Extensions.Logging.LogLevel.Error
+            && e.Message.Contains(ObjectId) && e.Message.Contains("v123") && !e.Message.Contains("live-token"));
+        logger.Exceptions.Should().OnlyContain(e => e == null, "an attached exception is rendered in full by the exporters");
     }
 
     private static KeyVaultZendeskTokenStore Build(SecretClient secrets) =>

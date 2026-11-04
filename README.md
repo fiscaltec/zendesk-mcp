@@ -10,7 +10,7 @@ It is built to the same standard as FISCAL's [Vitally MCP server](https://github
 
 ## Features
 
-- **45 tools** — tickets (search, count, read, create, update, conversation, attachments), KPI and SLA reporting (metrics summary, SLA summary, SLA queue, CSAT), macros (search, preview, apply, create, update, activate), users and organisations, ticket fields/forms/triggers/brands, and the Help Center (articles, translations, who can view an article, categories, sections, segments, permission groups, images, export). See [Tool catalogue](#tool-catalogue).
+- **48 tools** — tickets (search, count, read, create, update, bulk update with a confirmed preview, merge, conversation, several conversations at once, attachments), KPI and SLA reporting (metrics summary, SLA summary, SLA queue, CSAT), macros (search, preview, apply, create, update, activate), users and organisations, ticket fields/forms/triggers/brands, and the Help Center (articles, translations, who can view an article, categories, sections, segments, permission groups, images, export). See [Tool catalogue](#tool-catalogue).
 - **Every call is made as you.** Each person connects their own Zendesk account once (per-user Zendesk OAuth). Ticket updates, comments and macro use are attributed to the agent who asked for them, and Zendesk's own role, group and brand restrictions apply on top of this server's permissions. There is no shared Zendesk service account.
 - **Two layers of permission.** Your Entra group decides which tools you see and may call (`zendesk:read` / `zendesk:write`); your Zendesk role decides what Zendesk lets that agent do. Account-wide switches (public replies, article publishing, Help Center structure, macro changes, user and organisation changes) are off by default in the application; FISCAL's deployment turns all five on.
 - **Per-user audit trail** in Application Insights, keyed on your Entra object id — including reads, which Zendesk does not log.
@@ -54,6 +54,7 @@ Configuration comes from environment variables in deployed targets (double-under
 | `Zendesk:RequireEmailMatch` | No | `true` | Refuse a Zendesk login whose email differs from the Entra sign-in name. This is what binds a Zendesk login to the right person — do not turn it off in a deployed target. |
 | `Zendesk:Features:*` | No | all `false` | `AllowPublicReplies`, `AllowArticlePublishing`, `AllowHelpCenterStructureChanges`, `AllowMacroChanges`, `AllowUserAndOrganizationChanges` — account-wide switches for the actions with the widest reach. |
 | `Zendesk:MaxAutoPageFetches` / `MaxAnalyticsTickets` / `MaxAttachmentBytes` | No | `10` / `2000` / 20 MB | Bounds on server-side paging, analytics fan-out and file size. |
+| `Zendesk:JobStatusPollInterval` / `MaxJobStatusPolls` | No | `00:00:02` / `10` | How long `Bulk_update_tickets` waits for Zendesk's background job before reporting it as still running. |
 | `Zendesk:DevelopmentAccessToken` | Local only | — | A Zendesk OAuth access token used for every call. Refused at startup unless `OAuth:NoAuth=true`, no Key Vault is set and the environment is Development. (`DevelopmentEmail` + `DevelopmentApiToken` still work, but Zendesk is retiring API tokens.) |
 | `OAuth:*` | Yes | — | Entra sign-in to this server, exactly as in vitally-mcp: `Authority`, `Audience`, `Resource`, `UpstreamResourceScope`, `SharedClientId`, `SharedClientSecret`, `AllowedClientRedirectUris`, `PublicBaseUrl`, `NoAuth`. |
 | `Authorization:*` | Yes | — | Tier enforcement: `LiveGroupCheck`, `ReaderGroupId`/`EditorGroupId`/`AdminGroupId`, `ReadOnly`, permission names. |
@@ -102,7 +103,7 @@ Two separate OAuth relationships are involved, and they never share a token, cli
 | **Entra** (`/oauth/*`) | this server | MCP client ↔ the server's OAuth façade ↔ Entra, exactly as in vitally-mcp | every `/mcp` request (bearer JWT), and the Entra group lookup that decides the tier |
 | **Zendesk** (`/zendesk/*`) | Zendesk, as the server's delegate | a browser link handed out in a tool result → Zendesk authorise (PKCE) → `/zendesk/callback` | every Zendesk API call, as that agent |
 
-The Zendesk grant is stored in Key Vault against the person's **Entra object id**. At the callback the server reads the new token's identity from `/api/v2/users/me` and stores it only when it is an agent or admin whose email matches the Entra sign-in name. Otherwise the token is revoked on the spot. That check, plus a browser-bound `state` cookie, is what stops a forwarded or planted connect link from attaching someone else's Zendesk account to your identity. Expiring tokens are refreshed once, under a per-person lock, because Zendesk rotates the refresh token. A Zendesk `401` forgets the token and hands back a fresh connect link.
+The Zendesk grant is stored in Key Vault against the person's **Entra object id**. At the callback the server reads the new token's identity from `/api/v2/users/me` and stores it only when it is an agent or admin whose email matches the Entra sign-in name. Otherwise the token is revoked on the spot. That check, plus a browser-bound `state` cookie, is what stops a forwarded or planted connect link from attaching someone else's Zendesk account to your identity. Expiring tokens are refreshed once, under a per-person lock, because Zendesk rotates the refresh token. A Zendesk `401` that a refresh cannot cure revokes the grant, forgets it and hands back a fresh connect link; a reconnect revokes the grant it replaces.
 
 ## Tool catalogue
 
@@ -111,7 +112,7 @@ Each tool carries `ReadOnly` / `Destructive` / `Idempotent` / `OpenWorld` hints 
 | Area | Read (`zendesk:read`) | Write (`zendesk:write`) |
 |---|---|---|
 | Connection | `Get_zendesk_connection`, `Get_zendesk_connect_link` | `Disconnect_zendesk` *(read tier — it only affects the caller's own connection)* |
-| Tickets | `Search_tickets`, `Count_tickets`, `Get_ticket`, `Get_ticket_conversation`, `Get_ticket_attachment` | `Create_ticket`, `Update_ticket`, `Request_ticket_attachment_upload` |
+| Tickets | `Search_tickets`, `Count_tickets`, `Get_ticket`, `Get_ticket_conversation`, `Bulk_get_ticket_conversations`, `Get_ticket_attachment` | `Create_ticket`, `Update_ticket`, `Bulk_update_tickets`, `Merge_tickets`, `Request_ticket_attachment_upload` |
 | Reporting | `Get_ticket_metrics_summary`, `Get_sla_summary`, `Get_sla_queue`, `Get_satisfaction_ratings` | — |
 | Macros | `Search_macros`, `Preview_macro` | `Apply_macro`, `Create_macro`, `Update_macro`, `Set_macros_active` |
 | People | `Search_users`, `Find_agent_by_name`, `Search_organizations` | `Add_user_to_organization` |
@@ -122,6 +123,7 @@ Compared with Swifteq's server: the same tools and parameters (snake_case, so pr
 
 - `get_usage` and `submit_mcp_feedback` are dropped: they are about Swifteq's billing and support.
 - The connection tools are added.
+- `Merge_tickets` follows Swifteq's `merge_tickets`: the same parameters, defaults (the target note quotes each merged ticket's latest public comment), refusals (a different requester, solved or shared sources), `already_merged` on a repeat, result values, saved comments and side-effect warnings. It departs in three ways. It needs the `zendesk:write` tier, and public comments need `AllowPublicReplies`. It does not refuse AI-agent tickets itself: Zendesk documents no field marking them, so Zendesk's own job refuses them. And its result adds fields: `merged`, `job`, `polls`, `tickets_before`, `next_step` and `target_agent_url` (#22).
 - Tool names use the Vitally capitalisation (`Search_tickets`).
 - Two Help Center tools are renamed for clarity: `create_article` → `Create_help_center_article` and `get_help_center_article_content` → `Get_help_center_article`.
 - Swifteq's "MCP Server settings" toggles are the `Zendesk:Features:*` switches.
