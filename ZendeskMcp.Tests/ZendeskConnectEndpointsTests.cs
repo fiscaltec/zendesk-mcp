@@ -58,6 +58,37 @@ public class ZendeskConnectEndpointsTests
     }
 
     [Fact]
+    public async Task AReconnect_WhosePreviousAccessTokenZendeskRejects_RevokesThePreviousGrantThroughItsRefreshToken()
+    {
+        // The previous access token has typically expired by the time someone reconnects, and Zendesk
+        // answers 401 to revoking it while its refresh token stays live (#13).
+        using var factory = new Factory(zendeskEmail: "agent@example.com")
+        {
+            Override = request => request switch
+            {
+                { Method.Method: "DELETE" } when request.Headers["Authorization"] == "Bearer previous-access" =>
+                    (HttpStatusCode.Unauthorized, "{\"error\":\"invalid_token\"}"),
+                { Path: "/oauth/tokens" } when request.Body!.Contains("\"grant_type\":\"refresh_token\"", StringComparison.Ordinal) =>
+                    (HttpStatusCode.OK, "{\"access_token\":\"previous-renewed\",\"refresh_token\":\"previous-refresh-2\",\"expires_in\":7200}"),
+                _ => null,
+            },
+        };
+        using var client = factory.CreateClient(new WebApplicationFactoryClientOptions { AllowAutoRedirect = false });
+        await factory.Store.SaveAsync(ObjectId, TestHelpers.SampleToken("previous-access", refreshToken: "previous-refresh"),
+            TestContext.Current.CancellationToken);
+        var state = await StartAsync(factory, client, "agent@example.com");
+
+        var callback = await GetWithCookieAsync(client, $"/zendesk/callback?code=c&state={state}", state);
+
+        callback.StatusCode.Should().Be(HttpStatusCode.OK);
+        (await factory.Store.GetAsync(ObjectId, TestContext.Current.CancellationToken))!.AccessToken.Should().Be("issued-access");
+        factory.ZendeskRequests.Should().Contain(r => r.Path == "/oauth/tokens" && r.Body!.Contains("\"refresh_token\":\"previous-refresh\"", StringComparison.Ordinal),
+            "the previous grant's refresh token is used to reach a live token to revoke");
+        factory.ZendeskRequests.Last().Headers["Authorization"].Should().Be("Bearer previous-renewed");
+        factory.ZendeskRequests.Last().Method.Should().Be(HttpMethod.Delete);
+    }
+
+    [Fact]
     public async Task ADifferentZendeskLogin_IsRefused_RevokedAndNotStored()
     {
         using var factory = new Factory(zendeskEmail: "someone.else@example.com");
@@ -211,6 +242,9 @@ public class ZendeskConnectEndpointsTests
 
         public IZendeskTokenStore Store => Services.GetRequiredService<IZendeskTokenStore>();
 
+        /// <summary>An answer that replaces the stub's default for a request, or null to keep it.</summary>
+        public Func<RecordedRequest, (HttpStatusCode Status, string Body)?>? Override { get; init; }
+
         public Task<string> IssueLinkAsync(string objectId, string signInName) =>
             Services.GetRequiredService<ZendeskConnectLinks>().CreateAsync(objectId, signInName, "http://localhost");
 
@@ -242,6 +276,11 @@ public class ZendeskConnectEndpointsTests
                 lock (owner._requests)
                 {
                     owner._requests.Add(recorded);
+                }
+
+                if (owner.Override?.Invoke(recorded) is { } answer)
+                {
+                    return new HttpResponseMessage(answer.Status) { Content = new StringContent(answer.Body, Encoding.UTF8, "application/json") };
                 }
 
                 var json = recorded.Path switch

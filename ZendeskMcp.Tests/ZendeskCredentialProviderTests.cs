@@ -344,6 +344,75 @@ public class ZendeskCredentialProviderTests
         await act.Should().ThrowAsync<OperationCanceledException>("a caller that gave up must not be told the revocation failed");
     }
 
+    [Fact]
+    public async Task Disconnect_WhenZendeskRejectsTheAccessToken_RevokesTheGrantThroughItsRefreshToken()
+    {
+        // A 401 to the revocation shows only that this ACCESS token no longer authenticates. Its
+        // refresh token can still be live, so the grant is renewed and the renewed token revoked (#13).
+        using var zendesk = TestHelpers.CreateFakeZendesk(request => request.Path switch
+        {
+            "/oauth/tokens" => FakeResponse.Json("{\"access_token\":\"renewed\",\"refresh_token\":\"r2\",\"expires_in\":7200}"),
+            _ when request.Headers["Authorization"] == "Bearer rejected" => FakeResponse.WithStatus(HttpStatusCode.Unauthorized, "{\"error\":\"invalid_token\"}"),
+            _ => FakeResponse.WithStatus(HttpStatusCode.NoContent, string.Empty),
+        });
+        var (service, store) = TestHelpers.BuildUserZendeskService(zendesk.Client,
+            TestHelpers.SampleToken("rejected", refreshToken: "r1"));
+
+        var outcome = await service.Credentials.DisconnectAsync(TestContext.Current.CancellationToken);
+
+        outcome.Should().Be(DisconnectOutcome.Disconnected);
+        zendesk.Requests.Select(r => $"{r.Method} {r.Path}").Should().Equal(
+            "DELETE /api/v2/oauth/tokens/current.json", "POST /oauth/tokens", "DELETE /api/v2/oauth/tokens/current.json");
+        zendesk.Requests[1].Body.Should().Contain("\"refresh_token\":\"r1\"");
+        zendesk.Requests[2].Headers["Authorization"].Should().Be("Bearer renewed");
+        (await store.GetAsync(TestHelpers.TestObjectId)).Should().BeNull();
+    }
+
+    [Fact]
+    public async Task Disconnect_WhenTheAccessTokenAndTheRefreshTokenAreBothRefused_CountsTheGrantAsDead()
+    {
+        using var zendesk = TestHelpers.CreateFakeZendesk(request => request.Path switch
+        {
+            "/oauth/tokens" => FakeResponse.WithStatus(HttpStatusCode.BadRequest, "{\"error\":\"invalid_grant\"}"),
+            _ => FakeResponse.WithStatus(HttpStatusCode.Unauthorized, "{\"error\":\"invalid_token\"}"),
+        });
+        var (service, store) = TestHelpers.BuildUserZendeskService(zendesk.Client, TestHelpers.SampleToken("rejected", refreshToken: "r1"));
+
+        var outcome = await service.Credentials.DisconnectAsync(TestContext.Current.CancellationToken);
+
+        outcome.Should().Be(DisconnectOutcome.Disconnected, "Zendesk refused both halves of the grant, so nothing of it is live");
+        (await store.GetAsync(TestHelpers.TestObjectId)).Should().BeNull();
+    }
+
+    [Fact]
+    public async Task Disconnect_WhenTheAccessTokenIsRejectedButTheRefreshCannotBeChecked_SaysTheRevocationIsUnconfirmed()
+    {
+        using var zendesk = TestHelpers.CreateFakeZendesk(request => request.Path switch
+        {
+            "/oauth/tokens" => FakeResponse.WithStatus(HttpStatusCode.ServiceUnavailable, "{}"),
+            _ => FakeResponse.WithStatus(HttpStatusCode.Unauthorized, "{\"error\":\"invalid_token\"}"),
+        });
+        var (service, store) = TestHelpers.BuildUserZendeskService(zendesk.Client, TestHelpers.SampleToken("rejected", refreshToken: "r1"));
+
+        var outcome = await service.Credentials.DisconnectAsync(TestContext.Current.CancellationToken);
+
+        outcome.Should().Be(DisconnectOutcome.ForgottenButNotRevoked);
+        (await store.GetAsync(TestHelpers.TestObjectId)).Should().BeNull();
+    }
+
+    [Fact]
+    public async Task Disconnect_OfATokenWithNoRefreshToken_TreatsA401AsRevoked()
+    {
+        // A legacy non-expiring token is the whole grant: if Zendesk refuses it, nothing is left live.
+        using var zendesk = TestHelpers.CreateFakeZendesk(_ => FakeResponse.WithStatus(HttpStatusCode.Unauthorized, "{\"error\":\"invalid_token\"}"));
+        var (service, _) = TestHelpers.BuildUserZendeskService(zendesk.Client, TestHelpers.SampleToken("rejected", refreshToken: null));
+
+        var outcome = await service.Credentials.DisconnectAsync(TestContext.Current.CancellationToken);
+
+        outcome.Should().Be(DisconnectOutcome.Disconnected);
+        zendesk.Requests.Should().ContainSingle();
+    }
+
     // Never answers: a request through it ends only when HttpClient.Timeout or the caller cancels.
     private sealed class StalledHandler : HttpMessageHandler
     {

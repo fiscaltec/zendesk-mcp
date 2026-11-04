@@ -271,7 +271,9 @@ public sealed class ZendeskCredentialProvider(
                 }
             }
 
-            var revoked = await oauthClient.RevokeAsync(token.AccessToken, cancellationToken);
+            // The whole grant, not just the access token: Zendesk can refuse an access token before its
+            // recorded expiry while the refresh token behind it is still live.
+            var revoked = await oauthClient.RevokeGrantAsync(token.AccessToken, token.RefreshToken, cancellationToken);
             await store.RemoveAsync(objectId, cancellationToken);
             return revoked ? DisconnectOutcome.Disconnected : DisconnectOutcome.ForgottenButNotRevoked;
         }

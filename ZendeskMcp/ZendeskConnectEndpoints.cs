@@ -166,7 +166,7 @@ public static class ZendeskConnectEndpoints
             // A reconnect replaces the previous grant; revoke it so it does not stay live at Zendesk.
             if (replaced is not null && replaced.AccessToken != token.AccessToken)
             {
-                await oauthClient.RevokeAsync(replaced.AccessToken, ctx.RequestAborted);
+                await oauthClient.RevokeGrantAsync(replaced.AccessToken, replaced.RefreshToken, ctx.RequestAborted);
             }
 
             await links.RedeemAsync(attempt.Ticket, ctx.RequestAborted);
