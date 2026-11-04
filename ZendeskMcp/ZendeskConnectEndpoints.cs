@@ -216,13 +216,11 @@ public static class ZendeskConnectEndpoints
                 // the link is unspent, so the person can simply open it again.
                 if (saveEntered)
                 {
-                    if (replaced is not null && replaced.AccessToken != token.AccessToken)
+                    if (replaced is not null && replaced.AccessToken != token.AccessToken
+                        && !await UnkeptGrant.RevokeGrantForCleanupAsync(oauthClient, logger, replaced))
                     {
-                        if (!await UnkeptGrant.RevokeGrantForCleanupAsync(oauthClient, logger, replaced))
-                        {
-                            logger.LogWarning("Could not confirm the revocation of the Zendesk grant replaced for {UserObjectId}; it may still be live at Zendesk",
-                                attempt.ObjectId);
-                        }
+                        logger.LogWarning("Could not confirm the revocation of the Zendesk grant replaced for {UserObjectId}; it may still be live at Zendesk",
+                            attempt.ObjectId);
                     }
 
                     await UnkeptGrant.RemoveForCleanupAsync(store, logger, attempt.ObjectId);
