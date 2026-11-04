@@ -1462,7 +1462,10 @@ Neither scanner posts unless a secret is within 30 days of expiry (Vitally's log
 days` on every run for 90 days before this build), so a run of the Job does not prove the webhook.
 This does — one test card to the channel, read from the captured `$SECRET_DIR/teams-webhook` (the
 value the Job below is given, whichever channel it names) and never printed; expect `HTTP 202`
-**and** the card in the channel (Power Automate accepts with 202 even when the flow cannot post):
+**and** the card in the channel (Power Automate accepts with 202 even when the flow cannot post).
+Run it **before** the Job block below, which deletes the captured file. To re-test later, feed the
+same command from the Job's own secret instead: replace the `< "$SECRET_DIR/teams-webhook"` at the
+end with `< <(az containerapp job secret show -g "$RG" -n "$JOB" --secret-name teams-webhook --query value -o tsv)`:
 
 ```bash
 source ~/zendesk-estate.env; python3 -c 'import json,sys,urllib.request
