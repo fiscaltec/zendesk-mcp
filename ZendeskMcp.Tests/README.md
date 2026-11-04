@@ -14,9 +14,13 @@ No total is written here: a count in prose is only right on the day it is writte
 > **Integration tests that set environment variables must join `IntegrationTestCollection`.**
 > `Program.cs` reads `OAuth:NoAuth`, `Authorization:ReadOnly` and the Zendesk Key Vault and
 > development-token settings at composition time — before `WebApplicationFactory` can inject
-> configuration — so environment variables are the only override that works, and they are
-> process-wide. `ZendeskHostEnvironment` sets and clears the `Zendesk__*` ones; set every variable
-> your fixture depends on explicitly.
+> configuration through `ConfigureAppConfiguration` — so these fixtures override it with environment
+> variables, which are process-wide. `ZendeskHostEnvironment` sets and clears the `Zendesk__*` ones;
+> set every variable your fixture depends on explicitly.
+>
+> Variables inherited from the shell never reach a test host: `AmbientConfiguration` clears them
+> when the assembly loads, before any fixture runs (#8). Its remarks record why the per-host
+> override routes could not do that.
 
 ## Where things are tested
 

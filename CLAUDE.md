@@ -506,6 +506,126 @@ These components are ported without behavioural change, and their rules hold her
 
 What changed in porting them: the policy names (`zendesk:*`), the default custom-permissions claim, the Graph tier groups (`sg-zendesk-*`), the meter and counter names (`ZendeskMcp`, `zendesk.*`), and `AuditRecordIds` (below). `IncludeReads` matters more here than in vitally-mcp: Zendesk's own audit log records changes, not reads, so this trail is the only record of who read which ticket.
 
+### Metrics and tracing (as vitally-mcp#94, phase 6)
+
+These are exported to Application Insights only when `ApplicationInsights__ConnectionString` is set,
+like the audit records. Without it, the upstream duration goes to stdout with the rest of its audit
+record.
+
+| Signal | Name | What it answers |
+|---|---|---|
+| Upstream call duration | `durationMs` on the `ZendeskUpstreamCall` record (`AuditDurationMs` in `AppEvents`) | Which of a composite tool's upstream calls was slow, joined to the `ZendeskToolCall` record by correlation id. `SendAsync` times from send to body read, including any 429 waits. `DownloadAsync` times each hop to its response headers only, so an attachment's body is not in it |
+| 429 retries / exhaustion | `zendesk.ratelimit.retries`, `zendesk.ratelimit.exhausted` | How often the server exceeds the **account's** Zendesk budget, which every other integration shares |
+| Pager truncations | `zendesk.autopager.truncations`, tag `resource` | Whether `Zendesk:MaxAutoPageFetches` is set where people hit it |
+| Cache hit/miss | `zendesk.cache.lookups`, tags `cache` = `user_token` / `group_membership` / `oidc_discovery`, `result` = `hit` / `miss` | Per *lookup*. A miss means the cache did not answer, so an external lookup was needed. It is counted before the call, so a cancelled request is still a miss, and so is a stale Graph serve after a failed call |
+| MCP spans | activity source `Experimental.ModelContextProtocol` | A span per request, tool calls included. Sampled, and sanitised (below) |
+
+Three caveats on reading them, each of which would otherwise send a query wrong (the code cites them
+here, in `ZendeskMetrics`):
+
+- **Calls that fail before a response have no duration.** A timeout, a DNS failure or a refused
+  connection never reaches `LogAction`, so there is no `ZendeskUpstreamCall` row. (A non-2xx
+  response is different: `SendAsync` logs it, with its duration, before throwing.) Timeouts are the slowest calls of
+  all; look for them in the failure records. The clock also starts *after* the caller's credential
+  is resolved, so a cold Key Vault read of the person's token, or a token refresh, shows in the
+  tool-call duration and in no upstream one. The same goes for recovery after a `401`: the rejected
+  call and its retry each get a row, and the `OnTokenRejectedAsync` refresh between them is in
+  neither. `Audit:Enabled` and `Audit:IncludeReads` gate it too,
+  so turning reads off to cut ingest cost removes every GET's duration as well. `AuditDurationMs`
+  is the same property name on `ZendeskToolCall`, so filter on `Name`. Values are truncated to whole
+  milliseconds: `0` is a real measurement, and only `-1` means unmeasured.
+- **The `group_membership` hit rate counts lookups, and is inflated by design.** `ToolAuthorizer`
+  does not memoise, and each `tools/call` runs several checks: vitally-mcp counted at least three on
+  SDK 2.2.0, and that has not been re-counted on 2.3.0 here. A `tools/list` checks every tool. Read
+  the rate as "how often Graph was spared", never as "how well `LiveGroupCacheSeconds` is tuned".
+  `user_token` is inflated the same way: every upstream call resolves the caller's credential, and
+  the provider reads the store again near expiry and after a `401`, so a composite tool records one
+  lookup per upstream call. It is counted only by the Key Vault store, where a cached "not connected"
+  is a hit. Read it as "how often Key Vault was spared", not as tuning for `TokenCacheDuration`.
+- **The `oidc_discovery` hit rate looks healthy during a provider outage.** After a failed refresh,
+  the last-known-good copy is re-cached for a minute (`FailedRefreshRetryInterval`), and reads in
+  that minute are hits.
+
+The counters live on one `Meter`, `ZendeskMcp` (`ZendeskMetrics`, created through `IMeterFactory`).
+Every consumer takes it as an **optional** constructor parameter, so a registration that never
+resolved would record nothing while every unit test passed.
+`TheComposedHost_InjectsTheCounters_IntoTheComponentsThatRecordThem` proves the real wiring for
+`ZendeskService` (a truncation) and the Graph resolver. The OIDC resolver, the Key Vault token store
+and the rate limiter are not reachable from that harness, so only their unit tests cover them. Names
+live in `TelemetrySources`, which `Program.cs` and the tests share.
+
+⚠️ **The SDK's activity source is `Experimental.ModelContextProtocol`, not the bare
+`ModelContextProtocol`.** A source registered under a name nothing publishes is accepted silently and
+captures nothing. `TheMcpSdk_PublishesTheSourceWeRegister_AndNoSanitisedSpanCarriesCallerText` fails
+if it stops being published, so an SDK bump that drops the prefix shows up as a red test.
+
+⚠️ **The SDK's meter (same name) is deliberately NOT registered.** Its
+`mcp.server.operation.duration` histogram has `gen_ai.tool.name` as a dimension. A `tools/call`
+naming a tool that does not exist puts the invented name there: caller text, unbounded cardinality,
+and every one recorded, because metrics are never sampled. A span processor cannot rewrite metric
+tags. Per-tool latency is already queryable, unsampled, from `AuditDurationMs` on `ZendeskToolCall`.
+The exporter test pins the meter as unregistered. If per-method failure rates are ever wanted,
+register it behind a view that drops `gen_ai.tool.name`. Never register it as-is.
+
+⚠️ **Metric tags carry only values this code fixes.** A caller-controlled tag value is a cardinality
+explosion, and it puts customer text in a metrics store. The pager's `resource` tag comes from
+`ZendeskService.ResourceTypeOf`: the first segment after `/api/v2/`, checked against the
+`KnownResourceTypes` allowlist that the failure log uses. So the tag is `/api/v2/tickets` or
+`/api/v2/tickets/…`, never a ticket id, and anything else reads `/api/v2/(unrecognised)`. Every Help
+Center path collapses to `/api/v2/help_center…`, so the tag cannot tell articles from sections.
+
+**Sampling: 10% head sampling of traces.** It needs `SamplingRatio = 0.1F` **and**
+`TracesPerSecond = null`, because `TracesPerSecond` (default 5) overrides the ratio whenever it is
+set. It is safe only because `EnableTraceBasedLogsSampler = false` (vitally-mcp#178): logs, the audit
+records among them, are exported whatever the trace sampling, and metrics are never sampled. When
+querying:
+
+- **Count the sampled tables with `sum(ItemCount)`, not `count()`.** Each `AppRequests` and
+  `AppDependencies` row stands for about ten. `AppEvents` and `AppTraces` are logs and stay exact, so
+  `count()` is right there.
+- **"Errors at 100%" is not available.** Head sampling decides before the outcome is known. Failures
+  stay visible, unsampled, through the failure records. The counters do not cover them: the only
+  failure they count is rate-limit exhaustion.
+
+**Spans are sanitised before export by `SpanSanitisingProcessor`**, because they go to
+`AppRequests` / `AppDependencies`. Those tables have their own retention, and tool arguments may not
+go there. They share a workspace with the audit records. Table-level RBAC can grant a narrow reader one
+table, but Azure RBAC only ever grants: it cannot remove `AppEvents` from anyone holding inherited
+workspace-wide read, which is how most readers get access. So in practice it does not keep the tables
+apart. vitally-mcp reviewed who holds that read on its workspace (vitally-mcp#146); this workspace has
+not been reviewed the same way. The MCP branch works from an **allowlist**, not a list of known leaks. vitally-mcp's probes
+of the SDK found caller text reaching spans by seven routes:
+
+| Where | What the SDK does | The processor |
+|---|---|---|
+| `StatusDescription`, any span | Copies a failed tool call's whole error text there: the caller's input and Zendesk's response body | Clears it. The status code stays |
+| `mcp.method.name`, MCP spans | Records whatever method the caller named | Keeps it only if the SDK defines it (`RequestMethods` / `NotificationMethods`); otherwise `unrecognised` |
+| `gen_ai.tool.name`, MCP spans | Records an invented tool name verbatim | Keeps it only if it is in `KnownToolNames`; otherwise `unrecognised` |
+| Every other MCP tag | `jsonrpc.request.id`, `mcp.resource.uri` and `gen_ai.prompt.name` carry caller values | Dropped unless on `AllowedMcpTags`, so a future SDK tag is dropped by default |
+| The span name, MCP spans | `<method>` or `<method> <target>`, where the target is the caller's tool, prompt or resource | **Rebuilt** from the cleaned method and tool, never patched |
+
+`QueryStringRedactingProcessor` replaces the query string on `HttpClient` dependency spans with `?*`.
+The search, count and analytics tools send free text as `?query=` (for example `Search_tickets`,
+`Search_users`, `Search_organizations`), often a customer's name or email.
+The .NET runtime already redacts it the same way, but a process-wide switch turns that off; the
+processor keeps the guarantee in this repository.
+
+⚠️ **Paths are not redacted.** `AppDependencies` still carries caller-typed **path segments**: ids,
+locales and custom-object keys. That gap is open. The PII test
+(`TheMcpSdk_PublishesTheSourceWeRegister_AndNoSanitisedSpanCarriesCallerText`) covers MCP SDK and
+ASP.NET Core server spans only, because its harness stubs the primary HTTP handler and so creates no
+dependency span. `jsonrpc.request.id` is covered by a unit test only, because the harness sends a
+constant id.
+
+**Processor order is pinned.** OpenTelemetry runs processors in the order they were added. The
+exporter test asserts that both processors run before the distro's Live Metrics and batch exporter.
+
+⚠️ **The exporter test disposes its `TracerProvider` and `MeterProvider` explicitly** (`LoggingFilterTests`). Inside the
+suite, disposing the `WebApplicationFactory` did not dispose it. A leaked provider stayed subscribed
+to the MCP source and sanitised later tests' spans. A post-dispose guard catches a recurrence, and
+`TelemetryRedactionTests` is in the serialised collection so that guard cannot flake. vitally-mcp
+did not establish the cause, so do not generalise from it.
+
 ### Per-user Zendesk OAuth
 
 ```
@@ -615,7 +735,7 @@ Dropped from Swifteq's set: `get_usage` and `submit_mcp_feedback` (Swifteq billi
 
 xUnit v3 on **Microsoft.Testing.Platform** (not VSTest): `global.json` selects the runner, the test project is an `Exe`, and VSTest-only flags (`--filter "FullyQualifiedName~…"`, `--logger`, `--collect`) are rejected — use `--filter-class` / `--filter-method`, `--report-trx`, `--coverage`.
 
-⚠️ **Run the tests in a shell without the dev-mode variables.** The host-based tests build the app with `WebApplicationFactory`, which reads environment variables, so `OAuth__NoAuth`, `Authorization__ReadOnly`, `Zendesk__DevelopmentAccessToken` and friends left over from running the server locally override the tests' own configuration — about 100 tests fail for that reason alone. CI does not set them. Clear them first, e.g. `env -u OAuth__NoAuth -u Authorization__ReadOnly -u Zendesk__DevelopmentAccessToken -u Zendesk__Subdomain -u ASPNETCORE_ENVIRONMENT dotnet test --solution ZendeskMcp.sln -c Debug`. #8 makes the tests immune and removes this paragraph.
+The tests are immune to a shell set up to run the server locally: `AmbientConfiguration`, a module initialiser in the test assembly, clears any inherited variable under the sections `Program.cs` reads (`OAuth__`, `Authorization__`, `Zendesk__`, `Audit__`, `ToolsListCache__`, `ApplicationInsights__`, `Logging__`), plus `ASPNETCORE_ENVIRONMENT`, `AllowedHosts` and `OTEL_*`, before any test runs, so the variables used to run the server locally cannot change the results (#8). It changes only the test process's environment; fixtures set their own values afterwards.
 
 | Area | Tests |
 |---|---|
