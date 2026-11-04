@@ -142,9 +142,21 @@ public static class ZendeskConnectEndpoints
             var gate = ZendeskCredentialProvider.LockFor(attempt.ObjectId);
             await gate.WaitAsync(ctx.RequestAborted);
             ZendeskUserToken? replaced;
+            var replacedUnreadable = false;
             try
             {
-                replaced = await store.GetAsync(attempt.ObjectId, ctx.RequestAborted);
+                try
+                {
+                    replaced = await store.GetAsync(attempt.ObjectId, ctx.RequestAborted);
+                }
+                catch (ZendeskStoredTokenUnreadableException ex)
+                {
+                    // Replaced all the same — the person is reconnecting precisely because the old
+                    // grant does not work — but revoked below as far as it can be read.
+                    replaced = ex.Salvaged;
+                    replacedUnreadable = true;
+                }
+
                 await store.SaveAsync(attempt.ObjectId, oauthClient.ToUserToken(token, identity), ctx.RequestAborted);
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
@@ -164,9 +176,21 @@ public static class ZendeskConnectEndpoints
             }
 
             // A reconnect replaces the previous grant; revoke it so it does not stay live at Zendesk.
+            // The whole grant, not just its access token: the usual reason to reconnect is an expired
+            // one, and revoking an expired access token answers 401 — read as revoked — while its
+            // refresh token stays live (#12).
             if (replaced is not null && replaced.AccessToken != token.AccessToken)
             {
-                await oauthClient.RevokeAsync(replaced.AccessToken, ctx.RequestAborted);
+                if (!await oauthClient.RevokeGrantAsync(replaced, ctx.RequestAborted))
+                {
+                    logger.LogWarning("Could not confirm the revocation of the Zendesk grant replaced for {UserObjectId}; it may still be live at Zendesk",
+                        attempt.ObjectId);
+                }
+            }
+            else if (replacedUnreadable)
+            {
+                logger.LogError("The Zendesk grant replaced for {UserObjectId} could not be read, so it was not revoked; it may still be live at Zendesk",
+                    attempt.ObjectId);
             }
 
             await links.RedeemAsync(attempt.Ticket, ctx.RequestAborted);

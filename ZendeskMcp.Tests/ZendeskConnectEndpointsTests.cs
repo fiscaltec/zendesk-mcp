@@ -58,6 +58,44 @@ public class ZendeskConnectEndpointsTests
     }
 
     [Fact]
+    public async Task AReconnect_OverAnExpiredGrant_RefreshesItFirst_SoTheRevocationReachesALiveGrant()
+    {
+        // Revoking an expired access token answers 401, which reads as revoked while the refresh
+        // token, and so the old grant, stays live (#12) — and an expired grant is the usual reason
+        // to reconnect.
+        using var factory = new Factory(zendeskEmail: "agent@example.com");
+        using var client = factory.CreateClient(new WebApplicationFactoryClientOptions { AllowAutoRedirect = false });
+        await factory.Store.SaveAsync(ObjectId, new ZendeskUserToken("old-access", "old-refresh", DateTimeOffset.UtcNow.AddHours(-1), null,
+            4242, "agent@example.com", "agent", DateTimeOffset.UtcNow.AddDays(-7)));
+        var state = await StartAsync(factory, client, "agent@example.com");
+
+        var callback = await GetWithCookieAsync(client, $"/zendesk/callback?code=the-code&state={state}", state);
+
+        callback.StatusCode.Should().Be(HttpStatusCode.OK);
+        (await factory.Store.GetAsync(ObjectId))!.AccessToken.Should().Be("issued-access");
+        factory.ZendeskRequests.Should().ContainSingle(r => r.Path == "/oauth/tokens" && r.Body!.Contains("\"refresh_token\":\"old-refresh\""));
+        factory.ZendeskRequests.Should().ContainSingle(r => r.Method == HttpMethod.Delete)
+            .Which.Headers["Authorization"].Should().Be("Bearer renewed-old", "the renewed old grant is the one to kill, never the new one");
+    }
+
+    [Fact]
+    public async Task AReconnect_OverAnUnreadableGrant_StoresTheNewOne_AndRevokesWhatCanBeRead()
+    {
+        var unreadable = new UnreadableTokenStore(new ZendeskStoredTokenUnreadableException(
+            new ZendeskUserToken("readable-old", null, null, null, 0, string.Empty, string.Empty, DateTimeOffset.MinValue)));
+        using var factory = new Factory(zendeskEmail: "agent@example.com", store: unreadable);
+        using var client = factory.CreateClient(new WebApplicationFactoryClientOptions { AllowAutoRedirect = false });
+        var state = await StartAsync(factory, client, "agent@example.com");
+
+        var callback = await GetWithCookieAsync(client, $"/zendesk/callback?code=the-code&state={state}", state);
+
+        callback.StatusCode.Should().Be(HttpStatusCode.OK, "a damaged old grant must not stop the person reconnecting");
+        (await unreadable.GetAsync(ObjectId))!.AccessToken.Should().Be("issued-access");
+        factory.ZendeskRequests.Should().ContainSingle(r => r.Method == HttpMethod.Delete)
+            .Which.Headers["Authorization"].Should().Be("Bearer readable-old");
+    }
+
+    [Fact]
     public async Task ADifferentZendeskLogin_IsRefused_RevokedAndNotStored()
     {
         using var factory = new Factory(zendeskEmail: "someone.else@example.com");
@@ -190,7 +228,7 @@ public class ZendeskConnectEndpointsTests
                 .Split('=', 2)[1]
             : null;
 
-    private sealed class Factory(string zendeskEmail, string role = "agent", string name = "Agent Example") : WebApplicationFactory<Program>
+    private sealed class Factory(string zendeskEmail, string role = "agent", string name = "Agent Example", IZendeskTokenStore? store = null) : WebApplicationFactory<Program>
     {
         private readonly List<RecordedRequest> _requests = [];
 
@@ -228,6 +266,10 @@ public class ZendeskConnectEndpointsTests
             {
                 services.AddHttpClient(ZendeskOAuthClient.HttpClientName)
                     .ConfigurePrimaryHttpMessageHandler(() => new StubZendesk(this));
+                if (store is not null)
+                {
+                    services.AddSingleton(store);
+                }
             });
             return base.CreateHost(builder);
         }
@@ -246,6 +288,8 @@ public class ZendeskConnectEndpointsTests
 
                 var json = recorded.Path switch
                 {
+                    "/oauth/tokens" when body!.Contains("\"grant_type\":\"refresh_token\"", StringComparison.Ordinal) =>
+                        "{\"access_token\":\"renewed-old\",\"refresh_token\":\"renewed-old-refresh\",\"expires_in\":7200,\"token_type\":\"bearer\"}",
                     "/oauth/tokens" => "{\"access_token\":\"issued-access\",\"refresh_token\":\"issued-refresh\",\"expires_in\":7200,\"token_type\":\"bearer\"}",
                     "/api/v2/users/me.json" => System.Text.Json.JsonSerializer.Serialize(new
                     {
