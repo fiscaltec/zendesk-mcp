@@ -449,6 +449,33 @@ public class MacrosToolsTests
     }
 
     [Fact]
+    public async Task ApplyMacro_ARetryWhileTheFirstWriteIsStillWaiting_IsRefused()
+    {
+        // An MCP client that gives up does not cancel the server's request, so a lookup made now could
+        // find nothing and the first write land afterwards: two replies (pre-review on the #12 PR).
+        using var entered = new ManualResetEventSlim();
+        using var release = new ManualResetEventSlim();
+        var (fake, zendesk) = Build(LostResponseRoutes(_ =>
+        {
+            entered.Set();
+            release.Wait(TimeSpan.FromSeconds(10));
+            return Applied();
+        }, () => FakeResponse.Json("""{"audits":[],"meta":{"has_more":false}}""")));
+        using var _ = fake;
+        using var cache = new MemoryCache(new MemoryCacheOptions());
+
+        var first = Task.Run(() => MacrosTools.ApplyMacro(zendesk, cache, ticket_id: 42, macro_id: 10));
+        entered.Wait(TimeSpan.FromSeconds(10)).Should().BeTrue();
+        var retry = () => MacrosTools.ApplyMacro(zendesk, cache, ticket_id: 42, macro_id: 10);
+        (await retry.Should().ThrowAsync<ArgumentException>()).WithMessage("*still waiting for Zendesk*");
+        release.Set();
+
+        Parse(await first)["result"]!.GetValue<string>().Should().Be("applied");
+        fake.Requests.Count(r => r.Method == HttpMethod.Put).Should().Be(1);
+        fake.Requests.Should().NotContain(r => r.Path == "/api/v2/tickets/42/audits", "an in-flight call is not looked up");
+    }
+
+    [Fact]
     public async Task ApplyMacro_ATimedOutOrCancelledWrite_IsPending()
     {
         // HttpClient's timeout, or a client giving up mid-write, arrives as TaskCanceledException and

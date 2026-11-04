@@ -8,9 +8,11 @@ namespace ZendeskMcp.Tools;
 /// What a write tool's repeat guard remembers about one call: when it was made, and whether its
 /// outcome is known. <see cref="Pending"/> means the write was sent and no answer came back that
 /// settles it — the response was lost to a cancellation, a timeout or a server error, which is
-/// exactly the case a retry comes from (#12).
+/// exactly the case a retry comes from (#12). <see cref="InFlight"/> means that call is still
+/// waiting for Zendesk on this server: an MCP client that gives up does not cancel a stateless
+/// request, so the write can still land after a retry has looked for it and found nothing.
 /// </summary>
-internal sealed record RepeatGuardEntry(DateTimeOffset At, long? RecordId, bool Pending);
+internal sealed record RepeatGuardEntry(DateTimeOffset At, long? RecordId, bool Pending, bool InFlight = false);
 
 /// <summary>
 /// Shared rules for the repeat guards of <c>Create_help_center_article</c> and <c>Apply_macro</c>.
@@ -26,12 +28,15 @@ internal static class RepeatGuard
 {
     /// <summary>
     /// How far before the attempt a lookup reaches, because Zendesk's clock and this server's can
-    /// differ. A record of the same action by the same person that close before the attempt would
-    /// itself have been remembered, so reaching back cannot hide a legitimate repeat.
+    /// differ. The cost: a matching record made in that window by another call — an <c>apply_again</c>
+    /// a minute earlier, or (for articles, matched on title and locale only) a different article of the
+    /// same title — is taken for this attempt's, and the retry answers <c>already_…</c> rather than
+    /// writing. That errs towards not writing twice, and the answer's warning says the earlier record was found.
     /// </summary>
     public static readonly TimeSpan ClockSkew = TimeSpan.FromMinutes(2);
 
-    public static RepeatGuardEntry PendingNow() => new(DateTimeOffset.UtcNow, null, Pending: true);
+    /// <summary>A pending entry for a write about to be sent, and still waiting for its answer.</summary>
+    public static RepeatGuardEntry InFlightNow() => new(DateTimeOffset.UtcNow, null, Pending: true, InFlight: true);
 
     public static RepeatGuardEntry Completed(long? recordId = null) => new(DateTimeOffset.UtcNow, recordId, Pending: false);
 
@@ -47,6 +52,10 @@ internal static class RepeatGuard
         HttpRequestException { StatusCode: { } status } => (int)status is >= 400 and < 500 && status != HttpStatusCode.RequestTimeout,
         _ => false,
     };
+
+    /// <summary>The refusal for a retry that arrives while the first call is still waiting for Zendesk.</summary>
+    public static ArgumentException StillInFlight(string what, string again) => new(
+        $"An earlier attempt to {what} was sent and is still waiting for Zendesk's answer, so it may yet land. Wait a minute and try again; this server then checks whether it did. Pass {again} true only to do it a second time on purpose.");
 
     /// <summary>A Zendesk timestamp, or null when it is absent or unreadable.</summary>
     public static DateTimeOffset? Timestamp(JsonNode? node) =>

@@ -433,6 +433,45 @@ public sealed class HelpCenterArticlesToolsTests : IDisposable
     }
 
     [Fact]
+    public async Task Create_ResponseLost_MatchesATitleZendeskTrimmed()
+    {
+        using var cache = new MemoryCache(new MemoryCacheOptions());
+        using var fake = TestHelpers.CreateFakeZendesk(LostCreateRoute(_ => Listed(900, "New", DateTimeOffset.UtcNow)));
+        var zendesk = TestHelpers.BuildZendeskService(fake.Client);
+
+        var first = () => HelpCenterArticlesTools.CreateHelpCenterArticle(zendesk, cache, 7, "en-gb", "New ", permission_group_id: 3);
+        await first.Should().ThrowAsync<HttpRequestException>();
+        var retry = JsonNode.Parse(await HelpCenterArticlesTools.CreateHelpCenterArticle(zendesk, cache, 7, "en-gb", "New ", permission_group_id: 3))!;
+
+        retry["result"]!.GetValue<string>().Should().Be("already_created");
+        fake.Requests.Count(r => r.Method == HttpMethod.Post).Should().Be(1);
+    }
+
+    [Fact]
+    public async Task Create_SuccessWithoutAnId_StaysPending_SoARetryLooksFirst()
+    {
+        // The article exists, but without its id a retry cannot fetch it; forgetting the attempt would
+        // let the retry create a second draft.
+        var posts = 0;
+        using var cache = new MemoryCache(new MemoryCacheOptions());
+        using var fake = TestHelpers.CreateFakeZendesk(r => (r.Method.Method, r.Path) switch
+        {
+            ("POST", SectionList) => ++posts == 1 ? FakeResponse.Json("""{"article":{"title":"New","locale":"en-gb","draft":true}}""") : FakeResponse.Json(Draft("601")),
+            ("GET", SectionList) => Listed(900, "New", DateTimeOffset.UtcNow),
+            ("GET", "/api/v2/users/me") => FakeResponse.Json("""{"user":{"id":900}}"""),
+            ("GET", "/api/v2/help_center/articles/600") => FakeResponse.Json(Draft("600")),
+            _ => FakeResponse.NotFound(),
+        });
+        var zendesk = TestHelpers.BuildZendeskService(fake.Client);
+
+        await HelpCenterArticlesTools.CreateHelpCenterArticle(zendesk, cache, 7, "en-gb", "New", permission_group_id: 3);
+        var retry = JsonNode.Parse(await HelpCenterArticlesTools.CreateHelpCenterArticle(zendesk, cache, 7, "en-gb", "New", permission_group_id: 3))!;
+
+        retry["result"]!.GetValue<string>().Should().Be("already_created");
+        posts.Should().Be(1);
+    }
+
+    [Fact]
     public async Task Create_RefusedByZendesk_ForgetsTheAttempt_AndARetryNeedsNoLookup()
     {
         using var cache = new MemoryCache(new MemoryCacheOptions());

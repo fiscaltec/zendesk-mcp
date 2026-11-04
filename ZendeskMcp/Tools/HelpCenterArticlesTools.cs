@@ -239,6 +239,11 @@ public static partial class HelpCenterArticlesTools
         var cacheKey = "zendesk-mcp:create-article:" + Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes($"{zendesk.BaseUrl}\n{callerKey}\n{arguments.ToJsonString()}")));
         if (create_again != true && cache.TryGetValue<RepeatGuardEntry>(cacheKey, out var earlier) && earlier is not null)
         {
+            if (earlier.InFlight)
+            {
+                throw RepeatGuard.StillInFlight($"create '{validTitle}' in section {section_id}", "create_again");
+            }
+
             if (earlier.Pending)
             {
                 var (settled, found) = await ArticleCreatedSinceAsync(zendesk, section_id, validLocale, validTitle, earlier.At, brand_url, cancellationToken);
@@ -306,7 +311,8 @@ public static partial class HelpCenterArticlesTools
             article["position"] = position;
         }
 
-        cache.Set(cacheKey, RepeatGuard.PendingNow(), RecentCreateWindow);
+        var attempt = RepeatGuard.InFlightNow();
+        cache.Set(cacheKey, attempt, RecentCreateWindow);
         JsonNode response;
         try
         {
@@ -321,16 +327,20 @@ public static partial class HelpCenterArticlesTools
             cache.Remove(cacheKey);
             throw;
         }
+        catch
+        {
+            // Outcome unknown, and no longer waiting: a retry now looks in the section.
+            cache.Set(cacheKey, attempt with { InFlight = false }, RecentCreateWindow);
+            throw;
+        }
 
         var created = HelpCenterJson.Article(response["article"], includeBody: false);
-        if (ToolJson.Long(response["article"]?["id"]) is { } createdId)
-        {
-            cache.Set(cacheKey, RepeatGuard.Completed(createdId), RecentCreateWindow);
-        }
-        else
-        {
-            cache.Remove(cacheKey);
-        }
+
+        // A success without an id still created the article; without the id a retry cannot fetch it,
+        // so the entry stays pending (not in flight) and a retry looks in the section instead.
+        cache.Set(cacheKey,
+            ToolJson.Long(response["article"]?["id"]) is { } createdId ? RepeatGuard.Completed(createdId) : attempt with { InFlight = false },
+            RecentCreateWindow);
 
         created["result"] = "created";
         created["visible_to"] = user_segment_id is null ? "everyone once published" : "members of user_segment_id once published";
@@ -373,7 +383,7 @@ public static partial class HelpCenterArticlesTools
         var from = since - RepeatGuard.ClockSkew;
         foreach (var candidate in page["articles"] as JsonArray ?? [])
         {
-            if (string.Equals(ToolJson.String(candidate?["title"]), title, StringComparison.Ordinal)
+            if (string.Equals(ToolJson.String(candidate?["title"])?.Trim(), title.Trim(), StringComparison.Ordinal)
                 && string.Equals(ToolJson.String(candidate?["locale"]), locale, StringComparison.OrdinalIgnoreCase)
                 && ToolJson.Long(candidate?["author_id"]) == me
                 && RepeatGuard.Timestamp(candidate?["created_at"]) is { } at && at >= from

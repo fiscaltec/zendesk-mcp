@@ -493,6 +493,11 @@ public static class MacrosTools
                     "This macro was applied to this ticket in the last 10 minutes, so nothing was sent. Pass apply_again true to apply it again on purpose.");
             }
 
+            if (earlier.InFlight)
+            {
+                throw RepeatGuard.StillInFlight($"apply macro {macro_id} to ticket {ticket_id}", "apply_again");
+            }
+
             switch (await MacroAppliedSinceAsync(zendesk, ticket_id, macro_id, earlier.At, cancellationToken))
             {
                 case true:
@@ -620,7 +625,8 @@ public static class MacrosTools
         // (confirmed against the live API).
         ticketBody["macro_ids"] = new JsonArray(macro_id);
 
-        cache.Set(cacheKey, RepeatGuard.PendingNow(), RecentApplyWindow);
+        var attempt = RepeatGuard.InFlightNow();
+        cache.Set(cacheKey, attempt, RecentApplyWindow);
         JsonNode response;
         try
         {
@@ -630,6 +636,12 @@ public static class MacrosTools
         {
             // Zendesk refused it (a 409 from safe_update, say), so a retry need not look anything up.
             cache.Remove(cacheKey);
+            throw;
+        }
+        catch
+        {
+            // Outcome unknown, and no longer waiting: a retry now looks in the ticket's history.
+            cache.Set(cacheKey, attempt with { InFlight = false }, RecentApplyWindow);
             throw;
         }
 
