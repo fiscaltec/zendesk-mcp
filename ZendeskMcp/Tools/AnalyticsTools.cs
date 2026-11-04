@@ -30,7 +30,6 @@ public static class AnalyticsTools
     private const string IncludeTagsDescription = "Comma-separated tags that must be present, as a string (e.g., 'bug,urgent,needs-review'). Case does not matter.";
     private const string ExcludeTagsDescription = "Comma-separated tags that must NOT be present, as a string (e.g., 'spam,test_data'). Case does not matter.";
     private const string CustomFieldIdDescription = "The numeric ID of a custom ticket field to filter by. Must be used together with custom_field_value. You can get the field ID from the Ticket Fields admin page URL or via the List_ticket_fields tool.";
-    private const string CustomFieldValueDescription = "The value to search for in the custom field specified by custom_field_id. Must be used together with custom_field_id. Multi-word values are automatically quoted.";
     private const string CustomStatusIdDescription = "Filter by a specific custom ticket status ID. Only applies when custom ticket statuses are activated on the account. Use this to target one exact status (e.g. 'On Hold') rather than the whole status category. Find the ID with List_ticket_fields: the Status field carries a custom_statuses array listing each status with its id and agent_label.";
     private const string HasAttachmentsDescription = "Filter by attachment presence. true = with attachments, false = without attachments, omit = ignore filter.";
     private const string StartDateDescription = "Start date filter (inclusive). ISO format: YYYY-MM-DD, YYYY-MM-DDThh:mm:ss, or YYYY-MM-DDThh:mm:ssZ. Example: '2024-01-15' or '2024-01-15T09:30:00Z'.";
@@ -62,7 +61,9 @@ public static class AnalyticsTools
         [Description(IncludeTagsDescription)] string? include_tags = null,
         [Description(ExcludeTagsDescription)] string? exclude_tags = null,
         [Description(CustomFieldIdDescription)] long? custom_field_id = null,
-        [Description(CustomFieldValueDescription)] string? custom_field_value = null,
+        [Description(TicketFilterDescriptions.CustomFieldValue)] string? custom_field_value = null,
+        [Description(TicketFilterDescriptions.CustomFields)] TicketCustomFieldCondition[]? custom_fields = null,
+        [Description(TicketFilterDescriptions.Channel)] string[]? channel = null,
         [Description(CustomStatusIdDescription)] long? custom_status_id = null,
         [Description(HasAttachmentsDescription)] bool? has_attachments = null,
         [Description(StartDateDescription)] string? start_date = null,
@@ -92,14 +93,16 @@ public static class AnalyticsTools
             throw new ArgumentException("A start date is required: start_date (created) or solved_start_date.");
         }
 
-        var query = TicketSearchQuery.Build(new TicketSearchFilters
+        var filters = new TicketSearchFilters
         {
             Text = text, Status = status, Priority = priority, TicketType = ticket_type, Assignee = assignee,
             Requester = requester, Organization = organization, Group = group, Brand = brand, Form = form,
             IncludeTags = include_tags, ExcludeTags = exclude_tags, CustomFieldId = custom_field_id,
             CustomFieldValue = custom_field_value, CustomStatusId = custom_status_id, HasAttachments = has_attachments,
             StartDate = start_date, EndDate = end_date, SolvedStartDate = solved_start_date, SolvedEndDate = solved_end_date,
-        });
+            CustomFields = custom_fields, Channels = channel,
+        };
+        var (query, _) = await TicketSearchHelpers.BuildQueryAsync(zendesk, filters, cancellationToken);
         var searchUrl = TicketSearchQuery.AgentSearchUrl(zendesk.BaseUrl, query);
         var bySolved = !string.IsNullOrWhiteSpace(solved_start_date) && string.IsNullOrWhiteSpace(start_date);
 
@@ -244,7 +247,9 @@ public static class AnalyticsTools
         [Description(IncludeTagsDescription)] string? include_tags = null,
         [Description(ExcludeTagsDescription)] string? exclude_tags = null,
         [Description(CustomFieldIdDescription)] long? custom_field_id = null,
-        [Description(CustomFieldValueDescription)] string? custom_field_value = null,
+        [Description(TicketFilterDescriptions.CustomFieldValue)] string? custom_field_value = null,
+        [Description(TicketFilterDescriptions.CustomFields)] TicketCustomFieldCondition[]? custom_fields = null,
+        [Description(TicketFilterDescriptions.Channel)] string[]? channel = null,
         [Description(CustomStatusIdDescription)] long? custom_status_id = null,
         [Description(HasAttachmentsDescription)] bool? has_attachments = null,
         CancellationToken cancellationToken = default)
@@ -274,8 +279,9 @@ public static class AnalyticsTools
             Requester = requester, Organization = organization, Group = group, Brand = brand, Form = form,
             IncludeTags = include_tags, ExcludeTags = exclude_tags, CustomFieldId = custom_field_id,
             CustomFieldValue = custom_field_value, CustomStatusId = custom_status_id, HasAttachments = has_attachments,
+            CustomFields = custom_fields, Channels = channel,
         };
-        var baseQuery = TicketSearchQuery.Build(filters);
+        var (baseQuery, _) = await TicketSearchHelpers.BuildQueryAsync(zendesk, filters, cancellationToken);
 
         var (zone, zoneName) = await AnalyticsSupport.GetTimeZoneAsync(zendesk, cancellationToken);
         var end = string.IsNullOrWhiteSpace(end_date) ? AnalyticsStats.Today(zone, DateTimeOffset.UtcNow) : AnalyticsSupport.ParseDay(end_date, "end_date");
@@ -377,7 +383,9 @@ public static class AnalyticsTools
         [Description(IncludeTagsDescription)] string? include_tags = null,
         [Description(ExcludeTagsDescription)] string? exclude_tags = null,
         [Description(CustomFieldIdDescription)] long? custom_field_id = null,
-        [Description(CustomFieldValueDescription)] string? custom_field_value = null,
+        [Description(TicketFilterDescriptions.CustomFieldValue)] string? custom_field_value = null,
+        [Description(TicketFilterDescriptions.CustomFields)] TicketCustomFieldCondition[]? custom_fields = null,
+        [Description(TicketFilterDescriptions.Channel)] string[]? channel = null,
         [Description(CustomStatusIdDescription)] long? custom_status_id = null,
         [Description(HasAttachmentsDescription)] bool? has_attachments = null,
         CancellationToken cancellationToken = default)
@@ -393,13 +401,15 @@ public static class AnalyticsTools
             throw new ArgumentException($"status must be one of new, open, pending, hold: the queue holds unsolved tickets only (got '{status}').");
         }
 
-        var query = TicketSearchQuery.Build(new TicketSearchFilters
+        var filters = new TicketSearchFilters
         {
             Text = text, Status = status, Priority = priority, TicketType = ticket_type, Assignee = assignee,
             Requester = requester, Organization = organization, Group = group, Brand = brand, Form = form,
             IncludeTags = include_tags, ExcludeTags = exclude_tags, CustomFieldId = custom_field_id,
             CustomFieldValue = custom_field_value, CustomStatusId = custom_status_id, HasAttachments = has_attachments,
-        });
+            CustomFields = custom_fields, Channels = channel,
+        };
+        var (query, _) = await TicketSearchHelpers.BuildQueryAsync(zendesk, filters, cancellationToken);
         if (string.IsNullOrWhiteSpace(status))
         {
             query += " status<solved";

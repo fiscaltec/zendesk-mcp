@@ -44,12 +44,15 @@ public sealed class ZendeskUploadSlots(IDistributedCache cache)
     private readonly System.Collections.Concurrent.ConcurrentDictionary<string, List<DateTimeOffset>> _issued = new(StringComparer.Ordinal);
 
     // The claims a slot carries forward: identity for the audit record and the Zendesk token lookup,
-    // and the token-claim permissions for deployments that resolve tiers from claims rather than Graph.
-    private static readonly HashSet<string> CarriedClaimTypes = new(StringComparer.Ordinal)
-    {
-        "oid", "http://schemas.microsoft.com/identity/claims/objectidentifier",
-        "permissions", "scope", "preferred_username", "upn",
-    };
+    // the token-claim permissions for deployments that resolve tiers from claims rather than Graph, and
+    // every sign-in name spelling CallerIdentity reads. JwtBearer maps `upn` to its WS-Federation URI,
+    // so a list naming only the short spellings dropped the claim the connect link prefers, and an
+    // upload needing a reconnect then bound the link to the mutable `preferred_username` — or, with
+    // none, to no sign-in name at all, which the callback refuses.
+    private static readonly HashSet<string> CarriedClaimTypes = new(
+        ["oid", "http://schemas.microsoft.com/identity/claims/objectidentifier", "permissions", "scope",
+         .. CallerIdentity.SignInNameClaimTypes],
+        StringComparer.Ordinal);
 
     public async Task<string> CreateAsync(ClaimsPrincipal caller, string fileName, long fileSize, bool inline, string? extraClaimType, CancellationToken cancellationToken = default)
     {
