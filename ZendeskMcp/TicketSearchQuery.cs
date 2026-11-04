@@ -298,12 +298,9 @@ public static class TicketSearchQuery
             // '(none)' group and -custom_field_<id>:* exactly those in it (confirmed against the live API).
             // Unverified against the live API: the wildcard on text, number, date and other non-drop-down
             // fields; the only text field tried was empty on every ticket, which cannot tell the two apart.
-            terms.Add(condition.HasValue switch
-            {
-                true => $"custom_field_{id}:*",
-                false => $"-custom_field_{id}:*",
-                null => $"custom_field_{id}:{ExactValue(condition.Value!)}",
-            });
+            terms.Add(condition.HasValue is { } wantsValue
+                ? $"{(wantsValue ? string.Empty : "-")}custom_field_{id}:*"
+                : $"custom_field_{id}:{ExactValue(condition.Value!)}");
         }
     }
 
