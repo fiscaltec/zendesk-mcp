@@ -172,7 +172,9 @@ public sealed class ZendeskOAuthClient(
     /// </para>
     /// <para>
     /// The renewed grant is never stored: every caller — disconnect, reconnect, a final 401, an
-    /// unreadable stored value — is discarding this grant.
+    /// unreadable stored value — is discarding this grant. Once a refresh is sent the caller's
+    /// cancellation is no longer honoured (<see cref="GrantCleanupTimeout"/>), and a failed revocation
+    /// of the renewed access token is tried once more.
     /// </para>
     /// </remarks>
     public async Task<bool> RevokeGrantAsync(ZendeskUserToken grant, CancellationToken cancellationToken)
@@ -191,6 +193,8 @@ public sealed class ZendeskOAuthClient(
         var status = await RevokeStatusAsync(grant.AccessToken, cancellationToken);
         return status switch
         {
+            // Unverified against the live API: Zendesk's Revoke Token documentation does not say that
+            // revoking an access token ends its refresh token too; a success is taken to end the grant.
             >= 200 and < 300 => true,
             401 when hasRefresh => await RefreshAndRevokeAsync(grant.RefreshToken!, accessToken: null, cancellationToken),
             401 => true,
@@ -198,34 +202,77 @@ public sealed class ZendeskOAuthClient(
         };
     }
 
+    /// <summary>
+    /// How long the refresh and revocation of a discarded grant may take once the refresh is sent. The
+    /// caller's cancellation is not honoured from then on: Zendesk rotates the refresh token on use, so
+    /// a refresh that lands while the caller gives up leaves a renewed grant live that nobody holds.
+    /// </summary>
+    internal static readonly TimeSpan GrantCleanupTimeout = TimeSpan.FromSeconds(30);
+
     // Refreshes a discarded grant and revokes the access token that comes back. `accessToken` is the
     // grant's own access token when it has not yet been tried, else null.
     private async Task<bool> RefreshAndRevokeAsync(string refreshToken, string? accessToken, CancellationToken cancellationToken)
     {
+        cancellationToken.ThrowIfCancellationRequested();
+        using var cleanup = new CancellationTokenSource(GrantCleanupTimeout);
         string renewed;
         try
         {
-            renewed = (await RefreshAsync(refreshToken, cancellationToken)).AccessToken;
+            renewed = (await RefreshAsync(refreshToken, cleanup.Token)).AccessToken;
         }
-        catch (ZendeskOAuthException ex) when (ex.Error is "invalid_grant" or "invalid_token" or "unauthorized_client")
+        // Only these say the refresh token itself is dead. unauthorized_client is about this OAuth
+        // client's configuration at Zendesk, not the grant, which works again once that is corrected,
+        // so it falls through to "not revoked" below (#59).
+        catch (ZendeskOAuthException ex) when (ex.Error is "invalid_grant" or "invalid_token")
         {
             // The refresh token is dead, but that says nothing about an access token not yet tried:
             // a damaged stored value can pair a good access token with a broken refresh token. With
             // the refresh token known dead, a 401 to revoking the access token does mean it is dead
             // too, so RevokeAsync's reading of 401 holds here (Copilot on #48).
-            return string.IsNullOrWhiteSpace(accessToken) || await RevokeAsync(accessToken, cancellationToken);
+            return string.IsNullOrWhiteSpace(accessToken) || await RevokeOnCleanupAsync(accessToken, cleanup.Token);
         }
-        catch (Exception ex) when (!cancellationToken.IsCancellationRequested)
+        catch (Exception ex)
         {
-            // Includes the client's own timeout (Copilot on #48).
+            // Includes the client's own timeout and this cleanup's (Copilot on #48).
             logger.LogWarning("Could not refresh a discarded Zendesk grant to revoke it: {FailureType}", ex.GetType().Name);
             return false;
         }
 
-        // Only a success counts: a token Zendesk issued a moment ago answering 401 proves nothing
-        // about the refresh token issued with it, and another refresh would not end (Copilot on #48).
-        return await RevokeStatusAsync(renewed, cancellationToken) is >= 200 and < 300;
+        // The renewed grant is held by nobody, so a revocation that fails is tried once more. Only a
+        // success counts: a token Zendesk issued a moment ago answering 401 proves nothing about the
+        // refresh token issued with it, and another refresh would not end (Copilot on #48). Neither is
+        // retried.
+        var status = await RevokeStatusOnCleanupAsync(renewed, cleanup.Token);
+        if (status is not (>= 200 and < 300) and not 401)
+        {
+            status = await RevokeStatusOnCleanupAsync(renewed, cleanup.Token);
+        }
+
+        if (status is >= 200 and < 300)
+        {
+            return true;
+        }
+
+        logger.LogError("Zendesk did not confirm revoking a renewed grant (status {StatusCode}); it may still be live at Zendesk with nobody holding it", status);
+        return false;
     }
+
+    // RevokeStatusAsync on the cleanup token: its expiry is a failed revocation, not a cancelled call.
+    private async Task<int?> RevokeStatusOnCleanupAsync(string accessToken, CancellationToken cleanup)
+    {
+        try
+        {
+            return await RevokeStatusAsync(accessToken, cleanup);
+        }
+        catch (OperationCanceledException) when (cleanup.IsCancellationRequested)
+        {
+            logger.LogWarning("Zendesk token revocation did not complete within {CleanupSeconds} s", GrantCleanupTimeout.TotalSeconds);
+            return null;
+        }
+    }
+
+    private async Task<bool> RevokeOnCleanupAsync(string accessToken, CancellationToken cleanup) =>
+        await RevokeStatusOnCleanupAsync(accessToken, cleanup) is { } status && (status is >= 200 and < 300 || status == 401);
 
     /// <summary>Builds the stored record from a token response and the identity it was checked against.</summary>
     public ZendeskUserToken ToUserToken(TokenResponse token, ZendeskIdentity identity, DateTimeOffset? connectedAt = null)

@@ -248,12 +248,18 @@ public sealed class ZendeskCredentialProvider(
         return await connectLinks.CreateAsync(objectId, CallerIdentity.TryGetSignInName(User), PublicBaseUrl(), cancellationToken);
     }
 
+    // A disconnect's revocation: the first revocation, then GrantCleanupTimeout for a refresh and the
+    // renewed token's revocation. Its removal gets a fresh budget of its own.
+    private static readonly TimeSpan DisconnectRevocationTimeout = ZendeskOAuthClient.GrantCleanupTimeout + TimeSpan.FromSeconds(15);
+    private static readonly TimeSpan DisconnectRemovalTimeout = TimeSpan.FromSeconds(30);
+
     /// <summary>
     /// Revokes the caller's grant at Zendesk and forgets it here, through
     /// <see cref="ZendeskOAuthClient.RevokeGrantAsync"/> like every other path that discards a grant:
     /// an access token expired or about to expire is refreshed first, and a 401 is not taken as proof
     /// while a refresh token could still renew the grant (#12). A revocation that cannot be confirmed
-    /// still forgets the grant, and says so.
+    /// still forgets the grant, and says so. Once the grant is read, the caller's cancellation is no
+    /// longer honoured.
     /// </summary>
     public async Task<DisconnectOutcome> DisconnectAsync(CancellationToken cancellationToken = default)
     {
@@ -282,13 +288,32 @@ public sealed class ZendeskCredentialProvider(
                 return DisconnectOutcome.NotConnected;
             }
 
-            var revoked = await oauthClient.RevokeGrantAsync(token, cancellationToken);
+            // From here the caller's cancellation is no longer honoured. Once the revocation is sent,
+            // Zendesk may end the grant whatever the caller does, and a grant left stored after that
+            // could be refreshed by the next 401 and quietly undo the disconnect (#59). So revocation
+            // and removal each run on a bounded token of their own; removal gets a fresh one, so a
+            // revocation that used up its time still leaves time to forget the grant.
+            bool revoked;
+            using (var revocation = new CancellationTokenSource(DisconnectRevocationTimeout))
+            {
+                try
+                {
+                    revoked = await oauthClient.RevokeGrantAsync(token, revocation.Token);
+                }
+                catch (OperationCanceledException) when (revocation.IsCancellationRequested)
+                {
+                    revoked = false;
+                }
+            }
+
             if (!revoked)
             {
                 logger.LogWarning("Disconnected {UserObjectId} without confirming the revocation; the grant may still be live at Zendesk", objectId);
             }
 
-            await store.RemoveAsync(objectId, cancellationToken);
+            // Key Vault honours a cancelled token, so on the caller's the tombstone could be skipped.
+            using var removal = new CancellationTokenSource(DisconnectRemovalTimeout);
+            await store.RemoveAsync(objectId, removal.Token);
             return revoked ? DisconnectOutcome.Disconnected : DisconnectOutcome.ForgottenButNotRevoked;
         }
         finally
