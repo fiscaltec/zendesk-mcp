@@ -141,6 +141,49 @@ public class ZendeskUploadsTests
             ["oid", "permissions", "scope", "https://zendesk-mcp.example.com/permissions"]);
     }
 
+    [Theory]
+    [InlineData("upn")]
+    [InlineData(ClaimTypes.Upn)]
+    [InlineData("email")]
+    [InlineData(ClaimTypes.Email)]
+    [InlineData("preferred_username")]
+    [InlineData("unique_name")]
+    [InlineData(ClaimTypes.Name)]
+    public async Task TheSlotCarriesEverySignInNameSpelling_CallerIdentityReads(string claimType)
+    {
+        // An upload that finds the person's Zendesk grant gone hands back a connect link bound to the
+        // sign-in name read from the slot's principal. JwtBearer maps `upn` to its URI spelling, so
+        // a slot that drops a spelling CallerIdentity accepts loses the name, and the callback then
+        // refuses the link with email matching on.
+        var slots = new ZendeskUploadSlots(new MemoryDistributedCache(Options.Create(new MemoryDistributedCacheOptions())));
+        var caller = new ClaimsPrincipal(new ClaimsIdentity(
+            [new Claim("oid", TestHelpers.TestObjectId), new Claim(claimType, "agent@example.com")], "Test"));
+
+        var slot = await slots.CreateAsync(caller, "a.txt", 1, inline: false, extraClaimType: null);
+        var principal = (await slots.TakeAsync(slot))!.ToPrincipal();
+
+        CallerIdentity.TryGetSignInName(principal).Should().Be("agent@example.com");
+    }
+
+    [Fact]
+    public async Task TheSlotKeepsTheSignInNameCallerIdentityPrefers()
+    {
+        // In production `upn` arrives as its mapped URI beside `preferred_username`, which Microsoft
+        // documents as mutable. The slot's principal must resolve to the same name as the tool call did.
+        var slots = new ZendeskUploadSlots(new MemoryDistributedCache(Options.Create(new MemoryDistributedCacheOptions())));
+        var caller = new ClaimsPrincipal(new ClaimsIdentity(
+        [
+            new Claim("oid", TestHelpers.TestObjectId),
+            new Claim(ClaimTypes.Upn, "agent@example.com"),
+            new Claim("preferred_username", "renamed@example.com"),
+        ], "Test"));
+
+        var slot = await slots.CreateAsync(caller, "a.txt", 1, inline: false, extraClaimType: null);
+        var principal = (await slots.TakeAsync(slot))!.ToPrincipal();
+
+        CallerIdentity.TryGetSignInName(principal).Should().Be(CallerIdentity.TryGetSignInName(caller)).And.Be("agent@example.com");
+    }
+
     [Fact]
     public async Task AReaderHoldingASlot_StillCannotUpload()
     {
