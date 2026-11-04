@@ -398,6 +398,61 @@ public static class MacrosTools
         return output.ToJsonString();
     }
 
+    private static string AlreadyApplied(long ticketId, long macroId, DateTimeOffset appliedAt, string warning) => new JsonObject
+    {
+        ["result"] = "already_applied",
+        ["ticket_id"] = ticketId,
+        ["macro_id"] = macroId,
+        ["applied_at"] = appliedAt.ToString("O", CultureInfo.InvariantCulture),
+        ["changes"] = new JsonArray(),
+        ["warnings"] = new JsonArray(warning),
+    }.ToJsonString();
+
+    /// <summary>
+    /// Whether the ticket's audit trail shows this person applying this macro since <paramref name="since"/>
+    /// (less <see cref="RepeatGuard.ClockSkew"/>): true or false when the trail settles it, null when it
+    /// cannot be read in full.
+    /// </summary>
+    /// <remarks>
+    /// Applying a macro through this server records an <c>AgentMacroReference</c> event in the update's
+    /// audit (confirmed against the live API; see <c>macro_ids</c> below). Unverified against the live
+    /// API: that the event carries the macro as <c>macro_id</c>, as Zendesk's audit-event reference
+    /// documents, and that the audit's <c>author_id</c> is the connected user.
+    /// </remarks>
+    private static async Task<bool?> MacroAppliedSinceAsync(ZendeskService zendesk, long ticketId, long macroId, DateTimeOffset since, CancellationToken cancellationToken)
+    {
+        long? me;
+        PagedItems audits;
+        try
+        {
+            me = ToolJson.Long((await MacroSupport.CurrentUserAsync(zendesk, cancellationToken))["id"]);
+            audits = await zendesk.GetAllPagesAsync($"/api/v2/tickets/{Id(ticketId)}/audits", null, "audits", maxItems: MaxScan, cancellationToken: cancellationToken);
+        }
+        catch (HttpRequestException)
+        {
+            return null;
+        }
+
+        if (me is not { } myId)
+        {
+            return null;
+        }
+
+        var from = since - RepeatGuard.ClockSkew;
+        foreach (var audit in audits.Items)
+        {
+            if (RepeatGuard.Timestamp(audit["created_at"]) is { } at && at >= from
+                && ToolJson.Long(audit["author_id"]) == myId
+                && (audit["events"] as JsonArray ?? []).OfType<JsonNode>()
+                    .Any(e => ToolJson.String(e["type"]) == "AgentMacroReference" && ToolJson.Long(e["macro_id"]) == macroId))
+            {
+                return true;
+            }
+        }
+
+        return audits.HasMore ? null : false;
+    }
+
     [Authorize(Policy = "zendesk:write")]
     [McpServerTool(Name = "Apply_macro", Title = "Apply macro", ReadOnly = false, Destructive = true, Idempotent = true, OpenWorld = false),
      Description("Apply a Zendesk macro to a ticket, as an agent does in Zendesk: the macro's comment with its placeholders and dynamic content filled in for this ticket (exactly what Preview_macro shows), the fields it changes (status, priority, type, subject, group, assignee, tags, custom fields, CCs, followers) and its attached files. Run Preview_macro first and show the person what will happen. A macro that does not set the comment's visibility is added as an internal note unless public is true. public false applies it as an internal note; a public reply needs public replies enabled in this server's settings (an administrator switch), and the call is refused rather than downgraded. comment_html replaces the macro's text for this ticket only; the common placeholders ({{ticket.requester.first_name}}, {{ticket.id}}, {{current_user.name}}, {{dc.*}} and similar) are filled in by this server, and any it cannot fill are left as written and named in warnings. Safe to repeat: if the same macro was applied to this ticket through this server by the same person in the last 10 minutes, result is 'already_applied' and nothing is sent; pass apply_again true to apply it again on purpose. Returns result ('applied', 'already_applied' or 'unchanged'), the changes with values before and after, comment_preview, public, the attachments Zendesk stored, and warnings to relay. Closed tickets, inactive macros and macros that start a side conversation are refused. " + WriteWarning)]
@@ -426,20 +481,36 @@ public static class MacrosTools
 
         // The recent-application guard is what makes a retried call safe: a model that lost the first
         // response must not send the customer the same reply twice. It is in-process and per person,
-        // so it covers retries, not a second server instance or a different agent applying it.
+        // so it covers retries, not a second server instance or a different agent applying it. The
+        // entry is recorded as pending BEFORE the write (see RepeatGuard): a response lost to a
+        // cancellation or timeout after Zendesk applied the macro is exactly the retry it exists for.
         var callerKey = await MacroSupport.CallerKeyAsync(zendesk, cancellationToken);
         var cacheKey = $"zendesk-mcp:apply-macro:{callerKey}:{Id(ticket_id)}:{Id(macro_id)}";
-        if (apply_again != true && cache.TryGetValue<DateTimeOffset>(cacheKey, out var appliedAt))
+        if (apply_again != true && cache.TryGetValue<RepeatGuardEntry>(cacheKey, out var earlier) && earlier is not null)
         {
-            return new JsonObject
+            if (!earlier.Pending)
             {
-                ["result"] = "already_applied",
-                ["ticket_id"] = ticket_id,
-                ["macro_id"] = macro_id,
-                ["applied_at"] = appliedAt.ToString("O", CultureInfo.InvariantCulture),
-                ["changes"] = new JsonArray(),
-                ["warnings"] = new JsonArray("This macro was applied to this ticket in the last 10 minutes, so nothing was sent. Pass apply_again true to apply it again on purpose."),
-            }.ToJsonString();
+                return AlreadyApplied(ticket_id, macro_id, earlier.At,
+                    "This macro was applied to this ticket in the last 10 minutes, so nothing was sent. Pass apply_again true to apply it again on purpose.");
+            }
+
+            if (earlier.InFlight)
+            {
+                throw RepeatGuard.StillInFlight($"apply macro {macro_id} to ticket {ticket_id}", "apply_again");
+            }
+
+            switch (await MacroAppliedSinceAsync(zendesk, ticket_id, macro_id, earlier.At, cancellationToken))
+            {
+                case true:
+                    cache.Set(cacheKey, RepeatGuard.Completed() with { At = earlier.At }, RecentApplyWindow);
+                    return AlreadyApplied(ticket_id, macro_id, earlier.At,
+                        "An earlier attempt to apply this macro got no answer, but the ticket's history shows it was applied, so nothing was sent again. Pass apply_again true to apply it again on purpose.");
+                case null:
+                    throw new ArgumentException(
+                        $"An earlier attempt to apply macro {macro_id} to ticket {ticket_id} got no answer, and the ticket's history could not confirm whether it was applied. Check the ticket in Zendesk; pass apply_again true only if the macro is not there.");
+                default:
+                    break; // The earlier attempt did not land: apply it now.
+            }
         }
 
         var macro = await GetMacroAsync(zendesk, macro_id, cancellationToken);
@@ -555,8 +626,27 @@ public static class MacrosTools
         // (confirmed against the live API).
         ticketBody["macro_ids"] = new JsonArray(macro_id);
 
-        var response = await zendesk.PutAsync($"/api/v2/tickets/{Id(ticket_id)}", new JsonObject { ["ticket"] = ticketBody }, cancellationToken: cancellationToken);
-        cache.Set(cacheKey, DateTimeOffset.UtcNow, RecentApplyWindow);
+        var attempt = RepeatGuard.InFlightNow();
+        cache.Set(cacheKey, attempt, RecentApplyWindow);
+        JsonNode response;
+        try
+        {
+            response = await zendesk.PutAsync($"/api/v2/tickets/{Id(ticket_id)}", new JsonObject { ["ticket"] = ticketBody }, cancellationToken: cancellationToken);
+        }
+        catch (Exception ex) when (RepeatGuard.ProvesNotWritten(ex))
+        {
+            // Zendesk refused it (a 409 from safe_update, say), so a retry need not look anything up.
+            cache.Remove(cacheKey);
+            throw;
+        }
+        catch
+        {
+            // Outcome unknown, and no longer waiting: a retry now looks in the ticket's history.
+            cache.Set(cacheKey, attempt with { InFlight = false }, RecentApplyWindow);
+            throw;
+        }
+
+        cache.Set(cacheKey, RepeatGuard.Completed(), RecentApplyWindow);
 
         await MacroTicketDiff.NameAsync(zendesk, diff.Changes, cancellationToken);
 
