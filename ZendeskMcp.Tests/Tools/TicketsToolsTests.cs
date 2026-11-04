@@ -564,6 +564,34 @@ public class TicketsToolsTests
     }
 
     [Fact]
+    public async Task BulkGetTicketConversations_KeepsAMessagingLogWhoseEarliestEventsAreEmpty()
+    {
+        // Two events with no message come first. Capping the raw events at one would leave nothing
+        // and fall back to comments; the cap applies to entries, after empty events are dropped.
+        using var fake = TestHelpers.CreateFakeZendesk(r => r.Path switch
+        {
+            "/api/v2/tickets/5" => Json("""{"ticket":{"id":5,"via":{"channel":"whatsapp"}}}"""),
+            "/api/v2/tickets/5/conversation_log" => Json("""
+                {"events":[{"created_at":"t0","author":{"type":"system"},"content":{"type":"text","body":""}},
+                  {"created_at":"t0","author":{"type":"system"},"content":{"type":"text","body":""}},
+                  {"created_at":"t1","author":{"type":"user","display_name":"Bob"},"content":{"type":"text","body":"Help"}},
+                  {"created_at":"t2","author":{"type":"agent","display_name":"Ann"},"content":{"type":"text","body":"Sure"}}],
+                 "meta":{"has_more":false}}
+                """),
+            _ => FakeResponse.NotFound(),
+        });
+
+        var result = JsonNode.Parse(await TicketsTools.BulkGetTicketConversations(TestHelpers.BuildZendeskService(fake.Client), [5], max_entries_per_ticket: 1))!;
+
+        var conversation = result["conversations"]![0]!;
+        conversation["source"]!.GetValue<string>().Should().Be("conversation_log");
+        conversation["entries"]!.AsArray().Should().ContainSingle();
+        conversation["entries"]![0]!["message"]!.GetValue<string>().Should().Be("Help");
+        conversation["truncated"]!.GetValue<bool>().Should().BeTrue("a second entry was cut by the cap");
+        fake.Requests.Should().NotContain(r => r.Path.EndsWith("/comments", StringComparison.Ordinal));
+    }
+
+    [Fact]
     public async Task BulkGetTicketConversations_RecordsEveryTicketReadInTheAudit()
     {
         // The audit record keeps at most 100 ids, and each conversation here returns 100 comment ids.
