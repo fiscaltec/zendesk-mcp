@@ -20,7 +20,8 @@ public class ToolAuthorizationOptions
     /// <summary>
     /// When false, no permission check is performed (any authenticated caller may invoke any
     /// tool). Defaults to true so production is locked down by default — leaving it unset is the
-    /// secure choice, not the open one.
+    /// secure choice, not the open one. False is refused at startup unless <c>OAuth:NoAuth</c> is on
+    /// (<see cref="StartupGuards.EnsureAuthorizationIsOn"/>).
     /// </summary>
     public bool Enabled { get; set; } = true;
 
@@ -151,7 +152,7 @@ public class ToolAuthorizationOptions
         {
             throw new InvalidOperationException(
                 "Authorization:ReadPermission, Authorization:WritePermission and Authorization:DeletePermission must all be set when Authorization:Enabled is true. "
-                + "Set Authorization:Enabled=false only for local development.");
+                + "Authorization:Enabled=false is accepted only with OAuth:NoAuth=true (see StartupGuards.EnsureAuthorizationIsOn).");
         }
     }
 }

@@ -103,7 +103,7 @@ shares the refuse-and-revoke code and is covered by `ZendeskConnectEndpointsTest
 ## 3 — Tiers: a reader gets only read access
 
 ⚠️ **On staging the tool list cannot show the tier.** `Authorization__ReadOnly=true` hides the write
-tools from **every** caller, so an admin sees the same 28 tools as a reader there. On staging the only
+tools from **every** caller, so an admin sees the same 29 tools as a reader there. On staging the only
 evidence of the tier is the audit record's `AuditPermissionTier` (below). To see the tool list differ
 by tier, do this step against **production**, which is not read-only (that is where it was run on
 2026-11-04); the step makes no writes either way.
@@ -134,9 +134,10 @@ Wait a minute (`Authorization:LiveGroupCacheSeconds` is 60), reconnect the serve
 re-reads `tools/list`, then:
 
 1. **Production only:** list the server's tools. Expect **only** read tools — `Get_`/`List_`/
-   `Search_`/`Count_`/`Find_`/`Preview_`/`Export_`, plus `Get_zendesk_connect_link` and
-   `Disconnect_zendesk` — **28** of 45 at the time of writing. No `Create_`, `Update_`, `Set_`,
-   `Apply_`, `Add_` or `Request_` tool. (On staging you will see the same 28 whatever your tier.)
+   `Search_`/`Count_`/`Find_`/`Preview_`/`Export_`/`Bulk_get_`, plus `Get_zendesk_connect_link` and
+   `Disconnect_zendesk` — **29** of 48 at the time of writing. No `Create_`, `Update_`,
+   `Bulk_update_`, `Merge_`, `Set_`, `Apply_`, `Add_` or `Request_` tool. (On staging you will see the same 29
+   whatever your tier.)
 2. Run a read, e.g. *search for three tickets created this week*.
 
 Verify the tier the server used, and do not go on until it shows `zendesk:read` alone (an editor shows
@@ -200,14 +201,14 @@ Verify (Key Vault: wait 10 minutes):
 
 ```bash
 q 'AzureDiagnostics | where ResourceProvider == "MICROSOFT.KEYVAULT" and TimeGenerated > ago(1h) and id_s has "zendesk-staging-user-<oid>" | project TimeGenerated, OperationName, httpStatusCode_d | order by TimeGenerated asc'
-q 'AppTraces | where TimeGenerated > ago(1h) and AppRoleName == "zendesk-staging-ca-uksouth" and Message has "Zendesk token revocation" | project TimeGenerated, Message'
+q 'AppTraces | where TimeGenerated > ago(1h) and AppRoleName == "zendesk-staging-ca-uksouth" and (Message has "Zendesk token revocation" or Message has "may still be live at Zendesk") | project TimeGenerated, Message'
 ```
 
-Expect one `SecretSet` 200 at the disconnect (the tombstone; since #59 an expired access token is
-renewed and the renewed one revoked without being stored, so there is no second `SecretSet`), preceded by a `SecretGet` only if the grant was not already cached
+Expect one `SecretSet` 200 at the disconnect (the tombstone; an access token that had expired is
+refreshed and revoked first, but the renewed grant is never stored, #12), preceded by a `SecretGet` only if the grant was not already cached
 (a warm cache answers without Key Vault, so its absence there is not a failure); a `SecretGet` 200 at
 the sub-step 3 read, which is the uncached read of the tombstone; **no** `SecretDelete` — a delete would block
-reconnecting for the 90-day purge window — and no `Zendesk token revocation …` warning of either form. On 2026-11-04 this showed that a
+reconnecting for the 90-day purge window — and no `Zendesk token revocation …` or `… may still be live at Zendesk` warning. On 2026-11-04 this showed that a
 `read`-only token can revoke itself.
 
 ## If something fails

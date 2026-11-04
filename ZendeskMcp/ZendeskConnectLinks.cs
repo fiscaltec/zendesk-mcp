@@ -49,7 +49,11 @@ public sealed class ZendeskConnectLinks(IDistributedCache cache, IOptions<Zendes
     public async Task<ConnectTicket?> PeekAsync(string ticket, CancellationToken cancellationToken = default) =>
         Deserialize<ConnectTicket>(await cache.GetAsync(TicketPrefix + ticket, cancellationToken));
 
-    /// <summary>Spends a link. Called only once a connection has been stored.</summary>
+    /// <summary>
+    /// Spends a link. Called only once a connection has been stored, under the person's lock and
+    /// after checking the link with <see cref="PeekAsync"/>, so that of several attempts started from
+    /// one link only the first to finish stores a grant.
+    /// </summary>
     public Task RedeemAsync(string ticket, CancellationToken cancellationToken = default) =>
         cache.RemoveAsync(TicketPrefix + ticket, cancellationToken);
 

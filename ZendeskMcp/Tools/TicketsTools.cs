@@ -19,7 +19,7 @@ public static class TicketsTools
 
     [Authorize(Policy = "zendesk:read")]
     [McpServerTool(Name = "Search_tickets", Title = "Search tickets", ReadOnly = true, Destructive = false, Idempotent = true, OpenWorld = false),
-     Description("Find tickets by filters and plain-text words, newest first. Each ticket includes id, status and created_at; add more with include_fields (brand_name and organization_name are resolved from ids; metrics adds Zendesk's ticket metrics: first reply, first resolution, full resolution, requester wait, agent wait and on-hold times in calendar and business minutes, plus reopens, replies and solved_at). include adds the tickets' organisations and requesters once each as top-level lists, and 'sla' adds each ticket's SLA status. include_custom_objects attaches, under its key, the record of each named custom object whose external_id is the ticket id. JSON results come a page at a time: pass pagination_info.next_cursor as after_cursor for the next page. output_format 'csv' returns up to 1,000 tickets as one CSV (custom fields one column each, organisation, requester, SLA and metrics columns prefixed), with no cursor. To count tickets or break a count down, use Count_tickets instead; to read one ticket in full, Get_ticket; for its messages, Get_ticket_conversation.")]
+     Description("Find tickets by filters and plain-text words, newest first. Filter the channel with channel, never with 'via:' in text, and custom fields with custom_fields, which can also find a field empty (has_value false) or set (has_value true). Each ticket includes id, status and created_at; add more with include_fields (brand_name and organization_name are resolved from ids; metrics adds Zendesk's ticket metrics: first reply, first resolution, full resolution, requester wait, agent wait and on-hold times in calendar and business minutes, plus reopens, replies and solved_at). include adds the tickets' organisations and requesters once each as top-level lists, and 'sla' adds each ticket's SLA status. include_custom_objects attaches, under its key, the record of each named custom object whose external_id is the ticket id. JSON results come a page at a time: pass pagination_info.next_cursor as after_cursor for the next page. output_format 'csv' returns up to 1,000 tickets as one CSV (custom fields one column each, organisation, requester, SLA and metrics columns prefixed), with no cursor. To count tickets or break a count down, use Count_tickets instead; to read one ticket in full, Get_ticket; for its messages, Get_ticket_conversation.")]
     public static async Task<string> SearchTickets(
         ZendeskService zendesk,
         [Description(TicketFilterDescriptions.Text)] string? text = null,
@@ -36,6 +36,8 @@ public static class TicketsTools
         [Description(TicketFilterDescriptions.ExcludeTags)] string? exclude_tags = null,
         [Description(TicketFilterDescriptions.CustomFieldId)] long? custom_field_id = null,
         [Description(TicketFilterDescriptions.CustomFieldValue)] string? custom_field_value = null,
+        [Description(TicketFilterDescriptions.CustomFields)] TicketCustomFieldCondition[]? custom_fields = null,
+        [Description(TicketFilterDescriptions.Channel)] string[]? channel = null,
         [Description(TicketFilterDescriptions.CustomStatusId)] long? custom_status_id = null,
         [Description(TicketFilterDescriptions.HasAttachments)] bool? has_attachments = null,
         [Description(TicketFilterDescriptions.StartDate)] string? start_date = null,
@@ -57,8 +59,9 @@ public static class TicketsTools
             IncludeTags = include_tags, ExcludeTags = exclude_tags, CustomFieldId = custom_field_id,
             CustomFieldValue = custom_field_value, CustomStatusId = custom_status_id, HasAttachments = has_attachments,
             StartDate = start_date, EndDate = end_date, SolvedStartDate = solved_start_date, SolvedEndDate = solved_end_date,
+            CustomFields = custom_fields, Channels = channel,
         };
-        var query = TicketSearchQuery.Build(filters);
+        var (query, _) = await TicketSearchHelpers.BuildQueryAsync(zendesk, filters, cancellationToken);
         var fields = TicketSearchHelpers.ParseEnumList(include_fields, TicketSearchHelpers.IncludeFieldValues, "include_fields");
         var includes = TicketSearchHelpers.ParseEnumList(include, TicketSearchHelpers.SearchIncludeValues, "include");
         var objectKeys = TicketSearchHelpers.ParseCustomObjectKeys(include_custom_objects);
@@ -157,7 +160,7 @@ public static class TicketsTools
 
     [Authorize(Policy = "zendesk:read")]
     [McpServerTool(Name = "Count_tickets", Title = "Count tickets", ReadOnly = true, Destructive = false, Idempotent = true, OpenWorld = false),
-     Description("Count the tickets matching the same filters as Search_tickets, optionally broken down with group_by: status, custom_status, priority, ticket_type, brand, group, form, channel, custom_field (with group_by_field_id: a drop-down, multi-select or checkbox field; groups are its options, keyed by tag), satisfaction (good and bad without a comment, good_with_comment, bad_with_comment, offered, unoffered: each ticket in exactly one, plus a csat summary with score_pct = all good / (all good + all bad)), day, week (Monday to Sunday) or month. Time buckets need start_date (bucketed by created date) or solved_start_date (by solved date), and are in the connected agent's Zendesk time zone, which the result reports. Brands, groups, forms, custom statuses, channels and field options with no tickets are left out; tickets matching no value appear as key null, '(none)' or '(other)'. Each value is a separate count, at most 200 per call, so you cannot group by a dimension the filters already restrict (for example status with a status filter). Use Search_tickets to list the tickets themselves.")]
+     Description("Count the tickets matching the same filters as Search_tickets (channel and custom_fields included), optionally broken down with group_by: status, custom_status, priority, ticket_type, brand, group, form, channel, custom_field (with group_by_field_id: a drop-down, multi-select or checkbox field; groups are its options, keyed by tag), satisfaction (good and bad without a comment, good_with_comment, bad_with_comment, offered, unoffered: each ticket in exactly one, plus a csat summary with score_pct = all good / (all good + all bad)), day, week (Monday to Sunday) or month. Time buckets need start_date (bucketed by created date) or solved_start_date (by solved date), and are in the connected agent's Zendesk time zone, which the result reports. Brands, groups, forms, custom statuses, channels and field options with no tickets are left out; tickets matching no value appear as key null, '(none)' or '(other)', except for a multi-select field, whose groups can overlap. Each value is a separate count, at most 200 per call, so you cannot group by a dimension the filters already restrict (for example status with a status filter). Use Search_tickets to list the tickets themselves.")]
     public static async Task<string> CountTickets(
         ZendeskService zendesk,
         [Description(TicketFilterDescriptions.Text)] string? text = null,
@@ -174,6 +177,8 @@ public static class TicketsTools
         [Description(TicketFilterDescriptions.ExcludeTags)] string? exclude_tags = null,
         [Description(TicketFilterDescriptions.CustomFieldId)] long? custom_field_id = null,
         [Description(TicketFilterDescriptions.CustomFieldValue)] string? custom_field_value = null,
+        [Description(TicketFilterDescriptions.CustomFields)] TicketCustomFieldCondition[]? custom_fields = null,
+        [Description(TicketFilterDescriptions.Channel)] string[]? channel = null,
         [Description(TicketFilterDescriptions.CustomStatusId)] long? custom_status_id = null,
         [Description(TicketFilterDescriptions.HasAttachments)] bool? has_attachments = null,
         [Description(TicketFilterDescriptions.StartDate)] string? start_date = null,
@@ -191,8 +196,9 @@ public static class TicketsTools
             IncludeTags = include_tags, ExcludeTags = exclude_tags, CustomFieldId = custom_field_id,
             CustomFieldValue = custom_field_value, CustomStatusId = custom_status_id, HasAttachments = has_attachments,
             StartDate = start_date, EndDate = end_date, SolvedStartDate = solved_start_date, SolvedEndDate = solved_end_date,
+            CustomFields = custom_fields, Channels = channel,
         };
-        var query = TicketSearchQuery.Build(filters);
+        (var query, filters) = await TicketSearchHelpers.BuildQueryAsync(zendesk, filters, cancellationToken);
 
         if (string.IsNullOrWhiteSpace(group_by))
         {
@@ -506,7 +512,7 @@ public static class TicketsTools
             throw new ArgumentException("problem_id links the ticket as an incident, so type must be 'incident' or left out.");
         }
 
-        var tagArray = Tags(tags, "tags");
+        var tagArray = TicketWriteHelpers.Tags(tags, "tags");
         var ccList = ccs ?? [];
         if (ccList.Length > 0 && !isPublic)
         {
@@ -737,8 +743,8 @@ public static class TicketsTools
             ToolJson.RequireFeature(zendesk.Options.Features.AllowPublicReplies, "AllowPublicReplies", "Copying people (additional_ccs) on a ticket");
         }
 
-        var addTags = Tags(additional_tags, "additional_tags");
-        var dropTags = Tags(remove_tags, "remove_tags");
+        var addTags = TicketWriteHelpers.Tags(additional_tags, "additional_tags");
+        var dropTags = TicketWriteHelpers.Tags(remove_tags, "remove_tags");
 
         // Tag changes send the ticket's whole tag list (see below), and drop-down, multi-select and
         // checkbox values are tags too: sent with custom_fields, that list would still carry each
@@ -760,12 +766,7 @@ public static class TicketsTools
             throw new ArgumentException($"Ticket {ticket_id} is not linked to a problem ticket, so there is nothing to unlink.");
         }
 
-        var solving = normalisedStatus == "solved";
-        if (custom_status_id is { } customStatusId)
-        {
-            var customStatus = await zendesk.GetAsync($"/api/v2/custom_statuses/{Id(customStatusId)}", cancellationToken: cancellationToken);
-            solving = ToolJson.String(customStatus["custom_status"]?["status_category"]) == "solved";
-        }
+        var solving = await TicketWriteHelpers.IsSolvingAsync(zendesk, normalisedStatus, custom_status_id, cancellationToken);
 
         var resultingType = problem_id is not null ? "incident" : normalisedType ?? currentType;
         if (solving && resultingType == "problem" && ToolJson.String(current["status"]) is not ("solved" or "closed"))
@@ -888,33 +889,5 @@ public static class TicketsTools
         {
             target[name] = value;
         }
-    }
-
-    // Zendesk tags are single words; a space would silently split one tag into two.
-    private static JsonArray? Tags(string[]? tags, string parameter)
-    {
-        if (tags is null || tags.Length == 0)
-        {
-            return null;
-        }
-
-        if (tags.Length > 100)
-        {
-            throw new ArgumentException($"{parameter} takes at most 100 tags.");
-        }
-
-        var array = new JsonArray();
-        foreach (var tag in tags)
-        {
-            var trimmed = (tag ?? string.Empty).Trim();
-            if (trimmed.Length == 0 || trimmed.Length > 255 || trimmed.Any(c => char.IsWhiteSpace(c) || c == ','))
-            {
-                throw new ArgumentException($"{parameter} entries must be single words without spaces or commas (got '{tag}').");
-            }
-
-            array.Add(trimmed);
-        }
-
-        return array;
     }
 }

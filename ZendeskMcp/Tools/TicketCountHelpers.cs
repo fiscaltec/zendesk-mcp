@@ -38,7 +38,8 @@ public static class TicketCountHelpers
     public sealed record GroupValue(JsonNode? Key, string Name, string Term, bool InSum = true);
 
     /// <summary>The values to count, and how to present the result.</summary>
-    public sealed record GroupPlan(IReadOnlyList<GroupValue> Values, bool DropEmpty, string RemainderName, JsonObject Extras);
+    /// <param name="RemainderName">The label for tickets matching none of the values, or null when the values can overlap and no remainder can be worked out from the counts.</param>
+    public sealed record GroupPlan(IReadOnlyList<GroupValue> Values, bool DropEmpty, string? RemainderName, JsonObject Extras);
 
     /// <summary>
     /// Works out the values for a group-by. Throws <see cref="ArgumentException"/> when the filters
@@ -76,6 +77,7 @@ public static class TicketCountHelpers
                 return new GroupPlan(Fixed("ticket_type", ["question", "incident", "problem", "task"]), false, "(none)", []);
 
             case "channel":
+                RefuseIf(filters.Channels is { Count: > 0 }, "channel");
                 return new GroupPlan(
                     Channels.Select(c => new GroupValue(JsonValue.Create(c.Channel), c.Channel, $"via:{c.SearchValue}")).ToList(),
                     true, "(other)", []);
@@ -175,10 +177,10 @@ public static class TicketCountHelpers
             });
         }
 
-        // Tickets matching none of the values (no priority, no group, a deleted brand). A multi-select
-        // field can put one ticket in several groups, so the sum can exceed the total; then there is
-        // nothing meaningful to report.
-        if (total - sum > 0)
+        // Tickets matching none of the values (no priority, no group, a deleted brand). Only where each
+        // ticket is in at most one group: a multi-select field can put one ticket in several, and then
+        // the total minus the sum is not the number with no value, even when it is positive.
+        if (plan.RemainderName is not null && total - sum > 0)
         {
             groups.Add(new JsonObject { ["key"] = null, ["name"] = plan.RemainderName, ["count"] = total - sum });
         }
@@ -227,6 +229,11 @@ public static class TicketCountHelpers
             throw new ArgumentException("group_by custom_field cannot be combined with a custom_field_id filter on the same field.");
         }
 
+        if (filters.CustomFields?.Any(c => c?.Id == id) == true)
+        {
+            throw new ArgumentException("group_by custom_field cannot be combined with a custom_fields condition on the same field.");
+        }
+
         var response = await zendesk.GetAsync($"/api/v2/ticket_fields/{Id(id)}", cancellationToken: cancellationToken);
         var field = response["ticket_field"];
         var type = ToolJson.String(field?["type"]);
@@ -247,6 +254,12 @@ public static class TicketCountHelpers
                     .Where(o => !string.IsNullOrWhiteSpace(o.Tag) && !o.Tag.Any(char.IsWhiteSpace))
                     .Select(o => new GroupValue(JsonValue.Create(o.Tag), o.Name ?? o.Tag!, $"{term}:{o.Tag}"))
                     .ToList();
+                if (type == "multiselect")
+                {
+                    extras["note"] = "A ticket can carry several options of a multi-select field, so it can be counted in several groups and the counts can add up to more than the total. Tickets with no option are not reported.";
+                    return new GroupPlan(values, true, null, extras);
+                }
+
                 return new GroupPlan(values, true, "(none)", extras);
             }
 

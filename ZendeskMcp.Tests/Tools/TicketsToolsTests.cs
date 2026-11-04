@@ -254,6 +254,247 @@ public class TicketsToolsTests
         groups[0]!["count"]!.GetValue<long>().Should().Be(7);
     }
 
+    // ---------- channel and custom_fields (shared by every tool that takes the search filters) ----------
+
+    // One field of each shape the custom_fields check distinguishes. Priority is a built-in field that
+    // Zendesk nonetheless marks removable (seen on the live account), so the type has to decide.
+    internal const string TicketFieldsJson = """
+        {"ticket_fields":[
+          {"id":10,"type":"tagger","removable":true,"custom_field_options":[{"name":"A","value":"a"}]},
+          {"id":11,"type":"tagger","removable":true,"custom_field_options":[{"name":"None","value":"none"}]},
+          {"id":12,"type":"checkbox","removable":true},
+          {"id":13,"type":"priority","removable":true},
+          {"id":14,"type":"status","removable":false},
+          {"id":15,"type":"multi_lookup","removable":true},
+          {"id":16,"type":"text","removable":true}
+        ],"meta":{"has_more":false}}
+        """;
+
+    private static FakeZendesk SearchFake() => TestHelpers.CreateFakeZendesk(r => r.Path switch
+    {
+        "/api/v2/ticket_fields" => Json(TicketFieldsJson),
+        "/api/v2/search/export" => Json("""{"results":[],"meta":{"has_more":false}}"""),
+        "/api/v2/search/count" => Count(0),
+        _ => FakeResponse.NotFound(),
+    });
+
+    [Fact]
+    public async Task SearchTickets_ChannelAndCustomFields_BecomeTermsAfterTheFieldsAreChecked()
+    {
+        using var fake = SearchFake();
+        var zendesk = TestHelpers.BuildZendeskService(fake.Client);
+
+        var result = JsonNode.Parse(await TicketsTools.SearchTickets(zendesk, channel: ["email", "messaging"],
+            custom_fields: [new TicketCustomFieldCondition(10, Value: "a"), new TicketCustomFieldCondition(16, HasValue: false), new TicketCustomFieldCondition(12, Value: "Checked")]))!;
+
+        // A checkbox is given as checked/unchecked (as Swifteq's server takes it) and searched as true/false.
+        const string expected = "type:ticket custom_field_10:a -custom_field_16:* custom_field_12:true via:mail via:native_messaging via:whatsapp via:line via:wechat via:instagram_dm via:telegram via:viber via:kakaotalk via:apple_business_chat via:google_rcs via:google_business_messages via:sunshine_conversations_facebook_messenger via:sunshine_conversations_twitter_dm via:twilio_sms via:messagebird_sms via:sunshine_conversations_api";
+        result["query"]!.GetValue<string>().Should().Be(expected);
+        fake.Requests.Single(r => r.Path == "/api/v2/search/export").Query("query").Should().Be(expected);
+        fake.Requests.Count(r => r.Path == "/api/v2/ticket_fields").Should().Be(1, "the field definitions are read once per call");
+        NoDeletes(fake);
+    }
+
+    [Fact]
+    public async Task SearchTickets_HasValueOnADropDown_IsAccepted()
+    {
+        using var fake = SearchFake();
+
+        await TicketsTools.SearchTickets(TestHelpers.BuildZendeskService(fake.Client),
+            custom_fields: [new TicketCustomFieldCondition(10, HasValue: false), new TicketCustomFieldCondition(11, Value: "none")]);
+
+        fake.Requests.Single(r => r.Path == "/api/v2/search/export").Query("query").Should().Be("type:ticket -custom_field_10:* custom_field_11:none");
+    }
+
+    private static FakeZendesk TruncatedFieldsFake() => TestHelpers.CreateFakeZendesk(r => r.Path switch
+    {
+        // One page of a longer listing; fields 11 and 16 are on pages the server does not reach.
+        "/api/v2/ticket_fields" => Json("""{"ticket_fields":[{"id":10,"type":"tagger","removable":true}],"meta":{"has_more":true,"after_cursor":"c2"}}"""),
+        "/api/v2/ticket_fields/11" => Json("""{"ticket_field":{"id":11,"type":"tagger","removable":true,"custom_field_options":[{"name":"None","value":"none"}]}}"""),
+        "/api/v2/ticket_fields/16" => Json("""{"ticket_field":{"id":16,"type":"text","removable":true}}"""),
+        "/api/v2/ticket_fields/99" => FakeResponse.NotFound(),
+        _ => Count(0),
+    });
+
+    [Fact]
+    public async Task CountTickets_FieldsBeyondATruncatedListing_AreReadOneByOne()
+    {
+        using var fake = TruncatedFieldsFake();
+
+        var result = JsonNode.Parse(await TicketsTools.CountTickets(TestHelpers.BuildZendeskService(fake.Client, maxAutoPageFetches: 1),
+            custom_field_id: 11, custom_field_value: "none", custom_fields: [new TicketCustomFieldCondition(16, HasValue: false), new TicketCustomFieldCondition(10, Value: "a")]))!;
+
+        // Field 11's 'none' option and field 16's type come from the single reads, so neither is refused.
+        result["query"]!.GetValue<string>().Should().Be("type:ticket custom_field_11:none -custom_field_16:* custom_field_10:a");
+        fake.Requests.Select(r => r.Path).Where(p => p.StartsWith("/api/v2/ticket_fields/", StringComparison.Ordinal))
+            .Should().BeEquivalentTo(["/api/v2/ticket_fields/11", "/api/v2/ticket_fields/16"], "field 10 was on the page read, so it is not read again");
+    }
+
+    [Fact]
+    public async Task SearchTickets_AFieldMissingFromATruncatedListing_ThatDoesNotExist_IsRefused()
+    {
+        using var fake = TruncatedFieldsFake();
+
+        var act = () => TicketsTools.SearchTickets(TestHelpers.BuildZendeskService(fake.Client, maxAutoPageFetches: 1),
+            custom_fields: [new TicketCustomFieldCondition(99, Value: "x")]);
+
+        await act.Should().ThrowAsync<ArgumentException>().WithMessage("*no ticket field 99*");
+        fake.Requests.Should().NotContain(r => r.Path.StartsWith("/api/v2/search", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task SearchTickets_ACompleteListing_IsNotFollowedBySingleReads()
+    {
+        // Negative control: when the listing is complete, a missing field is unknown without another request.
+        using var fake = SearchFake();
+
+        var act = () => TicketsTools.SearchTickets(TestHelpers.BuildZendeskService(fake.Client),
+            custom_fields: [new TicketCustomFieldCondition(99, Value: "x")]);
+
+        await act.Should().ThrowAsync<ArgumentException>().WithMessage("*no ticket field 99*");
+        fake.Requests.Should().NotContain(r => r.Path.StartsWith("/api/v2/ticket_fields/", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task SearchTickets_ChannelAlone_ReadsNoFieldDefinitions()
+    {
+        // Negative control for the lookup: without custom_fields or a 'none' value nothing needs checking.
+        using var fake = SearchFake();
+
+        await TicketsTools.SearchTickets(TestHelpers.BuildZendeskService(fake.Client), channel: ["web"], custom_field_id: 10, custom_field_value: "a");
+
+        fake.Requests.Should().NotContain(r => r.Path == "/api/v2/ticket_fields");
+        fake.Requests.Single(r => r.Path == "/api/v2/search/export").Query("query").Should().Be("type:ticket custom_field_10:a via:web");
+    }
+
+    [Theory]
+    [InlineData(12, null, false, "*checkbox, which is never empty*")]
+    [InlineData(12, "yes", null, "*checkbox; its value is 'checked' or 'unchecked'*")]
+    [InlineData(13, null, true, "*built-in 'priority' field*")]
+    [InlineData(14, "open", null, "*built-in 'status' field*")]
+    [InlineData(15, null, true, "*has_value does not apply*multi_lookup*")]
+    [InlineData(99, "x", null, "*no ticket field 99*")]
+    [InlineData(10, "none", null, "*'none' does not find*has_value*false*")]
+    [InlineData(10, "\"none\"", null, "*'none' does not find*")]
+    [InlineData(12, "none", null, "*checkbox; its value is 'checked' or 'unchecked'*")]
+    public async Task SearchTickets_CustomFieldsTheFieldCannotTake_AreRefusedBeforeSearching(long id, string? value, bool? hasValue, string message)
+    {
+        using var fake = SearchFake();
+
+        var act = () => TicketsTools.SearchTickets(TestHelpers.BuildZendeskService(fake.Client),
+            custom_fields: [new TicketCustomFieldCondition(id, value, hasValue)]);
+
+        await act.Should().ThrowAsync<ArgumentException>().WithMessage(message);
+        fake.Requests.Should().NotContain(r => r.Path.StartsWith("/api/v2/search", StringComparison.Ordinal));
+    }
+
+    [Theory]
+    [InlineData(10, false)]
+    [InlineData(11, true)]
+    public async Task CountTickets_CustomFieldValueNone_IsRefusedUnlessTheFieldHasANoneOption(long fieldId, bool allowed)
+    {
+        using var fake = SearchFake();
+
+        var act = () => TicketsTools.CountTickets(TestHelpers.BuildZendeskService(fake.Client), custom_field_id: fieldId, custom_field_value: "None");
+
+        if (allowed)
+        {
+            await act.Should().NotThrowAsync();
+            fake.Requests.Single(r => r.Path == "/api/v2/search/count").Query("query").Should().Be($"type:ticket custom_field_{fieldId}:None");
+        }
+        else
+        {
+            await act.Should().ThrowAsync<ArgumentException>().WithMessage("*custom_field_value 'none' does not find*");
+            fake.Requests.Should().NotContain(r => r.Path == "/api/v2/search/count");
+        }
+    }
+
+    [Fact]
+    public async Task CountTickets_CustomFieldValueNone_OnACheckbox_PointsToCheckedOrUnchecked()
+    {
+        // has_value false would itself be refused on a checkbox, so the message must not suggest it.
+        using var fake = SearchFake();
+
+        var act = () => TicketsTools.CountTickets(TestHelpers.BuildZendeskService(fake.Client), custom_field_id: 12, custom_field_value: "none");
+
+        var thrown = await act.Should().ThrowAsync<ArgumentException>().WithMessage("*'none' does not apply*checkbox*'checked' or 'unchecked'*");
+        thrown.Which.Message.Should().NotContain("has_value");
+    }
+
+    [Fact]
+    public async Task CountTickets_FollowingTheCheckboxAdvice_SearchesTheFieldAsTrueOrFalse()
+    {
+        using var fake = SearchFake();
+        var zendesk = TestHelpers.BuildZendeskService(fake.Client);
+
+        var unchecked_ = JsonNode.Parse(await TicketsTools.CountTickets(zendesk, custom_fields: [new TicketCustomFieldCondition(12, Value: "unchecked")]))!;
+        var checked_ = JsonNode.Parse(await TicketsTools.CountTickets(zendesk, custom_fields: [new TicketCustomFieldCondition(12, Value: "checked")]))!;
+
+        unchecked_["query"]!.GetValue<string>().Should().Be("type:ticket custom_field_12:false");
+        checked_["query"]!.GetValue<string>().Should().Be("type:ticket custom_field_12:true");
+
+        // The same advice followed through custom_field_value is searched the same way.
+        var single = JsonNode.Parse(await TicketsTools.CountTickets(zendesk, custom_field_id: 12, custom_field_value: "Unchecked"))!;
+        single["query"]!.GetValue<string>().Should().Be("type:ticket custom_field_12:false");
+    }
+
+    [Fact]
+    public async Task CountTickets_CheckedOnAFieldThatIsNotACheckbox_IsSearchedAsGiven()
+    {
+        // Negative control: only a checkbox is rewritten; on a text field 'checked' is a literal value.
+        using var fake = SearchFake();
+
+        var result = JsonNode.Parse(await TicketsTools.CountTickets(TestHelpers.BuildZendeskService(fake.Client), custom_field_id: 16, custom_field_value: "checked"))!;
+
+        result["query"]!.GetValue<string>().Should().Be("type:ticket custom_field_16:checked");
+    }
+
+    [Fact]
+    public async Task CountTickets_Channel_CountsTheSameTermAsTheChannelGroup()
+    {
+        // A channel filter selects exactly the tickets its group counts in group_by channel.
+        using var grouped = TestHelpers.CreateFakeZendesk(_ => Count(7));
+        await TicketsTools.CountTickets(TestHelpers.BuildZendeskService(grouped.Client), group_by: "channel");
+        var groupQuery = grouped.Requests.Select(r => r.Query("query")!).Single(q => q.EndsWith("via:mail", StringComparison.Ordinal));
+
+        using var filtered = TestHelpers.CreateFakeZendesk(_ => Count(7));
+        var result = JsonNode.Parse(await TicketsTools.CountTickets(TestHelpers.BuildZendeskService(filtered.Client), channel: ["email"]))!;
+
+        result["query"]!.GetValue<string>().Should().Be(groupQuery);
+    }
+
+    [Fact]
+    public async Task CountTickets_GroupByAFilteredDimension_IsRefused()
+    {
+        using var fake = SearchFake();
+        var zendesk = TestHelpers.BuildZendeskService(fake.Client);
+
+        var byChannel = () => TicketsTools.CountTickets(zendesk, channel: ["web"], group_by: "channel");
+        await byChannel.Should().ThrowAsync<ArgumentException>().WithMessage("*group_by channel cannot be combined with the channel filter*");
+
+        var byField = () => TicketsTools.CountTickets(zendesk, custom_fields: [new TicketCustomFieldCondition(10, HasValue: true)], group_by: "custom_field", group_by_field_id: 10);
+        await byField.Should().ThrowAsync<ArgumentException>().WithMessage("*custom_fields condition on the same field*");
+
+        fake.Requests.Should().NotContain(r => r.Path == "/api/v2/search/count");
+    }
+
+    [Fact]
+    public async Task CountTickets_GroupByCustomField_OnAnotherField_IsAllowed()
+    {
+        // Negative control for the refusal above: a condition on a different field does not block it.
+        using var fake = TestHelpers.CreateFakeZendesk(r => r.Path switch
+        {
+            "/api/v2/ticket_fields" => Json(TicketFieldsJson),
+            "/api/v2/ticket_fields/11" => Json("""{"ticket_field":{"id":11,"type":"tagger","custom_field_options":[{"name":"None","value":"none"}]}}"""),
+            _ => Count(1),
+        });
+
+        var result = JsonNode.Parse(await TicketsTools.CountTickets(TestHelpers.BuildZendeskService(fake.Client),
+            custom_fields: [new TicketCustomFieldCondition(10, HasValue: true)], group_by: "custom_field", group_by_field_id: 11))!;
+
+        result["query"]!.GetValue<string>().Should().Be("type:ticket custom_field_10:*");
+    }
+
     [Fact]
     public async Task CountTickets_GroupBySatisfaction_AddsCsat()
     {
@@ -329,6 +570,24 @@ public class TicketsToolsTests
         groups[1]!["name"]!.GetValue<string>().Should().Be("(none)");
         groups[1]!["count"]!.GetValue<long>().Should().Be(5);
         result["field"]!["title"]!.GetValue<string>().Should().Be("Product");
+    }
+
+    [Fact]
+    public async Task CountTickets_GroupByMultiSelectField_ReportsNoRemainder()
+    {
+        // Three tickets: one carries both options, two carry neither. The option counts are 1 and 1, so
+        // total minus their sum (1) is not the number with no option (2): one ticket can sit in several
+        // groups. No remainder is reported rather than a wrong one.
+        using var fake = TestHelpers.CreateFakeZendesk(r => r.Path switch
+        {
+            "/api/v2/ticket_fields/78" => Json("""{"ticket_field":{"id":78,"title":"Modules","type":"multiselect","custom_field_options":[{"name":"A","value":"mod_a"},{"name":"B","value":"mod_b"}]}}"""),
+            _ => Count(r.Query("query") switch { "type:ticket" => 3, "type:ticket custom_field_78:mod_a" => 1, "type:ticket custom_field_78:mod_b" => 1, _ => 0 }),
+        });
+        var result = JsonNode.Parse(await TicketsTools.CountTickets(TestHelpers.BuildZendeskService(fake.Client), group_by: "custom_field", group_by_field_id: 78))!;
+
+        var groups = result["groups"]!.AsArray();
+        groups.Select(g => g!["key"]?.GetValue<string>()).Should().Equal("mod_a", "mod_b");
+        result["note"]!.GetValue<string>().Should().Contain("multi-select");
     }
 
     [Fact]

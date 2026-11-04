@@ -32,6 +32,10 @@ public sealed class ZendeskOAuthClient(
     private readonly ZendeskServerOptions _options = options.Value;
     private readonly TimeProvider _time = timeProvider ?? TimeProvider.System;
 
+    // An access token this close to expiry is refreshed before a revocation, so the revocation cannot
+    // reach Zendesk after it expires and come back 401.
+    private static readonly TimeSpan RevokeSkew = TimeSpan.FromMinutes(1);
+
     /// <summary>The Zendesk authorisation URL for one connect attempt.</summary>
     public string BuildAuthorizeUrl(string redirectUri, string state, string codeVerifier)
     {
@@ -113,137 +117,114 @@ public sealed class ZendeskOAuthClient(
     }
 
     /// <summary>
-    /// Revokes a whole stored grant: the access token, and — when Zendesk refuses that with a 401 —
-    /// what its refresh token can still reach. Returns whether the grant is now known to be dead.
-    /// </summary>
-    /// <remarks>
-    /// A 401 to the revocation shows only that this <i>access</i> token no longer authenticates — it
-    /// has expired, typically, by the time someone reconnects — not that the refresh token is spent.
-    /// So the refresh token is exchanged and the renewed access token revoked (Zendesk rotation spends
-    /// the old pair). The grant counts as dead when Zendesk refuses the refresh token too, or when
-    /// there is no refresh token (a legacy non-expiring token is the whole grant). Anything else —
-    /// a refresh that fails otherwise, or a renewed token that still is not revoked — is reported as
-    /// false, so the caller says the revocation is unconfirmed rather than claiming it.
-    /// <para>
-    /// <b>Unverified against the live API: a successful DELETE is taken to end the whole grant.</b>
-    /// Both success paths — the first revocation, and the renewed token's after a 401 — return true
-    /// without testing the refresh token, and the renewed refresh token the exchange returns is
-    /// discarded. That holds only if revoking an access token also invalidates its refresh token,
-    /// which Zendesk neither states nor denies ("Revoke Token", "Revoking an OAuth access token" and
-    /// "OAuth Tokens for Grant Types" on developer.zendesk.com, read 2026-11-04). Confirming it means
-    /// presenting the refresh token after a revocation, which needs a live grant this code cannot
-    /// test; until then, "revoked" here means Zendesk accepted the revocation of the access token.
-    /// </para>
-    /// </remarks>
-    public async Task<bool> RevokeGrantAsync(string accessToken, string? refreshToken, CancellationToken cancellationToken)
-    {
-        var first = await SendRevocationAsync(accessToken, cancellationToken);
-        if (first != RevocationResult.Rejected)
-        {
-            // Unverified against the live API: a revoked access token is taken to end its refresh
-            // token too (see remarks).
-            return first == RevocationResult.Revoked;
-        }
-
-        if (string.IsNullOrWhiteSpace(refreshToken))
-        {
-            return true;
-        }
-
-        // From here on the caller's cancellation is not honoured: once the refresh is sent, Zendesk
-        // may already have spent the old refresh token, and the renewed grant would then be live with
-        // nobody holding it. A bounded token of its own finishes the job instead.
-        using var cleanup = new CancellationTokenSource(GrantCleanupTimeout);
-        TokenResponse renewed;
-        try
-        {
-            renewed = await RefreshAsync(refreshToken, cleanup.Token);
-        }
-        // Only these say the refresh token itself is dead. unauthorized_client is about this OAuth
-        // client's configuration, and the grant could work again once that is corrected.
-        catch (ZendeskOAuthException ex) when (ex.Error is "invalid_grant" or "invalid_token")
-        {
-            return true;
-        }
-        catch (Exception ex)
-        {
-            logger.LogWarning("Could not renew a rejected Zendesk grant to revoke it: {FailureType}", ex.GetType().Name);
-            return false;
-        }
-
-        // The renewed grant is held by nobody: if this revocation fails it stays live at Zendesk for
-        // the whole refresh lifetime. So a failure is retried once. A 401 is not: the token was issued
-        // moments ago, so a 401 now is unexplained, and is reported as unconfirmed rather than revoked.
-        try
-        {
-            var result = await SendRevocationAsync(renewed.AccessToken, cleanup.Token);
-            if (result == RevocationResult.Failed)
-            {
-                result = await SendRevocationAsync(renewed.AccessToken, cleanup.Token);
-            }
-
-            if (result != RevocationResult.Revoked)
-            {
-                logger.LogError("Zendesk did not confirm revoking a renewed grant ({RevocationResult}); it may be live with nobody holding it", result);
-            }
-
-            return result == RevocationResult.Revoked;
-        }
-        catch (OperationCanceledException)
-        {
-            logger.LogError("Revoking a renewed Zendesk grant did not finish within {Timeout}; it may be live with nobody holding it", GrantCleanupTimeout);
-            return false;
-        }
-    }
-
-    /// <summary>How long revoking a rejected grant through its refresh token may take, whatever the caller does.</summary>
-    internal static readonly TimeSpan GrantCleanupTimeout = TimeSpan.FromSeconds(30);
-
-    /// <summary>
-    /// Revokes one access token at Zendesk. Returns whether that access token is now known to be
-    /// unusable: one Zendesk already refuses (401) counts. That says nothing of a refresh token, so
-    /// a <i>stored</i> grant goes through <see cref="RevokeGrantAsync"/>; this suits a token issued
-    /// moments ago. Any other failure is logged and reported as false rather than thrown, so a caller
-    /// can still forget the token locally — and must then say the revocation did not happen.
+    /// Revokes a token at Zendesk. Returns whether the token is now known to be unusable: a token
+    /// Zendesk already refuses (401) counts, since that is the outcome wanted. Any other failure is
+    /// logged and reported as false rather than thrown, so a caller can still forget the token
+    /// locally — and must then say the revocation did not happen rather than claim it did.
     /// </summary>
     public async Task<bool> RevokeAsync(string accessToken, CancellationToken cancellationToken) =>
-        await SendRevocationAsync(accessToken, cancellationToken) != RevocationResult.Failed;
+        await RevokeStatusAsync(accessToken, cancellationToken) is { } status && (status is >= 200 and < 300 || status == 401);
 
-    private enum RevocationResult
-    {
-        Revoked,
-        Rejected,
-        Failed,
-    }
-
-    private async Task<RevocationResult> SendRevocationAsync(string accessToken, CancellationToken cancellationToken)
+    // The revocation's HTTP status, or null when it could not be made (logged). Kept apart from
+    // RevokeAsync so RevokeGrantAsync can tell "revoked" from "already refused (401)".
+    private async Task<int?> RevokeStatusAsync(string accessToken, CancellationToken cancellationToken)
     {
         try
         {
             using var request = new HttpRequestMessage(HttpMethod.Delete, $"{_options.BaseUrl}/api/v2/oauth/tokens/current.json");
             request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", accessToken);
             using var response = await Client().SendAsync(request, cancellationToken);
-            if (response.IsSuccessStatusCode)
+            var status = (int)response.StatusCode;
+            if (!response.IsSuccessStatusCode && status != 401)
             {
-                return RevocationResult.Revoked;
+                logger.LogWarning("Zendesk token revocation returned {StatusCode}", status);
             }
 
-            if ((int)response.StatusCode == 401)
-            {
-                return RevocationResult.Rejected;
-            }
-
-            logger.LogWarning("Zendesk token revocation returned {StatusCode}", (int)response.StatusCode);
-            return RevocationResult.Failed;
+            return status;
         }
-        // Only the CALLER's cancellation propagates. HttpClient.Timeout (15 s on this client) also
-        // surfaces as a TaskCanceledException, with the caller's token untouched; that is a revocation
-        // that failed, and letting it escape would stop DisconnectAsync before it forgets the grant.
-        catch (Exception ex) when (ex is not OperationCanceledException || !cancellationToken.IsCancellationRequested)
+        catch (Exception ex) when (!cancellationToken.IsCancellationRequested)
         {
+            // Includes the client's own timeout, a TaskCanceledException the caller did not ask for:
+            // an unconfirmed revocation, not a cancelled request (Copilot on #48).
             logger.LogWarning("Zendesk token revocation failed: {FailureType}", ex.GetType().Name);
-            return RevocationResult.Failed;
+            return null;
         }
+    }
+
+    /// <summary>
+    /// Revokes a whole grant that is being discarded, not just its access token. Returns whether the
+    /// grant is now known to be dead at Zendesk.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Zendesk answers 401 to revoking an expired access token, which <see cref="RevokeAsync"/> counts
+    /// as revoked — while the refresh token, and so the grant, stays live. So a grant whose access
+    /// token has expired (or is about to) and that has a refresh token is refreshed first, and the
+    /// renewed access token is revoked. A refresh Zendesk refuses outright means the grant is already
+    /// dead. Any other refresh failure is reported as not revoked rather than falling back to the
+    /// expired token, whose 401 would read as success.
+    /// </para>
+    /// <para>
+    /// An access token that is not expired can still be refused (the final-401 path of
+    /// <see cref="ZendeskCredentialProvider.OnTokenRejectedAsync"/> revokes exactly such a token), and
+    /// its refresh token may be live. So a 401 to revoking an access token that was not just refreshed,
+    /// on a grant with a refresh token, is followed by one refresh and a revocation of its result.
+    /// </para>
+    /// <para>
+    /// The renewed grant is never stored: every caller — disconnect, reconnect, a final 401, an
+    /// unreadable stored value — is discarding this grant.
+    /// </para>
+    /// </remarks>
+    public async Task<bool> RevokeGrantAsync(ZendeskUserToken grant, CancellationToken cancellationToken)
+    {
+        var hasRefresh = !string.IsNullOrWhiteSpace(grant.RefreshToken);
+        if (hasRefresh && (string.IsNullOrWhiteSpace(grant.AccessToken) || grant.NeedsRefresh(_time.GetUtcNow(), RevokeSkew)))
+        {
+            return await RefreshAndRevokeAsync(grant.RefreshToken!, grant.AccessToken, cancellationToken);
+        }
+
+        if (string.IsNullOrWhiteSpace(grant.AccessToken))
+        {
+            return false;
+        }
+
+        var status = await RevokeStatusAsync(grant.AccessToken, cancellationToken);
+        return status switch
+        {
+            >= 200 and < 300 => true,
+            401 when hasRefresh => await RefreshAndRevokeAsync(grant.RefreshToken!, accessToken: null, cancellationToken),
+            401 => true,
+            _ => false,
+        };
+    }
+
+    // Refreshes a discarded grant and revokes the access token that comes back. `accessToken` is the
+    // grant's own access token when it has not yet been tried, else null.
+    private async Task<bool> RefreshAndRevokeAsync(string refreshToken, string? accessToken, CancellationToken cancellationToken)
+    {
+        string renewed;
+        try
+        {
+            renewed = (await RefreshAsync(refreshToken, cancellationToken)).AccessToken;
+        }
+        catch (ZendeskOAuthException ex) when (ex.Error is "invalid_grant" or "invalid_token" or "unauthorized_client")
+        {
+            // The refresh token is dead, but that says nothing about an access token not yet tried:
+            // a damaged stored value can pair a good access token with a broken refresh token. With
+            // the refresh token known dead, a 401 to revoking the access token does mean it is dead
+            // too, so RevokeAsync's reading of 401 holds here (Copilot on #48).
+            return string.IsNullOrWhiteSpace(accessToken) || await RevokeAsync(accessToken, cancellationToken);
+        }
+        catch (Exception ex) when (!cancellationToken.IsCancellationRequested)
+        {
+            // Includes the client's own timeout (Copilot on #48).
+            logger.LogWarning("Could not refresh a discarded Zendesk grant to revoke it: {FailureType}", ex.GetType().Name);
+            return false;
+        }
+
+        // Only a success counts: a token Zendesk issued a moment ago answering 401 proves nothing
+        // about the refresh token issued with it, and another refresh would not end (Copilot on #48).
+        return await RevokeStatusAsync(renewed, cancellationToken) is >= 200 and < 300;
     }
 
     /// <summary>Builds the stored record from a token response and the identity it was checked against.</summary>

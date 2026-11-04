@@ -146,9 +146,49 @@ public class UsersToolsTests
         fake.Requests.Select(r => r.Query("query")).Should().Equal(
             "type:user role:agent name:\"John Doe\"",
             "type:user role:admin name:\"John Doe\"");
-        fake.Requests.Should().OnlyContain(r => r.Path == "/api/v2/search" && r.Method == HttpMethod.Get);
+        fake.Requests.Should().OnlyContain(r => r.Path == "/api/v2/search/export" && r.Query("filter[type]") == "user" && r.Method == HttpMethod.Get);
         result["agents"]!.AsArray().Select(a => (long)a!["id"]!).Should().Equal(1, 2);
         result["exact_match"]!.GetValue<bool>().Should().BeTrue();
+    }
+
+    [Fact]
+    public async Task FindAgentByName_ReadsEveryPage_SoAnExactMatchOnALaterPageIsFound()
+    {
+        // Many agents share the words of the name; the one with exactly that name is on the second page.
+        var (fake, zendesk) = Build(r =>
+        {
+            if (!r.Query("query")!.Contains("role:agent", StringComparison.Ordinal))
+            {
+                return FakeResponse.Json("""{"results":[],"meta":{"has_more":false,"after_cursor":null}}""");
+            }
+
+            return r.Query("page[after]") == "c2"
+                ? FakeResponse.Json("""{"results":[{"id":2,"name":"John Doe","email":"j@x","role":"agent","active":true,"suspended":false}],"meta":{"has_more":false,"after_cursor":null}}""")
+                : FakeResponse.Json("""{"results":[{"id":1,"name":"John Doe Junior","email":"j1@x","role":"agent","active":true,"suspended":false}],"meta":{"has_more":true,"after_cursor":"c2"},"next_page":"https://acme.zendesk.com/api/v2/search.json?page=2&per_page=100"}""");
+        });
+        using var _ = fake;
+
+        var result = Parse(await UsersTools.FindAgentByName(zendesk, "John Doe"));
+
+        result["agents"]!.AsArray().Select(a => (long)a!["id"]!).Should().Equal(2, 1);
+        result["exact_match"]!.GetValue<bool>().Should().BeTrue();
+        result["truncated"]!.GetValue<bool>().Should().BeFalse();
+    }
+
+    [Fact]
+    public async Task FindAgentByName_ReportsTruncation_WhenMoreMatchThanItReads()
+    {
+        // Every page says there is another, so the bounded read stops and must say so.
+        var next = 0;
+        var (fake, zendesk) = Build(_ => FakeResponse.Json(
+            $$$"""{"results":[{"id":{{{Interlocked.Increment(ref next)}}},"name":"John Doe Junior","role":"agent"}],"meta":{"has_more":true,"after_cursor":"more"}}"""));
+        using var _ = fake;
+
+        var result = Parse(await UsersTools.FindAgentByName(zendesk, "John Doe"));
+
+        result["truncated"]!.GetValue<bool>().Should().BeTrue();
+        result["exact_match"]!.GetValue<bool>().Should().BeFalse();
+        result["note"]!.GetValue<string>().Should().Contain("not all");
     }
 
     [Fact]
