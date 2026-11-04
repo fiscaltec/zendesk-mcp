@@ -12,7 +12,7 @@ public class ZendeskServerInstructionsTests
     [InlineData("Search_tickets")]
     [InlineData("Preview_macro")]
     [InlineData("Bulk_update_tickets")]
-    [InlineData("dry_run")]
+    [InlineData("confirmation")]
     [InlineData("Read-only")]
     public void Text_ContainsKeyGuidanceMarkers(string marker)
     {

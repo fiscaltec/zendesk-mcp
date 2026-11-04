@@ -262,36 +262,31 @@ public class AuditRecordIdsTests
     }
 
     [Fact]
-    public void FromMutationUrl_NamesTheTicketsABulkUpdateLists()
+    public void FromBulkUpdateBody_NamesTheTicketsTheRequestLists()
     {
-        // update_many answers with a job, so the ids= query is the only place the touched tickets
+        // update_many answers with a job, so the request body is the only place the touched tickets
         // appear at the moment of the write.
-        var result = AuditRecordIds.FromMutationUrl(HttpMethod.Put, "https://acme.zendesk.com/api/v2/tickets/update_many?ids=101%2C102,103");
+        var result = AuditRecordIds.FromBulkUpdateBody(HttpMethod.Put, "https://acme.zendesk.com/api/v2/tickets/update_many",
+            """{"tickets":[{"id":101,"status":"solved"},{"id":102,"tags":["a"]}]}""");
 
         result.IdsAvailable.Should().BeTrue();
-        result.Ids.Should().Equal("101", "102", "103");
-        result.RecordsFetched.Should().Be(3);
+        result.Ids.Should().Equal("101", "102");
+        result.RecordsFetched.Should().Be(2);
     }
 
     [Theory]
-    [InlineData("https://acme.zendesk.com/api/v2/tickets/update_many?ids=101,abc")]  // one entry not an id
-    [InlineData("https://acme.zendesk.com/api/v2/tickets/update_many?ids=101,,102")] // an empty entry
-    [InlineData("https://acme.zendesk.com/api/v2/tickets/update_many?ids=")]
-    [InlineData("https://acme.zendesk.com/api/v2/tickets/update_many?external_ids=a,b")]
-    public void FromMutationUrl_ReadsABulkIdsListAllOrNothing(string url)
+    [InlineData("PUT", "https://acme.zendesk.com/api/v2/tickets/update_many", """{"tickets":[{"id":101},{"status":"open"}]}""")]  // one entry without an id
+    [InlineData("PUT", "https://acme.zendesk.com/api/v2/tickets/update_many", """{"tickets":[{"id":"101"}]}""")]                 // not a number
+    [InlineData("PUT", "https://acme.zendesk.com/api/v2/tickets/update_many", """{"tickets":[{"id":-1}]}""")]                    // not a whole number
+    [InlineData("PUT", "https://acme.zendesk.com/api/v2/tickets/update_many", """{"ticket":{"status":"open"}}""")]
+    [InlineData("PUT", "https://acme.zendesk.com/api/v2/tickets/update_many", "not json")]
+    [InlineData("PUT", "https://acme.zendesk.com/api/v2/tickets/101", """{"tickets":[{"id":101}]}""")]                           // not a bulk update
+    [InlineData("POST", "https://acme.zendesk.com/api/v2/tickets/update_many", """{"tickets":[{"id":101}]}""")]                  // not a PUT
+    public void FromBulkUpdateBody_IsAllOrNothing(string method, string url, string body)
     {
-        var result = AuditRecordIds.FromMutationUrl(HttpMethod.Put, url);
+        var result = AuditRecordIds.FromBulkUpdateBody(new HttpMethod(method), url, body);
 
         result.IdsAvailable.Should().BeFalse();
         result.Ids.Should().BeEmpty();
-    }
-
-    [Fact]
-    public void FromMutationUrl_IgnoresAnIdsQueryOnAnythingButABulkUpdate()
-    {
-        // Negative control for the above: the ids= rule is specific to update_many, so a collection
-        // path carrying the same query still names nobody.
-        AuditRecordIds.FromMutationUrl(HttpMethod.Put, "https://acme.zendesk.com/api/v2/tickets?ids=101,102")
-            .IdsAvailable.Should().BeFalse();
     }
 }

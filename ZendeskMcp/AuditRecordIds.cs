@@ -88,36 +88,9 @@ public static class AuditRecordIds
             last = last[..^5];
         }
 
-        if (last == "update_many")
-        {
-            return FromIdsQuery(uri);
-        }
-
         return !string.IsNullOrEmpty(last) && last.All(char.IsAsciiDigit)
             ? new AuditedRecords([last], 1, IdsAvailable: true)
             : Unavailable;
-    }
-
-    /// <summary>
-    /// The records a bulk update names in its own <c>ids=</c> query. Zendesk answers
-    /// <c>PUT …/update_many?ids=…</c> with a background job, not the records, so the request is the
-    /// only place the touched ids appear at the moment of the write.
-    /// </summary>
-    /// <remarks>
-    /// All or nothing: one entry that is not a whole number means the query is not the list this
-    /// expects, and recording the rest would present part of it as the whole.
-    /// </remarks>
-    private static AuditedRecords FromIdsQuery(Uri uri)
-    {
-        var ids = Microsoft.AspNetCore.WebUtilities.QueryHelpers.ParseQuery(uri.Query).TryGetValue("ids", out var values)
-            ? values.ToString().Split(',')
-            : [];
-        if (ids.Length == 0 || ids.Any(id => id.Length == 0 || !id.All(char.IsAsciiDigit)))
-        {
-            return Unavailable;
-        }
-
-        return new AuditedRecords(ids.Take(MaxIds).ToList(), ids.Length, IdsAvailable: true);
     }
 
     public static AuditedRecords Extract(string rawJson)
@@ -141,11 +114,60 @@ public static class AuditRecordIds
         }
     }
 
+    /// <summary>
+    /// The records a bulk update names in its own request body, <c>{"tickets":[{"id":…},…]}</c>.
+    /// Zendesk answers <c>PUT …/update_many</c> with a background job, not the records, so the request
+    /// is the only place the touched ids appear at the moment of the write.
+    /// </summary>
+    /// <remarks>
+    /// All or nothing: an entry without a whole-number <c>id</c> means the body is not the shape this
+    /// expects, and recording the rest would present part of it as the whole. The ids are the records
+    /// the write was <i>sent</i> for; the job may still fail some of them.
+    /// </remarks>
+    public static AuditedRecords FromBulkUpdateBody(HttpMethod method, string url, string? requestBody)
+    {
+        if (method != HttpMethod.Put || requestBody is null || !Uri.TryCreate(url, UriKind.Absolute, out var uri)
+            || !uri.AbsolutePath.EndsWith("/update_many", StringComparison.Ordinal) && !uri.AbsolutePath.EndsWith("/update_many.json", StringComparison.Ordinal))
+        {
+            return Unavailable;
+        }
+
+        try
+        {
+            using var document = JsonDocument.Parse(requestBody);
+            if (document.RootElement.ValueKind != JsonValueKind.Object
+                || !document.RootElement.TryGetProperty("tickets", out var tickets)
+                || tickets.ValueKind != JsonValueKind.Array
+                || tickets.GetArrayLength() == 0)
+            {
+                return Unavailable;
+            }
+
+            var ids = new List<string>();
+            foreach (var ticket in tickets.EnumerateArray())
+            {
+                if (ticket.ValueKind != JsonValueKind.Object || !ticket.TryGetProperty("id", out var id)
+                    || id.ValueKind != JsonValueKind.Number || !id.GetRawText().All(char.IsAsciiDigit))
+                {
+                    return Unavailable;
+                }
+
+                ids.Add(id.GetRawText());
+            }
+
+            return new AuditedRecords(ids.Take(MaxIds).ToList(), ids.Count, IdsAvailable: true);
+        }
+        catch (JsonException)
+        {
+            return Unavailable;
+        }
+    }
+
     private static AuditedRecords ExtractFrom(JsonElement root)
     {
         // A background job is not a record: its own id is a job token, so reading it as one would put
-        // a fabricated record id in the trail. A finished job lists the records it touched in
-        // `results`; until then the job names none, and the request has to (FromMutationUrl).
+        // a fabricated record id in the trail. A finished job lists the records it worked on in
+        // `results`; until then the job names none, and the request has to (FromBulkUpdateBody).
         if (root.ValueKind == JsonValueKind.Object
             && root.TryGetProperty("job_status", out var job)
             && job.ValueKind == JsonValueKind.Object)

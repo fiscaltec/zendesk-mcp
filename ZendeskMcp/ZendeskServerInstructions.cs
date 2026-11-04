@@ -20,8 +20,9 @@ public static class ZendeskServerInstructions
           Count_tickets (group_by for breakdowns). For KPI figures use Get_ticket_metrics_summary,
           Get_sla_summary and Get_sla_queue rather than fetching tickets one by one.
         - Before applying a macro, run Preview_macro and show the person what will change.
-        - Bulk_update_tickets previews by default (dry_run true): show the person that preview, and
-          call it with dry_run false only once they agree. For one ticket use Update_ticket.
+        - Bulk_update_tickets previews first (leave out confirmation): show the person how many
+          tickets will change and what changes, and call again with the same arguments and the
+          confirmation only once they say yes. For one ticket, or for comments, use Update_ticket.
         - Public replies, article publishing, Help Center category and section changes, macro changes and
           user/organisation changes can each be switched off for the whole account; a refusal naming one
           of these is a setting, not a fault.
