@@ -449,9 +449,13 @@ public static partial class HelpCenterArticlesTools
 
         var after = response["article"];
         var afterIds = HelpCenterJson.UserSegmentIds(after);
-        var applied = user_segment_id is null
+        // The empty list also means "no audience fields at all", so require the response to state an
+        // audience before reading an empty list as everyone.
+        var statesAudience = after is JsonObject afterObject
+            && (afterObject.ContainsKey("user_segment_id") || afterObject.ContainsKey("user_segment_ids"));
+        var applied = statesAudience && (user_segment_id is null
             ? afterIds.Count == 0
-            : afterIds.Count == 1 && ToolJson.Long(afterIds[0]) == user_segment_id;
+            : afterIds.Count == 1 && ToolJson.Long(afterIds[0]) == user_segment_id);
         if (!applied)
         {
             // Never report a visibility change Zendesk did not make: the caller may be restricting an

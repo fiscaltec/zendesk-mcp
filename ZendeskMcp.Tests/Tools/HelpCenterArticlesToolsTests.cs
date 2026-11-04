@@ -563,6 +563,22 @@ public sealed class HelpCenterArticlesToolsTests : IDisposable
     }
 
     [Theory]
+    [InlineData("{}")]
+    [InlineData("{\"article\":{\"id\":42,\"title\":\"T\"}}")]
+    public async Task SetVisibility_ToEveryone_WhenTheResponseStatesNoAudience_Fails(string putResponse)
+    {
+        // An empty segment list must not be read as "everyone" when the response says nothing either way.
+        using var fake = TestHelpers.CreateFakeZendesk(r => r.Method == HttpMethod.Get
+            ? VisibilityRoute(r, draft: true, putSegment: "11")
+            : FakeResponse.Json(putResponse));
+        var zendesk = TestHelpers.BuildZendeskService(fake.Client, configure: o => o.Features.AllowArticlePublishing = true);
+
+        var act = () => HelpCenterArticlesTools.SetHelpCenterArticleVisibility(zendesk, 42, visible_to_everyone: true);
+
+        await act.Should().ThrowAsync<HttpRequestException>().WithMessage("*not the requested audience*");
+    }
+
+    [Theory]
     [InlineData(null, false)]
     [InlineData(77L, true)]
     [InlineData(0L, false)]
