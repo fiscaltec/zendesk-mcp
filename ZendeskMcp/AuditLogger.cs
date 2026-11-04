@@ -120,7 +120,8 @@ public class AuditLogger
 
     /// <summary>Records a completed action (after the upstream response, success or failure).</summary>
     /// <param name="duration">
-    /// How long the upstream call took, request sent to body read (vitally-mcp#94). Written as whole
+    /// How long the upstream call took (vitally-mcp#94): request sent to body read from <c>SendAsync</c>,
+    /// request sent to response headers for each <c>DownloadAsync</c> hop. Written as whole
     /// milliseconds, matching the tool-call record, so a slow tool can be decomposed into its upstream
     /// calls by correlation id. Truncated to whole milliseconds, so a sub-millisecond call records
     /// <c>0</c> — a real measurement. Only <c>-1</c> means not measured; an unmeasured call is never

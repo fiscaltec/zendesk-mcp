@@ -140,7 +140,7 @@ Everything vitally-mcp documents about the Entra façade, live group RBAC, the `
 
 ## Before production
 
-The decisions are settled (2026-10-28) and recorded in [`infra/terraform/README.md`](infra/terraform/README.md#decisions): subdomain `fiscalsupport`, the `fiscal_zendesk_mcp` OAuth client, IT & Security as the only department admitted to begin with, the hostnames above, all five feature switches on, Zendesk ticket data cleared under the AI Use Policy, and the Vitally estate's container registry shared. Still open: the Zendesk plan's API rate limit and audit retention for tool arguments. The scanner's Teams webhook was settled on 2026-10-29: the channel Vitally's scanner posts to.
+The decisions are settled (2026-10-28) and recorded in [`infra/terraform/README.md`](infra/terraform/README.md#decisions): subdomain `fiscalsupport`, the Zendesk OAuth clients (`fiscal_zendesk_mcp` for production; since 2026-11-04 a read-only `fiscal_zendesk_mcp_staging` for staging), IT & Security as the only department admitted to begin with, the hostnames above, all five feature switches on, Zendesk ticket data cleared under the AI Use Policy, and the Vitally estate's container registry shared. Still open: the Zendesk plan's API rate limit and audit retention for tool arguments. The scanner's Teams webhook was settled on 2026-10-29: the channel Vitally's scanner posts to.
 
 1. Build the estate with [`docs/runbooks/build-the-estate.md`](docs/runbooks/build-the-estate.md), deploy to staging, and run the staging validation in [CLAUDE.md](CLAUDE.md#staging-validation): every tool against the real tenant, now as an ordinary agent rather than an admin, plus the endpoints still marked *unverified against the live API* in code.
 
