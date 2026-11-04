@@ -92,8 +92,11 @@ on the corporate VPN its DNS has no record for the private endpoint (`NXDOMAIN`)
 name resolves publicly and the vault refuses (`ForbiddenByConnection`, *"Public network access is
 disabled"*). Found again on 2026-11-04, when a bare `az keyvault secret set` from WSL failed both
 ways. So every write is a short, self-closing window, as `build-the-estate.md` Phase 7.2 does:
-a time-boxed **Key Vault Secrets Officer** for you, `defaultAction: Deny`, an IP rule for your egress
-address, public access on; a `trap` undoes all of it however the block ends.
+a temporary **Key Vault Secrets Officer** assignment for you (created only if you lack one, and
+removed only if the block created it), `defaultAction: Deny`, an IP rule for your egress address,
+public access on; a `trap` undoes all of it however the block ends. The role is an ordinary
+assignment, not a PIM timer: if the shell is killed outright the trap cannot run, so check
+afterwards (*Notes*).
 
 Run it **off the VPN**, in WSL or a Linux shell, as one paste. Set `NAME` to the secret:
 
@@ -101,19 +104,19 @@ Run it **off the VPN**, in WSL or a Linux shell, as one paste. Set `NAME` to the
 ( set -euo pipefail
 KV=zendesk-prod-kv-uksouth; RG=zendesk-prod-rg-uksouth; NAME=zendesk-staging-oauth-client-secret
 ME=$(az ad signed-in-user show --query id -o tsv); KV_ID=$(az keyvault show -g "$RG" -n "$KV" --query id -o tsv)
-PREV=$(az keyvault show -g "$RG" -n "$KV" --query "properties.networkAcls.defaultAction" -o tsv); IP=""
+PREV=$(az keyvault show -g "$RG" -n "$KV" --query "properties.networkAcls.defaultAction" -o tsv); IP=""; CREATED=""
 close_window() { set +e; unset SECRET
   az keyvault update -g "$RG" -n "$KV" --public-network-access Disabled -o none || echo "!!! could not disable public access: do it by hand" >&2
   [ -n "$IP" ] && { az keyvault network-rule remove -g "$RG" -n "$KV" --ip-address "$IP/32" -o none || echo "!!! could not remove IP rule $IP" >&2; }
   az keyvault update -g "$RG" -n "$KV" --default-action "${PREV:-Allow}" -o none || echo "!!! could not restore default action" >&2
-  az role assignment delete --assignee "$ME" --role "Key Vault Secrets Officer" --scope "$KV_ID" -o none || echo "!!! could not remove your Secrets Officer role" >&2
+  [ -n "$CREATED" ] && { az role assignment delete --assignee "$ME" --role "Key Vault Secrets Officer" --scope "$KV_ID" -o none || echo "!!! could not remove your Secrets Officer role" >&2; }
   echo "window closed"; }
 trap close_window EXIT
-[ "$(az role assignment list --scope "$KV_ID" --assignee-object-id "$ME" --query "length([?roleDefinitionName=='Key Vault Secrets Officer'])" -o tsv)" = 1 ] \
-  || az role assignment create --assignee-object-id "$ME" --assignee-principal-type User --role "Key Vault Secrets Officer" --scope "$KV_ID" -o none
-IP=$(curl -4 -fsS https://api.ipify.org); case "$IP" in *.*.*.*) echo "your egress IP: $IP";; *) echo "bad IP '$IP'" >&2; exit 1;; esac
+if [ "$(az role assignment list --scope "$KV_ID" --assignee-object-id "$ME" --query "length([?roleDefinitionName=='Key Vault Secrets Officer'])" -o tsv)" != 1 ]; then
+  az role assignment create --assignee-object-id "$ME" --assignee-principal-type User --role "Key Vault Secrets Officer" --scope "$KV_ID" -o none; CREATED=1; fi
+EGRESS=$(curl -4 -fsS https://api.ipify.org); case "$EGRESS" in *.*.*.*) echo "your egress IP: $EGRESS";; *) echo "bad IP '$EGRESS'" >&2; exit 1;; esac
 az keyvault update -g "$RG" -n "$KV" --default-action Deny -o none
-az keyvault network-rule add -g "$RG" -n "$KV" --ip-address "$IP/32" -o none
+az keyvault network-rule add -g "$RG" -n "$KV" --ip-address "$EGRESS/32" -o none; IP=$EGRESS
 az keyvault update -g "$RG" -n "$KV" --public-network-access Enabled -o none
 ok=""; last=""
 for i in $(seq 1 20); do last=$(timeout 30 az keyvault secret list --vault-name "$KV" -o none 2>&1) && { ok=1; break; }; echo "  not reachable yet (attempt $i): ${last:0:120}"; sleep 15; done
@@ -125,8 +128,9 @@ want=${#SECRET}; got=$(az keyvault secret show --vault-name "$KV" -n "$NAME" --q
 [ "$want" = "$got" ] && echo "stored: length $got matches" || { echo "!!! stored length $got, pasted $want" >&2; exit 1; } )
 ```
 
-Run exactly so on 2026-11-04 to store `zendesk-staging-oauth-client-secret` (Key Vault `SecretSet`
-200, and afterwards public access `Disabled`, no IP rule, no role left behind). Notes:
+Run on 2026-11-04 to store `zendesk-staging-oauth-client-secret` (Key Vault `SecretSet` 200, and
+afterwards public access `Disabled`, no IP rule, no role left behind). Since then it removes the role
+only if it created it, and records the IP rule only once it is added. Notes:
 
 - `printf %s`, never a `<<<` here-string: a here-string appends a newline, `--file` stores it, and
   every connect, refresh and revoke then fails with `invalid_client`. The length check catches it.
@@ -134,6 +138,10 @@ Run exactly so on 2026-11-04 to store `zendesk-staging-oauth-client-secret` (Key
   and a role still propagating can be told apart. An earlier version hid the errors and appeared to
   hang.
 - You need rights to create role assignments on the vault (the PIM role used for the build).
+- Check afterwards, from anywhere (management plane): `az keyvault show -g zendesk-prod-rg-uksouth -n
+  zendesk-prod-kv-uksouth --query "{public:properties.publicNetworkAccess, ips:properties.networkAcls.ipRules}"`
+  must show `Disabled` and no rules, and `az role assignment list --scope <vault id>` only the
+  managed identity's Secrets Officer.
 
 ### Rotate a client secret
 
@@ -177,8 +185,8 @@ hold the old token, which is why revoking at Zendesk comes first.
 
 - `Authorization__ReadOnly=true` denies every create and update for everyone and hides the write
   tools, except *Disconnect_zendesk*: people can still cut their own connection during a lock-down.
-  Use it on staging whenever it is pointed at production Zendesk data and nobody is deliberately
-  testing writes. See vitally-mcp's `read-only-and-rbac-rollout.md` for why this was
+  Staging always runs with it on. Since 2026-11-04 it is the server's guard behind Zendesk's own:
+  staging's client allows only `read`, so lifting it alone no longer makes staging write. See vitally-mcp's `read-only-and-rbac-rollout.md` for why this was
   the safest staging posture there.
 - `Zendesk__Features__AllowPublicReplies`, `AllowArticlePublishing`, `AllowHelpCenterStructureChanges`, `AllowMacroChanges` and
   `AllowUserAndOrganizationChanges` are account-wide. The application defaults them off; FISCAL's

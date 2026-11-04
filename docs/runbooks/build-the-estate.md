@@ -612,8 +612,9 @@ echo "Phase 2 verified"
 ## Phase 3 — Key Vault
 
 `keyvault.tf`. RBAC authorisation, purge protection, 90-day soft delete, public access off from the
-start, private endpoint only. Holds `zendesk-oauth-client-secret`, `entra-mcp-client-secret` and one
-secret per connected person, which the app writes itself.
+start, private endpoint only. Holds `zendesk-oauth-client-secret` (production's Zendesk client),
+`zendesk-staging-oauth-client-secret` (staging's), `entra-mcp-client-secret` and one secret per
+connected person, which the app writes itself.
 
 ```bash
 ( set -euo pipefail; source ~/zendesk-estate.env; assert_context
@@ -974,7 +975,7 @@ echo "Phase 6 verified"
 
 ## Phase 7 — Secrets
 
-Out-of-band in the Terraform too (`entra.tf`, `keyvault.tf`): neither value may live in any state or
+Out-of-band in the Terraform too (`entra.tf`, `keyvault.tf`): none of these values may live in any state or
 file outside the vault. Three secrets go into `zendesk-prod-kv-uksouth`, each with a **180-day expiry**
 so the scanner warns 30 days ahead:
 
@@ -1004,7 +1005,7 @@ so the scanner warns 30 days ahead:
 > `nslookup zendesk-prod-kv-uksouth.vault.azure.net` must reach public addresses. Found during the
 > first build (2026-10-28, #3); off the VPN it worked first time.
 
-### 7.1 Regenerate the Zendesk client secret and capture it
+### 7.1 Regenerate the Zendesk client secrets and capture them
 
 In Admin Centre → APIs → OAuth clients → `fiscal_zendesk_mcp`, **regenerate the secret** (the
 current one was handled by hand during validation; it is shown once). Then, on its own line:
@@ -1019,7 +1020,7 @@ Then the same for staging's client, `fiscal_zendesk_mcp_staging`:
 source ~/zendesk-estate.env; capture_secret zendesk-staging-oauth-client-secret
 ```
 
-### 7.2 Create the Entra client secret and store both
+### 7.2 Create the Entra client secret and store all three
 
 Re-runnable: the Entra credential is created only if `$SECRET_DIR/entra-oauth-client-secret` does
 not already exist. If Cloud Shell restarted after a credential was created but before this block

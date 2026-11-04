@@ -164,7 +164,7 @@ variable "staging_zendesk_allow_user_and_organization_changes" {
 
 variable "staging_read_only" {
   type        = bool
-  description = "Authorization__ReadOnly on staging. Staging runs unreleased code against the ONE live Zendesk account, so every mutating tool is denied there unless someone deliberately turns this off for a write test (and back on afterwards)."
+  description = "Authorization__ReadOnly on staging. Staging runs unreleased code against the ONE live Zendesk account, so every mutating tool is denied there. Since 2026-11-04 staging's own Zendesk OAuth client allows only `read`, so Zendesk refuses a staging write even with this off; turning it off for a write test also needs that client widened."
   default     = true
 }
 

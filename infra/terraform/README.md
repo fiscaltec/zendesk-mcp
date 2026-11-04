@@ -41,8 +41,9 @@ cite `vitally-mcp#NNN` where a lesson was learned there.
   replica) and `zendesk-staging-ca-uksouth` (scales to zero). Both are pinned to **at most one
   replica**: connect links, OAuth state and upload slots live in an in-process cache
   (`containerapps.tf` explains; scaling out needs Redis first).
-- **One secret vault**, `zendesk-prod-kv-uksouth`, private-endpoint only. It holds the Zendesk OAuth
-  client secret (`zendesk-oauth-client-secret`), the record copy of the Entra client secret
+- **One secret vault**, `zendesk-prod-kv-uksouth`, private-endpoint only. It holds the two Zendesk OAuth
+  client secrets (`zendesk-oauth-client-secret` for production, `zendesk-staging-oauth-client-secret`
+  for staging), the record copy of the Entra client secret
   (`entra-mcp-client-secret`), and one secret per connected person, which the app writes itself —
   `zendesk-user-{objectId}` for production, `zendesk-staging-user-{objectId}` for staging, so the two
   targets never share a person's token. The app's identity therefore holds **Key Vault Secrets
