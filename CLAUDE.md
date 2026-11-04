@@ -866,7 +866,9 @@ Steps 3–7 are `curl` against the public origin, so they run anywhere, a cloud 
 
 What is left for a person, because it needs a real token: sign-in per tier, `tools/list` as a
 **department-nested** user, a reader denied a write tool, and decoding the token for `aud`, `iss`,
-`oid` and `upn`. #4 writes that up as `docs/runbooks/zendesk-oauth-staging-validation.md`.
+`oid` and `upn`. `docs/runbooks/zendesk-oauth-staging-validation.md` (#4) covers sign-in and the
+read tier (its step 3); the department-nested user, a reader denied a write tool and the token
+decode are not written up there yet.
 
 #### If an identity change fails
 
