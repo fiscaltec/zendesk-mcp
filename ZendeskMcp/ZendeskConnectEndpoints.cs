@@ -179,9 +179,9 @@ public static class ZendeskConnectEndpoints
             if (linkSpent)
             {
                 // Revoked straight away, like a refused one: nothing holds it, so it must not stay live.
-                await oauthClient.RevokeAsync(token.AccessToken, ctx.RequestAborted);
-                logger.LogWarning("Refused a Zendesk connection for {UserObjectId}: its connect link was already used or has expired; the new grant was revoked",
-                    attempt.ObjectId);
+                var revoked = await oauthClient.RevokeAsync(token.AccessToken, ctx.RequestAborted);
+                logger.LogWarning("Refused a Zendesk connection for {UserObjectId}: its connect link was already used or has expired; revoking the new grant {RevocationOutcome}",
+                    attempt.ObjectId, revoked ? "succeeded" : "was not confirmed");
                 return Page(StatusCodes.Status400BadRequest, "Connection not completed",
                     "This connect link has already been used, or has expired. If you are not connected, ask Claude for a new link — any Zendesk tool will offer it.");
             }
