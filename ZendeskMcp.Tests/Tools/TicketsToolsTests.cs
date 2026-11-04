@@ -573,6 +573,24 @@ public class TicketsToolsTests
     }
 
     [Fact]
+    public async Task CountTickets_GroupByMultiSelectField_ReportsNoRemainder()
+    {
+        // Three tickets: one carries both options, two carry neither. The option counts are 1 and 1, so
+        // total minus their sum (1) is not the number with no option (2): one ticket can sit in several
+        // groups. No remainder is reported rather than a wrong one.
+        using var fake = TestHelpers.CreateFakeZendesk(r => r.Path switch
+        {
+            "/api/v2/ticket_fields/78" => Json("""{"ticket_field":{"id":78,"title":"Modules","type":"multiselect","custom_field_options":[{"name":"A","value":"mod_a"},{"name":"B","value":"mod_b"}]}}"""),
+            _ => Count(r.Query("query") switch { "type:ticket" => 3, "type:ticket custom_field_78:mod_a" => 1, "type:ticket custom_field_78:mod_b" => 1, _ => 0 }),
+        });
+        var result = JsonNode.Parse(await TicketsTools.CountTickets(TestHelpers.BuildZendeskService(fake.Client), group_by: "custom_field", group_by_field_id: 78))!;
+
+        var groups = result["groups"]!.AsArray();
+        groups.Select(g => g!["key"]?.GetValue<string>()).Should().Equal("mod_a", "mod_b");
+        result["note"]!.GetValue<string>().Should().Contain("multi-select");
+    }
+
+    [Fact]
     public async Task CountTickets_GroupByCustomFieldNeedsFieldId()
     {
         using var fake = TestHelpers.CreateFakeZendesk(_ => Count(1));

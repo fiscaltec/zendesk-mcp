@@ -103,7 +103,7 @@ shares the refuse-and-revoke code and is covered by `ZendeskConnectEndpointsTest
 ## 3 — Tiers: a reader gets only read access
 
 ⚠️ **On staging the tool list cannot show the tier.** `Authorization__ReadOnly=true` hides the write
-tools from **every** caller, so an admin sees the same 28 tools as a reader there. On staging the only
+tools from **every** caller, so an admin sees the same 29 tools as a reader there. On staging the only
 evidence of the tier is the audit record's `AuditPermissionTier` (below). To see the tool list differ
 by tier, do this step against **production**, which is not read-only (that is where it was run on
 2026-11-04); the step makes no writes either way.
@@ -135,8 +135,8 @@ re-reads `tools/list`, then:
 
 1. **Production only:** list the server's tools. Expect **only** read tools — `Get_`/`List_`/
    `Search_`/`Count_`/`Find_`/`Preview_`/`Export_`/`Bulk_get_`, plus `Get_zendesk_connect_link` and
-   `Disconnect_zendesk` — **29** of 47 at the time of writing. No `Create_`, `Update_`,
-   `Bulk_update_`, `Set_`, `Apply_`, `Add_` or `Request_` tool. (On staging you will see the same 29
+   `Disconnect_zendesk` — **29** of 48 at the time of writing. No `Create_`, `Update_`,
+   `Bulk_update_`, `Merge_`, `Set_`, `Apply_`, `Add_` or `Request_` tool. (On staging you will see the same 29
    whatever your tier.)
 2. Run a read, e.g. *search for three tickets created this week*.
 

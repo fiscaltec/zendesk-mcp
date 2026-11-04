@@ -54,6 +54,15 @@ public sealed class KeyVaultZendeskTokenStore(
     private const string TombstoneValue = "{\"revoked\":true}";
     private readonly ZendeskServerOptions _options = options.Value;
 
+    // Per person: a generation, bumped at the start and end of every save and removal, and the number
+    // of those writes still in flight. Together they let GetAsync tell that a write overlapped its
+    // vault read — the generation catches a write that began or ended during the read, the count one
+    // that spans it. Process-local, like the cache they guard (the app runs one replica); a few bytes
+    // per person who has ever written a grant. Every access is under the gate, which makes "check,
+    // then fill the cache" atomic against "begin or end a write, then set the cache".
+    private readonly Dictionary<string, WriteState> _writes = new(StringComparer.Ordinal);
+    private readonly object _writeGate = new();
+
     public string SecretName(string objectId) => $"{_options.TokenSecretPrefix}{objectId}";
 
     private static string CacheKey(string objectId) => $"zendesk-token::{objectId}";
@@ -67,6 +76,13 @@ public sealed class KeyVaultZendeskTokenStore(
         }
 
         metrics?.CacheLookup("user_token", hit: false);
+
+        // Taken before the vault read, so a save or removal that overlaps the read is detectable below.
+        long generation;
+        lock (_writeGate)
+        {
+            generation = StateFor(objectId).Generation;
+        }
 
         KeyVaultSecret? secret;
         try
@@ -102,7 +118,24 @@ public sealed class KeyVaultZendeskTokenStore(
             throw;
         }
 
-        cache.Set(CacheKey(objectId), new CachedToken(token), _options.TokenCacheDuration);
+        // Cached only if nothing has filled the entry meanwhile (a save caches before its vault write
+        // completes), no save or removal for this person began or finished during the read, and none
+        // is still in flight — the entry a pending save cached can expire or be evicted before its
+        // write lands, and a read in that window sees the old version with the generation unchanged. The
+        // provider's first read runs outside the person's lock, so without this a slow cache-miss read
+        // could land after a refresh saved the rotated grant (or a disconnect wrote its tombstone) and
+        // put the older state back: a spent refresh token, whose next use fails invalid_grant and
+        // disconnects the person. The reader still gets what it read; a stale access token meets a
+        // 401, which OnTokenRejectedAsync resolves against the newer stored grant.
+        lock (_writeGate)
+        {
+            var state = StateFor(objectId);
+            if (state.Generation == generation && state.Active == 0 && !cache.TryGetValue(CacheKey(objectId), out _))
+            {
+                cache.Set(CacheKey(objectId), new CachedToken(token), _options.TokenCacheDuration);
+            }
+        }
+
         return token;
     }
 
@@ -119,8 +152,26 @@ public sealed class KeyVaultZendeskTokenStore(
 
         // Cached BEFORE the write: after a refresh, Zendesk has already spent the old refresh token, so
         // if the vault write fails this replica must still hold the new one rather than the spent one.
-        cache.Set(CacheKey(objectId), new CachedToken(token), _options.TokenCacheDuration);
-        await secrets.SetSecretAsync(secret, cancellationToken);
+        lock (_writeGate)
+        {
+            BeginWrite(objectId);
+            cache.Set(CacheKey(objectId), new CachedToken(token), _options.TokenCacheDuration);
+        }
+
+        try
+        {
+            await secrets.SetSecretAsync(secret, cancellationToken);
+        }
+        finally
+        {
+            // Whether or not the write landed, so a failed write cannot leave later reads uncached, and
+            // a read that began while it was in flight — and may have seen the previous version — is
+            // not cached either.
+            lock (_writeGate)
+            {
+                EndWrite(objectId);
+            }
+        }
     }
 
     public async Task RemoveAsync(string objectId, CancellationToken cancellationToken = default)
@@ -129,8 +180,52 @@ public sealed class KeyVaultZendeskTokenStore(
         secret.Properties.ContentType = "application/json";
         secret.Properties.Tags["kind"] = "zendesk-user-token";
         secret.Properties.Tags["revoked"] = "true";
-        await secrets.SetSecretAsync(secret, cancellationToken);
-        cache.Set(CacheKey(objectId), new CachedToken(null), _options.TokenCacheDuration);
+        lock (_writeGate)
+        {
+            BeginWrite(objectId);
+        }
+
+        var written = false;
+        try
+        {
+            await secrets.SetSecretAsync(secret, cancellationToken);
+            written = true;
+        }
+        finally
+        {
+            lock (_writeGate)
+            {
+                EndWrite(objectId);
+                if (written)
+                {
+                    cache.Set(CacheKey(objectId), new CachedToken(null), _options.TokenCacheDuration);
+                }
+            }
+        }
+    }
+
+    // The three below are called with _writeGate held.
+    private WriteState StateFor(string objectId) =>
+        _writes.TryGetValue(objectId, out var state) ? state : _writes[objectId] = new WriteState();
+
+    private void BeginWrite(string objectId)
+    {
+        var state = StateFor(objectId);
+        state.Generation++;
+        state.Active++;
+    }
+
+    private void EndWrite(string objectId)
+    {
+        var state = StateFor(objectId);
+        state.Generation++;
+        state.Active--;
+    }
+
+    private sealed class WriteState
+    {
+        public long Generation;
+        public int Active;
     }
 
     /// <summary>

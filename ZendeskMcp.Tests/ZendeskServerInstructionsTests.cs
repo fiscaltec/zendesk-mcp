@@ -11,6 +11,7 @@ public class ZendeskServerInstructionsTests
     [InlineData("untrusted data")]
     [InlineData("Search_tickets")]
     [InlineData("Preview_macro")]
+    [InlineData("Merge_tickets")]
     [InlineData("Bulk_update_tickets")]
     [InlineData("confirmation")]
     [InlineData("Read-only")]

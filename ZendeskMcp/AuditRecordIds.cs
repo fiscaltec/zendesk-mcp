@@ -177,9 +177,20 @@ public static class AuditRecordIds
                 : Unavailable;
         }
 
+        // A single record is looked for first. A get-by-id can sideload collections beside it —
+        // Get_ticket always asks for `include=users,organizations` — and scanning for arrays first
+        // would record those sideloaded users as the records read, and miss the ticket. A collection
+        // response has no object member carrying an id (its paging metadata is excluded), so this
+        // order costs it nothing.
+        var single = TryReadSingleRecord(root);
+        if (single.IdsAvailable)
+        {
+            return single;
+        }
+
         if (!TryFindRecordArray(root, out var records))
         {
-            return TryReadSingleRecord(root);
+            return Unavailable;
         }
 
         var ids = records.EnumerateArray()
@@ -253,7 +264,8 @@ public static class AuditRecordIds
 
         foreach (var property in root.EnumerateObject())
         {
-            if (property.Value.ValueKind == JsonValueKind.Object
+            if (!NonRecordProperties.Contains(property.Name)
+                && property.Value.ValueKind == JsonValueKind.Object
                 && property.Value.TryGetProperty("id", out var wrapped)
                 && IdText(wrapped) is { } wrappedId)
             {
