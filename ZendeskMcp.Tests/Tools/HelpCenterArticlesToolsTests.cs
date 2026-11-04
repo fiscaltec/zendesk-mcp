@@ -221,6 +221,35 @@ public sealed class HelpCenterArticlesToolsTests : IDisposable
     }
 
     [Fact]
+    public async Task Get_EmbedImages_ChargesEveryOccurrenceOfARepeatedImageToTheByteBudget()
+    {
+        // One permitted 1 MB image referenced twenty times: downloaded once, but each inlined copy is a
+        // base64 copy in the result, so only as many as the 8 MB total allows may be inlined.
+        const int occurrences = 20;
+        var image = new string('x', 1024 * 1024);
+        var body = string.Concat(Enumerable.Repeat("""<img src="/hc/article_attachments/1.png">""", occurrences));
+        using var fake = TestHelpers.CreateFakeZendesk(r => r.Path switch
+        {
+            "/api/v2/help_center/articles/42" => FakeResponse.Json(new JsonObject { ["article"] = new JsonObject { ["id"] = 42, ["body"] = body } }.ToJsonString()),
+            "/hc/article_attachments/1.png" => new FakeResponse(HttpStatusCode.OK, image, ContentType: "image/png"),
+            _ => DefaultRoute(r),
+        });
+        var zendesk = TestHelpers.BuildZendeskService(fake.Client);
+
+        var json = JsonNode.Parse(await HelpCenterArticlesTools.GetHelpCenterArticle(zendesk, 42, embed_images: true))!;
+
+        var html = json["body"]!.GetValue<string>();
+        var inlined = System.Text.RegularExpressions.Regex.Count(html, "src=\"data:image/png;base64,");
+        var budget = (int)(HelpCenterImages.MaxTotalBytes / image.Length);
+        inlined.Should().Be(budget, "every inlined occurrence counts against the total, not only the download");
+        System.Text.RegularExpressions.Regex.Count(html, "src=\"/hc/article_attachments/1.png\"").Should().Be(occurrences - budget, "occurrences past the budget keep their URL");
+        json["images_embedded"]!.GetValue<int>().Should().Be(1, "it is one distinct image");
+        json["images_skipped"]!.AsArray().Should().ContainSingle("the over-budget reason is reported once per image, not per occurrence")
+            .Which!["reason"]!.GetValue<string>().Should().Contain("used up");
+        fake.Requests.Count(r => r.Path == "/hc/article_attachments/1.png").Should().Be(1, "the download is still cached");
+    }
+
+    [Fact]
     public async Task Get_RejectsNonPositiveId()
     {
         using var fake = TestHelpers.CreateFakeZendesk(DefaultRoute);
