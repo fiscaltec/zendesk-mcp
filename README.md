@@ -10,7 +10,7 @@ It is built to the same standard as FISCAL's [Vitally MCP server](https://github
 
 ## Features
 
-- **44 tools** — tickets (search, count, read, create, update, conversation, attachments), KPI and SLA reporting (metrics summary, SLA summary, SLA queue, CSAT), macros (search, preview, apply, create, update, activate), users and organisations, ticket fields/forms/triggers/brands, and the Help Center (articles, translations, categories, sections, segments, permission groups, images, export). See [Tool catalogue](#tool-catalogue).
+- **45 tools** — tickets (search, count, read, create, update, conversation, attachments), KPI and SLA reporting (metrics summary, SLA summary, SLA queue, CSAT), macros (search, preview, apply, create, update, activate), users and organisations, ticket fields/forms/triggers/brands, and the Help Center (articles, translations, who can view an article, categories, sections, segments, permission groups, images, export). See [Tool catalogue](#tool-catalogue).
 - **Every call is made as you.** Each person connects their own Zendesk account once (per-user Zendesk OAuth). Ticket updates, comments and macro use are attributed to the agent who asked for them, and Zendesk's own role, group and brand restrictions apply on top of this server's permissions. There is no shared Zendesk service account.
 - **Two layers of permission.** Your Entra group decides which tools you see and may call (`zendesk:read` / `zendesk:write`); your Zendesk role decides what Zendesk lets that agent do. Account-wide switches (public replies, article publishing, Help Center structure, macro changes, user and organisation changes) are off by default in the application; FISCAL's deployment turns all five on.
 - **Per-user audit trail** in Application Insights, keyed on your Entra object id — including reads, which Zendesk does not log.
@@ -116,7 +116,7 @@ Each tool carries `ReadOnly` / `Destructive` / `Idempotent` / `OpenWorld` hints 
 | Macros | `Search_macros`, `Preview_macro` | `Apply_macro`, `Create_macro`, `Update_macro`, `Set_macros_active` |
 | People | `Search_users`, `Find_agent_by_name`, `Search_organizations` | `Add_user_to_organization` |
 | Configuration | `List_ticket_fields`, `List_ticket_forms`, `List_triggers`, `List_brands` | — |
-| Help Center | `Search_help_center_articles`, `Get_help_center_article`, `Export_help_center_articles`, `List_help_center_categories`, `List_help_center_sections`, `List_user_segments`, `List_permission_groups` | `Create_help_center_article`, `Update_article_translation`, `Create_help_center_category`, `Update_help_center_category`, `Create_help_center_section`, `Update_help_center_section`, `Request_help_center_image_upload`, `Create_help_center_image` |
+| Help Center | `Search_help_center_articles`, `Get_help_center_article`, `Export_help_center_articles`, `List_help_center_categories`, `List_help_center_sections`, `List_user_segments`, `List_permission_groups` | `Create_help_center_article`, `Update_article_translation`, `Set_help_center_article_visibility`, `Create_help_center_category`, `Update_help_center_category`, `Create_help_center_section`, `Update_help_center_section`, `Request_help_center_image_upload`, `Create_help_center_image` |
 
 Compared with Swifteq's server: the same tools and parameters (snake_case, so prompts written for one work with the other). The differences:
 

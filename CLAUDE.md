@@ -11,7 +11,7 @@ A Model Context Protocol (MCP) server in C# giving FISCAL staff access to Zendes
 **Provenance.** Issue references written `vitally-mcp#NNN` point at fiscaltec/vitally-mcp, where the lesson was learnt; the design and the code that carries it came across together. vitally-mcp's own `CLAUDE.md` holds the full history — dates, measurements, incident write-ups — behind the rules stated here more briefly. When this file and that one disagree about a shared component, check the code here.
 
 **Key characteristics:**
-- 44 tools over tickets, KPI/SLA/CSAT reporting, macros, users and organisations, configuration and the Help Center — see *Tools*.
+- 45 tools over tickets, KPI/SLA/CSAT reporting, macros, users and organisations, configuration and the Help Center — see *Tools*.
 - **Per-user Zendesk OAuth.** Every Zendesk call is made with the signed-in person's own Zendesk token. There is no shared Zendesk credential in a deployed target, so Zendesk attributes every change to the agent and applies their role, group and brand restrictions. This is the main architectural difference from vitally-mcp, which calls Vitally with one shared key.
 - **Two OAuth relationships, never mixed:** Entra signs people in to *this server* (`/oauth/*`, unchanged from vitally-mcp); Zendesk OAuth lets the server act *as them* (`/zendesk/connect`, `/zendesk/callback`).
 - **Streamable HTTP transport** (MCP 2026-07-28), stateless, on `ModelContextProtocol.AspNetCore`.
@@ -544,7 +544,7 @@ Zendesk ──302──> /zendesk/callback?code&state ──> exchange code ─�
 
 ### Account-wide feature switches
 
-`Zendesk:Features` — `AllowPublicReplies`, `AllowArticlePublishing`, `AllowHelpCenterStructureChanges`, `AllowMacroChanges`, `AllowUserAndOrganizationChanges`, all **off** by default in the application and all **on** in FISCAL's deployment (Terraform defaults, decided 2026-10-28) — guard the actions whose effect reaches beyond the agent: customers' inboxes, the public Help Center (published articles, and categories and sections, which have no draft state), every agent's macros, who can read an organisation's tickets. `ToolJson.RequireFeature` refuses with a message naming the setting so the model reports a setting rather than retrying. They sit on top of the Entra tier and the agent's Zendesk role; they do not replace either.
+`Zendesk:Features` — `AllowPublicReplies`, `AllowArticlePublishing`, `AllowHelpCenterStructureChanges`, `AllowMacroChanges`, `AllowUserAndOrganizationChanges`, all **off** by default in the application and all **on** in FISCAL's deployment (Terraform defaults, decided 2026-10-28) — guard the actions whose effect reaches beyond the agent: customers' inboxes, the public Help Center (published articles and who can view an article, and categories and sections, which have no draft state), every agent's macros, who can read an organisation's tickets. `ToolJson.RequireFeature` refuses with a message naming the setting so the model reports a setting rather than retrying. They sit on top of the Entra tier and the agent's Zendesk role; they do not replace either.
 
 ### Untrusted content
 
@@ -570,7 +570,7 @@ Ticket comments, article bodies and user fields are written by customers and can
 | Macros | `MacrosTools.cs` | `Search_macros`, `Preview_macro`, `Apply_macro`, `Create_macro`, `Update_macro`, `Set_macros_active` |
 | People | `UsersTools.cs`, `OrganizationsTools.cs` | `Search_users`, `Find_agent_by_name`, `Search_organizations`, `Add_user_to_organization` |
 | Configuration | `ConfigurationTools.cs` | `List_ticket_fields`, `List_ticket_forms`, `List_triggers`, `List_brands` |
-| Help Center | `HelpCenterArticlesTools.cs`, `HelpCenterStructureTools.cs`, `HelpCenterMediaTools.cs` | `Search_help_center_articles`, `Get_help_center_article`, `Create_help_center_article`, `Update_article_translation`, `Export_help_center_articles`, `List_help_center_categories`, `Create_help_center_category`, `Update_help_center_category`, `List_help_center_sections`, `Create_help_center_section`, `Update_help_center_section`, `List_user_segments`, `List_permission_groups`, `Request_help_center_image_upload`, `Create_help_center_image` |
+| Help Center | `HelpCenterArticlesTools.cs`, `HelpCenterStructureTools.cs`, `HelpCenterMediaTools.cs` | `Search_help_center_articles`, `Get_help_center_article`, `Create_help_center_article`, `Update_article_translation`, `Set_help_center_article_visibility`, `Export_help_center_articles`, `List_help_center_categories`, `Create_help_center_category`, `Update_help_center_category`, `List_help_center_sections`, `Create_help_center_section`, `Update_help_center_section`, `List_user_segments`, `List_permission_groups`, `Request_help_center_image_upload`, `Create_help_center_image` |
 
 Dropped from Swifteq's set: `get_usage` and `submit_mcp_feedback` (Swifteq billing and support).
 
