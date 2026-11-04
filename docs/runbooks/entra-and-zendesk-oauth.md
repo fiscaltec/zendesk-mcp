@@ -105,11 +105,14 @@ Run it **off the VPN**, in WSL or a Linux shell, as one paste. Set `NAME` to the
 KV=zendesk-prod-kv-uksouth; RG=zendesk-prod-rg-uksouth; NAME=zendesk-staging-oauth-client-secret
 ME=$(az ad signed-in-user show --query id -o tsv); KV_ID=$(az keyvault show -g "$RG" -n "$KV" --query id -o tsv)
 PREV=$(az keyvault show -g "$RG" -n "$KV" --query "properties.networkAcls.defaultAction" -o tsv); IP=""; CREATED=""
-close_window() { set +e; unset SECRET
-  az keyvault update -g "$RG" -n "$KV" --public-network-access Disabled -o none || echo "!!! could not disable public access: do it by hand" >&2
-  [ -n "$IP" ] && { az keyvault network-rule remove -g "$RG" -n "$KV" --ip-address "$IP/32" -o none || echo "!!! could not remove IP rule $IP" >&2; }
-  az keyvault update -g "$RG" -n "$KV" --default-action "${PREV:-Allow}" -o none || echo "!!! could not restore default action" >&2
-  [ -n "$CREATED" ] && { az role assignment delete --assignee "$ME" --role "Key Vault Secrets Officer" --scope "$KV_ID" -o none || echo "!!! could not remove your Secrets Officer role" >&2; }
+close_window() { set +e; unset SECRET; BAD=""
+  # Public access off FIRST; the default action is restored only once that has succeeded, so a
+  # failure here can never leave the vault open to every address (it stays Deny instead).
+  if az keyvault update -g "$RG" -n "$KV" --public-network-access Disabled -o none; then OFF=1; else OFF=""; BAD=1; echo "!!! could not disable public access: default action left at Deny; disable public access by hand" >&2; fi
+  [ -n "$IP" ] && { az keyvault network-rule remove -g "$RG" -n "$KV" --ip-address "$IP/32" -o none || { BAD=1; echo "!!! could not remove IP rule $IP" >&2; }; }
+  [ -n "$OFF" ] && { az keyvault update -g "$RG" -n "$KV" --default-action "${PREV:-Allow}" -o none || { BAD=1; echo "!!! could not restore default action" >&2; }; }
+  [ -n "$CREATED" ] && { az role assignment delete --assignee "$ME" --role "Key Vault Secrets Officer" --scope "$KV_ID" -o none || { BAD=1; echo "!!! could not remove your Secrets Officer role" >&2; }; }
+  [ -z "$BAD" ] || { echo "!!! window NOT fully closed: fix the lines above by hand" >&2; exit 1; }
   echo "window closed"; }
 trap close_window EXIT
 if [ "$(az role assignment list --scope "$KV_ID" --assignee-object-id "$ME" --query "length([?roleDefinitionName=='Key Vault Secrets Officer'])" -o tsv)" != 1 ]; then
@@ -134,6 +137,9 @@ only if it created it, and records the IP rule only once it is added. Notes:
 
 - `printf %s`, never a `<<<` here-string: a here-string appends a newline, `--file` stores it, and
   every connect, refresh and revoke then fails with `invalid_client`. The length check catches it.
+- If clean-up fails part-way, the block says which step failed, prints *window NOT fully closed* and
+  exits non-zero. Public access is switched off **before** the default action is restored, so a
+  failure there leaves the vault on `Deny`, never open to every address.
 - Each probe is capped with `timeout 30` and prints its error, so a network refusal, a DNS failure
   and a role still propagating can be told apart. An earlier version hid the errors and appeared to
   hang.

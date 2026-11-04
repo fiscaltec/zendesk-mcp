@@ -1049,11 +1049,14 @@ KVW_ID=$(az keyvault show -g "$RG" -n "$KV" --query id -o tsv)
 KVW_PREV=$(az keyvault show -g "$RG" -n "$KV" --query "properties.networkAcls.defaultAction" -o tsv)
 KVW_IP=""
 close_window() {
-  set +e
-  az keyvault update -g "$RG" -n "$KV" --public-network-access Disabled -o none || echo "!!! could not disable public access on $KV — do it by hand" >&2
-  [ -n "$KVW_IP" ] && { az keyvault network-rule remove -g "$RG" -n "$KV" --ip-address "$KVW_IP/32" -o none || echo "!!! could not remove IP rule $KVW_IP" >&2; }
-  az keyvault update -g "$RG" -n "$KV" --default-action "${KVW_PREV:-Allow}" -o none || echo "!!! could not restore default action ${KVW_PREV:-Allow}" >&2
-  az role assignment delete --assignee "$KVW_ME" --role "Key Vault Secrets Officer" --scope "$KVW_ID" -o none || echo "!!! could not remove your Secrets Officer role" >&2
+  set +e; KVW_BAD=""; KVW_OFF=""
+  # Public access off FIRST; the default action is restored only once that has succeeded, so a
+  # failure can never leave the vault open to every address (it stays Deny instead).
+  if az keyvault update -g "$RG" -n "$KV" --public-network-access Disabled -o none; then KVW_OFF=1; else KVW_BAD=1; echo "!!! could not disable public access on $KV: default action left at Deny; disable public access by hand" >&2; fi
+  [ -n "$KVW_IP" ] && { az keyvault network-rule remove -g "$RG" -n "$KV" --ip-address "$KVW_IP/32" -o none || { KVW_BAD=1; echo "!!! could not remove IP rule $KVW_IP" >&2; }; }
+  [ -n "$KVW_OFF" ] && { az keyvault update -g "$RG" -n "$KV" --default-action "${KVW_PREV:-Allow}" -o none || { KVW_BAD=1; echo "!!! could not restore default action ${KVW_PREV:-Allow}" >&2; }; }
+  az role assignment delete --assignee "$KVW_ME" --role "Key Vault Secrets Officer" --scope "$KVW_ID" -o none || { KVW_BAD=1; echo "!!! could not remove your Secrets Officer role" >&2; }
+  [ -z "$KVW_BAD" ] || { echo "!!! window NOT fully closed: fix the lines above by hand" >&2; exit 1; }
   echo "window closed"
 }
 trap close_window EXIT
@@ -1096,11 +1099,14 @@ KVW_ID=$(az keyvault show -g "$RG" -n "$KV" --query id -o tsv)
 KVW_PREV=$(az keyvault show -g "$RG" -n "$KV" --query "properties.networkAcls.defaultAction" -o tsv)
 KVW_IP=""
 close_window() {
-  set +e
-  az keyvault update -g "$RG" -n "$KV" --public-network-access Disabled -o none || echo "!!! could not disable public access on $KV — do it by hand" >&2
-  [ -n "$KVW_IP" ] && { az keyvault network-rule remove -g "$RG" -n "$KV" --ip-address "$KVW_IP/32" -o none || echo "!!! could not remove IP rule $KVW_IP" >&2; }
-  az keyvault update -g "$RG" -n "$KV" --default-action "${KVW_PREV:-Allow}" -o none || echo "!!! could not restore default action ${KVW_PREV:-Allow}" >&2
-  az role assignment delete --assignee "$KVW_ME" --role "Key Vault Secrets Officer" --scope "$KVW_ID" -o none || echo "!!! could not remove your Secrets Officer role" >&2
+  set +e; KVW_BAD=""; KVW_OFF=""
+  # Public access off FIRST; the default action is restored only once that has succeeded, so a
+  # failure can never leave the vault open to every address (it stays Deny instead).
+  if az keyvault update -g "$RG" -n "$KV" --public-network-access Disabled -o none; then KVW_OFF=1; else KVW_BAD=1; echo "!!! could not disable public access on $KV: default action left at Deny; disable public access by hand" >&2; fi
+  [ -n "$KVW_IP" ] && { az keyvault network-rule remove -g "$RG" -n "$KV" --ip-address "$KVW_IP/32" -o none || { KVW_BAD=1; echo "!!! could not remove IP rule $KVW_IP" >&2; }; }
+  [ -n "$KVW_OFF" ] && { az keyvault update -g "$RG" -n "$KV" --default-action "${KVW_PREV:-Allow}" -o none || { KVW_BAD=1; echo "!!! could not restore default action ${KVW_PREV:-Allow}" >&2; }; }
+  az role assignment delete --assignee "$KVW_ME" --role "Key Vault Secrets Officer" --scope "$KVW_ID" -o none || { KVW_BAD=1; echo "!!! could not remove your Secrets Officer role" >&2; }
+  [ -z "$KVW_BAD" ] || { echo "!!! window NOT fully closed: fix the lines above by hand" >&2; exit 1; }
   echo "window closed"
 }
 trap close_window EXIT
