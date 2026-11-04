@@ -76,6 +76,9 @@ public static class AmbientConfiguration
     /// </summary>
     public static readonly IReadOnlyList<string> LibraryPrefixes = ["OTEL_"];
 
+    /// <summary>The prefixes of the host's own environment-variable providers.</summary>
+    private static readonly string[] HostPrefixes = ["ASPNETCORE_", "DOTNET_"];
+
     /// <summary>The variables this process inherited and <see cref="ClearOnLoad"/> removed, for diagnosis.</summary>
     public static IReadOnlyList<string> Cleared { get; private set; } = [];
 
@@ -118,7 +121,7 @@ public static class AmbientConfiguration
 
     private static string StripHostPrefix(string name)
     {
-        foreach (var prefix in (ReadOnlySpan<string>)["ASPNETCORE_", "DOTNET_"])
+        foreach (var prefix in HostPrefixes)
         {
             if (name.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
             {
