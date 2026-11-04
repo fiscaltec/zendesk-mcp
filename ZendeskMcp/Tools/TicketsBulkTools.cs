@@ -486,12 +486,9 @@ public static class TicketsBulkTools
     {
         var read = await zendesk.GetAsync("/api/v2/tickets/show_many", ToolJson.Query(("ids", ToolJson.Ids(ids))), cancellationToken: cancellationToken);
         var found = new Dictionary<long, JsonNode>();
-        foreach (var ticket in read["tickets"] as JsonArray ?? [])
+        foreach (var (id, ticket) in WithIds(read["tickets"]))
         {
-            if (ticket is not null && ToolJson.Long(ticket["id"]) is { } id)
-            {
-                found[id] = ticket;
-            }
+            found[id] = ticket;
         }
 
         return found;
@@ -562,7 +559,7 @@ public static class TicketsBulkTools
             solving = await TicketWriteHelpers.IsSolvingAsync(zendesk, ToolJson.String(change.Fields["status"]), null, cancellationToken);
         }
 
-        var resultingType = change.Fields.ContainsKey("type") ? ToolJson.String(change.Fields["type"]) : ToolJson.String(ticket["type"]);
+        var resultingType = ToolJson.String(change.Fields.TryGetPropertyValue("type", out var newType) ? newType : ticket["type"]);
         return solving && resultingType == "problem" && ToolJson.String(ticket["status"]) is not ("solved" or "closed");
     }
 
@@ -630,12 +627,9 @@ public static class TicketsBulkTools
         else
         {
             var results = new Dictionary<long, JsonNode>();
-            foreach (var result in job["results"] as JsonArray ?? [])
+            foreach (var (id, result) in WithIds(job["results"]))
             {
-                if (result is not null && ToolJson.Long(result["id"]) is { } id)
-                {
-                    results.TryAdd(id, result);
-                }
+                results.TryAdd(id, result);
             }
 
             foreach (var p in sent)
@@ -798,12 +792,9 @@ public static class TicketsBulkTools
     private static Dictionary<long, JsonNode?> CurrentCustomFields(JsonNode ticket)
     {
         var values = new Dictionary<long, JsonNode?>();
-        foreach (var field in ticket["custom_fields"] as JsonArray ?? [])
+        foreach (var (id, field) in WithIds(ticket["custom_fields"]))
         {
-            if (field is not null && ToolJson.Long(field["id"]) is { } id)
-            {
-                values.TryAdd(id, field["value"]);
-            }
+            values.TryAdd(id, field["value"]);
         }
 
         return values;
@@ -829,6 +820,14 @@ public static class TicketsBulkTools
         JsonValue v when v.TryGetValue<string>(out var s) => s,
         _ => node.ToJsonString(),
     };
+
+    /// <summary>The objects in a JSON array that carry a whole-number <c>id</c>, with it.</summary>
+    private static IEnumerable<(long Id, JsonNode Node)> WithIds(JsonNode? array) =>
+        (array as JsonArray ?? [])
+            .OfType<JsonNode>()
+            .Select(node => (Id: ToolJson.Long(node["id"]), Node: node))
+            .Where(x => x.Id is not null)
+            .Select(x => (x.Id!.Value, x.Node));
 
     private static string Text(JsonNode? node) => node?.ToJsonString() ?? "null";
 

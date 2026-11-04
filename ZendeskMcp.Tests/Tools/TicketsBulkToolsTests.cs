@@ -66,9 +66,8 @@ public class TicketsBulkToolsTests
     private static async Task<JsonNode> PreviewThenConfirm(Func<string?, Task<string>> call)
     {
         var preview = JsonNode.Parse(await call(null))!;
-        var confirmation = preview["confirmation"]?.GetValue<string>();
-        confirmation.Should().NotBeNullOrEmpty("a preview with something to change and nothing to refuse offers a confirmation");
-        return JsonNode.Parse(await call(confirmation))!;
+        preview["confirmation"].Should().NotBeNull("a preview with something to change and nothing to refuse offers a confirmation");
+        return JsonNode.Parse(await call(preview["confirmation"]!.GetValue<string>()))!;
     }
 
     private static void NoWrites(FakeZendesk fake) =>
