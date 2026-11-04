@@ -10,6 +10,15 @@ A Model Context Protocol (MCP) server in C# giving FISCAL staff access to Zendes
 
 **Provenance.** Issue references written `vitally-mcp#NNN` point at fiscaltec/vitally-mcp, where the lesson was learnt; the design and the code that carries it came across together. vitally-mcp's own `CLAUDE.md` holds the full history — dates, measurements, incident write-ups — behind the rules stated here more briefly. When this file and that one disagree about a shared component, check the code here.
 
+**Keeping in step with vitally-mcp.** The port of everything outside the source and test folders (workflows, scripts, templates, runbooks, `CLAUDE.md` sections) is current to vitally-mcp **`0c6d4e1`** (2026-10-26), audited on 2026-11-04 in #10, whose decision table records what was ported, adapted or judged not applicable, and why. Findings that flow the other way go to #17. To check for drift, diff from that commit rather than re-auditing:
+
+```bash
+# One command: a failed or skipped fetch leaves a stale origin/main, which prints nothing with exit 0 — not "no drift".
+git -C <vitally-mcp clone> fetch origin main && git -C <vitally-mcp clone> log --oneline 0c6d4e1..origin/main -- . ':!VitallyMcp' ':!VitallyMcp.Tests'
+```
+
+That lists vitally-mcp's non-source changes since this audit; decide each as #10 did, then move the commit named here. Run on 2026-11-04, it listed nothing: the one later commit, `fdc6f5e` (#197), touches only the two `.csproj` files. ⚠️ The clone must hold history back to `0c6d4e1`: in a `--depth 1` clone the command fails with `fatal: bad revision` (exit 128), which is not "no drift". Check the exit status, not just the empty output. Source drift (a fix to a shared component such as the OAuth proxy, `ToolAuthorizer` or the Graph resolver) is out of this command's scope: list it with the same range over `-- VitallyMcp`, and read each commit, since the code here was ported and renamed rather than copied file for file.
+
 **Key characteristics:**
 - 45 tools over tickets, KPI/SLA/CSAT reporting, macros, users and organisations, configuration and the Help Center — see *Tools*.
 - **Per-user Zendesk OAuth.** Every Zendesk call is made with the signed-in person's own Zendesk token. There is no shared Zendesk credential in a deployed target, so Zendesk attributes every change to the agent and applies their role, group and brand restrictions. This is the main architectural difference from vitally-mcp, which calls Vitally with one shared key.
@@ -500,7 +509,7 @@ These components are ported without behavioural change, and their rules hold her
 - **Upstream endpoints come from OIDC discovery**, checked against `Authority` (§4.3), cached 12 h with last-known-good fallback; startup refuses to boot without them (vitally-mcp#104).
 - **`/oauth/token` services only `authorization_code` and `refresh_token`** — it injects the confidential secret, so any other grant would mint tokens without a sign-in.
 - **Entitlement comes from live Entra group membership via Graph** (`Authorization:LiveGroupCheck`, transitive, keyed on `oid` — never `sub`), fresh → stale (up to `LiveGroupStaleSeconds`) → deny. No claim authorises while the live check is on (vitally-mcp#106, vitally-mcp#108, vitally-mcp#156).
-- **`ZendeskService.SendAsync` is the enforcement point**; `[Authorize]` discovery filtering shares `HasEffectivePermissionAsync` with it so they cannot disagree. `Authorization:ReadOnly` denies every non-GET for everyone.
+- **`ZendeskService.SendAsync` is the enforcement point**; `[Authorize]` discovery filtering shares `HasEffectivePermissionAsync` with it so they cannot disagree. `Authorization:ReadOnly` denies every non-GET for everyone; `docs/runbooks/read-only-and-rbac.md` says what it is and is not for, and how to verify staging is serving it.
 - **Log levels are a security control and live in `Program.cs`**, not `appsettings.json` (excluded from the image) or environment variables (lost on a recreate). Failure records log the exception *type*, the status and the resource *type* — never a message, an attached exception, a body or the rest of the path (vitally-mcp#94).
 - **Four audit record shapes** — tool call (primary: caller `oid`, tool, arguments, record ids touched, tier, staleness, outcome, correlation id), action (per upstream call), service denial, tier denial. Tool arguments are recorded; upstream response bodies never are. Records route to `AppEvents` when `ApplicationInsights__ConnectionString` is set, and must not depend on trace sampling (vitally-mcp#147, vitally-mcp#178).
 
@@ -760,6 +769,150 @@ The same shape as vitally-mcp — Azure Container Apps (production warm, staging
 **What would change the answer:** a protection rule on `production` that `staging` lacks — required reviewers, a wait timer, a narrower branch policy. The shared identity is then a way round that gate. That happened briefly on 2026-10-29: a production-only reviewer was added and removed the same day for this reason. If production needs a human gate, first split the identity — a `zendesk-staging-id-uksouth` holding every role `identity.tf` gives the shared one, scoped to staging where the scope allows: `Key Vault Secrets Officer`, `AcrPull`, the custom *Zendesk MCP ACR importer* role (deploy.yml's `az acr import`), `Monitoring Metrics Publisher` (without it staging's audit records are dropped silently), `ContainerApp Reader` on the resource group (the staging gate), Graph `GroupMember.Read.All` (admin consent) and `Contributor` on the staging app only — with the staging federated credential and the staging app's identity moved to it; then add the reviewer. Record that in `identity.tf` and the runbook (Phases 4, 9, 10).
 
 These settings cannot be read or changed from a Claude Code cloud session: its GitHub proxy refuses the environments, variables and secrets APIs. Use `gh` from Cloud Shell or WSL. #17 tracks which of the build's findings vitally-mcp should take.
+
+### Staging rides the release train
+
+Each nightly tag is deployed to staging first, then to production with the **same image digest**,
+and a failed staging smoke stops production (the design is vitally-mcp#171's; `release.yml` and
+`staging-gate.yml`). So staging is normally on the same tag as production. In two cases it is not, and
+both are normal, so check its image before concluding anything from how it behaves:
+
+| Case | What the train does | How you know |
+|---|---|---|
+| **Pinned**: `STAGING_PINNED` on the `staging` GitHub environment is non-empty | Skips staging and ships production. The value is the reason, printed as a notice on every run that cuts a tag while it is set | `gh variable list --env staging` |
+| **Absent**: `check-serving-revisions.sh` exit 3, because `az` says the app does not exist | Skips staging and ships production | the gate job's `Staging absent` notice. ⚠️ A wrong `CONTAINER_APP` on the `staging` environment (it must be `zendesk-staging-ca-uksouth`) reads the same way if no app has that name. If it names another **existing** app (both apps are in `zendesk-prod-rg-uksouth`), the gate says deploy and the train's staging job rolls **that** app |
+
+Anything else the gate cannot establish, a wrong `RESOURCE_GROUP` included, fails the run rather
+than skipping. Pin staging whenever it
+is running something ahead of production, such as a branch mid-validation, which the next nightly tag
+would otherwise overwrite:
+
+```bash
+gh variable set STAGING_PINNED --env staging --body "validating <branch> for #<n>"   # pin
+gh variable delete STAGING_PINNED --env staging                                     # unpin
+```
+
+⚠️ **Unpinning does not restore staging.** Tracking resumes from the **next** tag, which in a quiet week
+can be days away. To catch it up now, dispatch the current tag to staging **with its digest** (from the
+production job's summary in the last train run), so nothing is rebuilt over the tag production runs:
+
+```bash
+gh workflow run deploy.yml -f target=staging -f ref=<tag> -f image_tag=<tag> -f image_digest=sha256:<…>
+```
+
+These are `gh` calls on GitHub's environments and Actions APIs, so run them from Cloud Shell or WSL.
+A Claude Code cloud session's proxy refuses the environments and variables APIs (see *GitHub
+environments* above), and these commands have not been run from this repository. vitally-mcp runs
+the same ones against its identically shaped gate.
+
+### The deploy smoke covers the OAuth metadata, not just liveness
+
+`deploy.yml` runs `.github/scripts/verify-oauth-metadata.sh <origin>` after the revision is live and
+before the rollback step, so a failure reverts the revision. `/health` == 200 and unauthenticated
+`/mcp` == 401 both stay green while the metadata documents are wrong. A wrong `issuer`, a broken
+`issuer` ↔ `authorization_servers` pairing, a bad `jwks_uri`, an `authorization_endpoint` that is not
+this origin's `/oauth/authorize`, a dropped `iss` flag, a null-serialised optional in the
+protected-resource documents, or (added here, not in vitally-mcp) a `resource` that names another
+target would each break every MCP client at its next sign-in **and
+deploy green** (vitally-mcp#110).
+
+Run it by hand against any origin; that is why it is a script and not inline YAML:
+
+```bash
+bash .github/scripts/verify-oauth-metadata.sh https://zendesk-mcp.fiscaltec.com
+bash .github/scripts/verify-oauth-metadata.sh https://zendesk-mcp-staging.fiscaltec.com
+bash .github/scripts/verify-oauth-metadata.sh http://localhost:5099   # a local run
+```
+
+Run on 2026-11-04: **13 assertions pass** on both deployed origins. As a negative control,
+`https://ZENDESK-MCP.fiscaltec.com` reaches the same server but **fails with 6 problems** and exit 1,
+because nothing is normalised.
+
+Things about it that are deliberate, and should not be "tidied":
+
+- **The whole assertion set retries, not just the fetches.** Container Apps reports a new revision
+  Healthy *before* ingress finishes shifting traffic. So a check that runs at once can be answered by
+  the **old** revision, with a valid document carrying the previous configuration. In vitally-mcp,
+  asserting once turned that race into the rollback of a healthy deploy. Failures are emitted only
+  after the final attempt.
+- **No normalisation anywhere.** Trailing slashes and case are compared literally, because that is
+  what clients do.
+- **A cold staging start prints alarming lines, not usually a failure.** Staging scales to zero and
+  the script retries each fetch only twice, so a cold start can print `200 but the body is not valid
+  JSON` fetch lines. The whole set retries six times (`ATTEMPTS`), so it fails only if the cold start
+  outlasts every attempt. CI warms the replica with the `/health` smoke first; by hand, run
+  `curl <origin>/health` before reading anything into a failure.
+- **It is invoked through `bash`**, not by its executable bit. An edit on Windows with
+  `core.filemode=false` can silently drop the mode.
+
+### Verifying an identity change without a browser
+
+Re-run these after any change to the Entra app, the `OAuth__*` settings or the proxy. Together they
+cover every failure mode except "a real person cannot sign in", which needs a person (#4's runbook).
+Steps 3–7 are `curl` against the public origin, so they run anywhere, a cloud session included. Steps
+1 and 3–7 were run against staging on 2026-11-04, with the negative controls shown.
+
+1. `bash .github/scripts/verify-oauth-metadata.sh <origin>` (above).
+2. The new revision **starting at all** proves `StartupGuards` fetched Entra's discovery document and
+   matched its `issuer` to `OAuth:Authority`. A malformed or unreachable authority is a boot failure,
+   not a sign-in failure. It does not prove the authority names the **right** tenant: a valid
+   authority for another tenant boots happily. Step 4 checks that. ⚠️ The public origin cannot show this: if the new revision fails to boot, the previous one
+   may still be serving, and every curl here passes. Check the revision itself
+   (`az containerapp revision list -n <app> -g zendesk-prod-rg-uksouth --query "[].{name:name, health:properties.healthState, traffic:properties.trafficWeight}"`).
+3. `POST /oauth/register` (any `client_name`, a loopback `redirect_uris`) returns a `client_id`. This
+   is the shared Entra appId, by design: every client gets the same one.
+4. `GET /oauth/authorize?…` answers **302** given every parameter: `response_type=code`, the
+   `client_id` from step 3, a loopback `redirect_uri`, a `state` (without one it is **400** `Missing
+   redirect_uri or state`), a real 43-character S256 `code_challenge` with
+   `code_challenge_method=S256` (Entra rejects a short one with `AADSTS501491` at step 5), a `scope`,
+   and `resource=<origin>/`. Assert on the `Location`: it starts
+   `https://login.microsoftonline.com/75bd6050-92a8-4bde-a406-50000b310c86/` (FISCAL's tenant,
+   `tenant_id` in `infra/terraform/variables.tf`), **`resource` is absent**, `scope` carries
+   `https://zendesk-mcp.fiscaltec.com/mcp.access` after the client's own scopes, and `redirect_uri` is
+   the origin's own `/oauth/callback`. The scope names production's App ID URI on **both** targets,
+   because one app registration serves both.
+5. **Follow that `Location` to Entra** and read the **body**: `urlLogin` means every parameter was
+   accepted, and an `AADSTS` code means one was not. ⚠️ Entra answers **HTTP 200 either way**, so the
+   status code proves nothing. Negative control: the same URL with `client_id` set to all zeros
+   returned 200 carrying `AADSTS700038`.
+6. `/oauth/authorize` with a `resource` this origin does not publish (production's, asked of staging)
+   → **400 `invalid_target`**. With the published one → 302 (step 4). Terminating the parameter must
+   not have become ignoring it. A `redirect_uri` that is not loopback or allow-listed → **400**
+   `redirect_uri is not allowed`.
+7. `POST /mcp` unauthenticated → **401** with `WWW-Authenticate: Bearer resource_metadata="<origin>/.well-known/oauth-protected-resource/mcp"`.
+   With a junk bearer → 401 plus `error="invalid_token"`.
+
+What is left for a person, because it needs a real token: sign-in per tier, `tools/list` as a
+**department-nested** user, a reader denied a write tool, and decoding the token for `aud`, `iss`,
+`oid` and `upn`. #4 writes that up as `docs/runbooks/zendesk-oauth-staging-validation.md`.
+
+#### If an identity change fails
+
+Fix it forwards, in the Entra app registration, the Gate 1 assignments or the Container App
+configuration. There is no other provider to revert to.
+
+⚠️ **The failure that hides from every automated check is a client-secret mismatch.** It applies to
+**both** OAuth clients here:
+
+- **Entra:** the app boots, `/health` is 200, unauthenticated `/mcp` is 401, and every check above
+  passes, because none of them presents the secret. It surfaces only at `/oauth/token`, as
+  `invalid_client`, for everyone at once. Both targets send the Container App secret
+  `entra-oauth-client-secret`, a **copy** of Key Vault's `entra-mcp-client-secret`, so changing the
+  vault alone changes nothing the app sends (vitally-mcp#138). And `az containerapp secret set` does
+  not roll a revision: production's warm replica keeps the old value until restarted, which
+  staging's cold starts hide.
+- **Zendesk:** existing connections keep working until their access token is within two minutes of
+  expiry (`ZendeskCredentialProvider`'s refresh skew), because the secret is used only to connect and
+  to refresh. Revoking (`Disconnect_zendesk`, a refused login) sends only the access token, so it
+  still works with a wrong secret, unless the token has to be refreshed first. Then each refresh fails, by Zendesk's OAuth
+  documentation with `invalid_client` (docs-checked, not live-tested).
+  That is deliberately not among the errors that forget a grant (`ZendeskCredentialProvider`), so
+  the call fails with the SDK's generic error, nobody is disconnected, and fixing the secret recovers
+  everyone, once the app's cached copy expires (`TokenCacheDuration`, 5 minutes) or the revision
+  restarts. New connections fail at once. Each target has its own client and vault secret since #27.
+  See `docs/runbooks/entra-and-zendesk-oauth.md`, *Rotate a client secret*.
+
+Verify a secret change by signing in and connecting, never by a health probe.
 
 ### Freezing deploys
 
