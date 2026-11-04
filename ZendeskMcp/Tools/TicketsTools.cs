@@ -483,16 +483,15 @@ public static class TicketsTools
         // ticket is read before any conversation, so the ticket ids are the first ids this call's
         // audit record captures: comment ids would otherwise fill its id cap after one long ticket,
         // and the record is the only trace of who read which ticket.
-        var tickets = await AnalyticsSupport.ForEachBoundedAsync(ids, async (id, token) =>
+        var tickets = await AnalyticsSupport.ForEachBoundedAsync(ids, async Task<(JsonNode? Ticket, JsonObject? Failure)> (id, token) =>
         {
             try
             {
-                var ticket = (await zendesk.GetAsync($"/api/v2/tickets/{Id(id)}", cancellationToken: token))["ticket"];
-                return (Ticket: ticket, Failure: (JsonObject?)null);
+                return ((await zendesk.GetAsync($"/api/v2/tickets/{Id(id)}", cancellationToken: token))["ticket"], null);
             }
             catch (HttpRequestException ex)
             {
-                return (Ticket: (JsonNode?)null, Failure: BulkFailure(id, ex));
+                return (null, BulkFailure(id, ex));
             }
         }, cancellationToken);
 
