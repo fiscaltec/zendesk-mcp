@@ -106,6 +106,34 @@ public class AuditRecordIdsTests
     }
 
     [Fact]
+    public void Extract_NamesTheWrappedRecord_NotItsSideloads()
+    {
+        // Get_ticket always asks for `include=users,organizations`, so its response is one wrapped
+        // record with arrays beside it. Those arrays are sideloads: taking the first of them would
+        // record the requester and assignee as the records read, and miss the ticket itself.
+        const string raw = """{"ticket":{"id":101,"subject":"A","tags":["login"]},"users":[{"id":701},{"id":501}],"organizations":[{"id":601}]}""";
+
+        var result = AuditRecordIds.Extract(raw);
+
+        result.Ids.Should().Equal("101");
+        result.RecordsFetched.Should().Be(1);
+        result.IdsAvailable.Should().BeTrue();
+    }
+
+    [Fact]
+    public void Extract_NamesTheWrappedRecord_WhenItsSideloadsAreEmpty()
+    {
+        // An empty sideload must not read as an empty result set either: the ticket was still read.
+        const string raw = """{"ticket":{"id":101},"users":[],"organizations":[]}""";
+
+        var result = AuditRecordIds.Extract(raw);
+
+        result.Ids.Should().Equal("101");
+        result.RecordsFetched.Should().Be(1);
+        result.IdsAvailable.Should().BeTrue();
+    }
+
+    [Fact]
     public void Extract_NamesTheRecordOnABareGetByIdResponse()
     {
         var result = AuditRecordIds.Extract("""{"id":42,"name":"Acme","tags":["vip"]}""");
@@ -236,6 +264,55 @@ public class AuditRecordIdsTests
         // A fabricated identifier is far worse than an honest gap: it resolves to nothing and cannot be
         // told apart from a real one.
         var result = AuditRecordIds.FromMutationUrl(HttpMethod.Put, url);
+
+        result.IdsAvailable.Should().BeFalse();
+        result.Ids.Should().BeEmpty();
+    }
+
+    [Fact]
+    public void Extract_NeverReadsAJobsOwnIdAsARecord()
+    {
+        // A job_status is not a record: its id is a job token. Read as a wrapped single record it
+        // would put a fabricated record id in the trail (the shape Bulk_update_tickets gets back).
+        var result = AuditRecordIds.Extract("""{"job_status":{"id":"8b726e606741012ffc2d782bcb7848fe","status":"queued","results":null}}""");
+
+        result.IdsAvailable.Should().BeFalse();
+        result.Ids.Should().BeEmpty();
+    }
+
+    [Fact]
+    public void Extract_NamesTheRecordsAFinishedJobReports()
+    {
+        var result = AuditRecordIds.Extract("""{"job_status":{"id":"8b72","status":"completed","results":[{"id":101,"success":true},{"id":102,"error":"TicketUpdateFailed"}]}}""");
+
+        result.Ids.Should().Equal("101", "102");
+        result.Ids.Should().NotContain("8b72");
+    }
+
+    [Fact]
+    public void FromBulkUpdateBody_NamesTheTicketsTheRequestLists()
+    {
+        // update_many answers with a job, so the request body is the only place the touched tickets
+        // appear at the moment of the write.
+        var result = AuditRecordIds.FromBulkUpdateBody(HttpMethod.Put, "https://acme.zendesk.com/api/v2/tickets/update_many",
+            """{"tickets":[{"id":101,"status":"solved"},{"id":102,"tags":["a"]}]}""");
+
+        result.IdsAvailable.Should().BeTrue();
+        result.Ids.Should().Equal("101", "102");
+        result.RecordsFetched.Should().Be(2);
+    }
+
+    [Theory]
+    [InlineData("PUT", "https://acme.zendesk.com/api/v2/tickets/update_many", """{"tickets":[{"id":101},{"status":"open"}]}""")]  // one entry without an id
+    [InlineData("PUT", "https://acme.zendesk.com/api/v2/tickets/update_many", """{"tickets":[{"id":"101"}]}""")]                 // not a number
+    [InlineData("PUT", "https://acme.zendesk.com/api/v2/tickets/update_many", """{"tickets":[{"id":-1}]}""")]                    // negative
+    [InlineData("PUT", "https://acme.zendesk.com/api/v2/tickets/update_many", """{"ticket":{"status":"open"}}""")]
+    [InlineData("PUT", "https://acme.zendesk.com/api/v2/tickets/update_many", "not json")]
+    [InlineData("PUT", "https://acme.zendesk.com/api/v2/tickets/101", """{"tickets":[{"id":101}]}""")]                           // not a bulk update
+    [InlineData("POST", "https://acme.zendesk.com/api/v2/tickets/update_many", """{"tickets":[{"id":101}]}""")]                  // not a PUT
+    public void FromBulkUpdateBody_IsAllOrNothing(string method, string url, string body)
+    {
+        var result = AuditRecordIds.FromBulkUpdateBody(new HttpMethod(method), url, body);
 
         result.IdsAvailable.Should().BeFalse();
         result.Ids.Should().BeEmpty();
