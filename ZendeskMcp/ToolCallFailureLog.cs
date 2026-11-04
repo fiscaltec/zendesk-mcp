@@ -141,6 +141,17 @@ public static class ToolCallFailureLog
             case UnauthorizedAccessException:
                 return;
 
+            // The person has no usable Zendesk connection (never connected, revoked, or a refresh
+            // refused), so the tool answered with a connect link. That is the system working — every
+            // new user and every refused refresh lands here — and logging it at Error as "failed
+            // unexpectedly" (as it was until 2026-11-04) buries real faults. The message is never
+            // logged: it carries the link, a one-time capability.
+            case ZendeskConnectionRequiredException:
+                logger.LogInformation(
+                    "Tool call {ToolName} needs a Zendesk connection; a connect link was returned: {ExceptionType} correlation={CorrelationId}",
+                    toolName, type, correlationId);
+                return;
+
             // The caller's input was rejected before anything reached Zendesk. Worth seeing — a tool
             // description that keeps producing bad arguments is a content defect — but not a fault.
             // The PLAIN type only: that is what this code throws for bad input and what the SDK throws
