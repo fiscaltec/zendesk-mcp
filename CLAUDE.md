@@ -505,8 +505,9 @@ record.
 Three caveats on reading them, each of which would otherwise send a query wrong (the code cites them
 here, in `ZendeskMetrics`):
 
-- **Calls that throw have no duration.** A timeout, a DNS failure or a refused connection never
-  reaches `LogAction`, so there is no `ZendeskUpstreamCall` row. Timeouts are the slowest calls of
+- **Calls that fail before a response have no duration.** A timeout, a DNS failure or a refused
+  connection never reaches `LogAction`, so there is no `ZendeskUpstreamCall` row. (A non-2xx
+  response is different: `SendAsync` logs it, with its duration, before throwing.) Timeouts are the slowest calls of
   all; look for them in the failure records. The clock also starts *after* the caller's credential
   is resolved, so a cold Key Vault read of the person's token, or a token refresh, shows in the
   tool-call duration and in no upstream one. The same goes for recovery after a `401`: the rejected
@@ -570,7 +571,11 @@ querying:
 
 **Spans are sanitised before export by `SpanSanitisingProcessor`**, because they go to
 `AppRequests` / `AppDependencies`. Those tables have their own retention, and tool arguments may not
-go there. They share a workspace with the audit records, so table-level RBAC cannot keep them apart. The MCP branch works from an **allowlist**, not a list of known leaks. vitally-mcp's probes
+go there. They share a workspace with the audit records. Table-level RBAC can grant a narrow reader one
+table, but Azure RBAC only ever grants: it cannot remove `AppEvents` from anyone holding inherited
+workspace-wide read, which is how most readers get access. So in practice it does not keep the tables
+apart. vitally-mcp reviewed who holds that read on its workspace (vitally-mcp#146); this workspace has
+not been reviewed the same way. The MCP branch works from an **allowlist**, not a list of known leaks. vitally-mcp's probes
 of the SDK found caller text reaching spans by seven routes:
 
 | Where | What the SDK does | The processor |
