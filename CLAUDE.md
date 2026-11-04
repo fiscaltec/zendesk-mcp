@@ -707,8 +707,9 @@ Steps 3–7 are `curl` against the public origin, so they run anywhere, a cloud 
 
 1. `bash .github/scripts/verify-oauth-metadata.sh <origin>` (above).
 2. The new revision **starting at all** proves `StartupGuards` fetched Entra's discovery document and
-   matched its `issuer` to `OAuth:Authority`. A wrong authority is a boot failure, not a sign-in
-   failure. ⚠️ The public origin cannot show this: if the new revision fails to boot, the previous one
+   matched its `issuer` to `OAuth:Authority`. A malformed or unreachable authority is a boot failure,
+   not a sign-in failure. It does not prove the authority names the **right** tenant: a valid
+   authority for another tenant boots happily. Step 4 checks that. ⚠️ The public origin cannot show this: if the new revision fails to boot, the previous one
    may still be serving, and every curl here passes. Check the revision itself
    (`az containerapp revision list -n <app> -g zendesk-prod-rg-uksouth --query "[].{name:name, health:properties.healthState, traffic:properties.trafficWeight}"`).
 3. `POST /oauth/register` (any `client_name`, a loopback `redirect_uris`) returns a `client_id`. This
@@ -717,8 +718,9 @@ Steps 3–7 are `curl` against the public origin, so they run anywhere, a cloud 
    `client_id` from step 3, a loopback `redirect_uri`, a `state` (without one it is **400** `Missing
    redirect_uri or state`), a real 43-character S256 `code_challenge` with
    `code_challenge_method=S256` (Entra rejects a short one with `AADSTS501491` at step 5), a `scope`,
-   and `resource=<origin>/`. Assert on the `Location` query: the host is
-   `login.microsoftonline.com`, **`resource` is absent**, `scope` carries
+   and `resource=<origin>/`. Assert on the `Location`: it starts
+   `https://login.microsoftonline.com/75bd6050-92a8-4bde-a406-50000b310c86/` (FISCAL's tenant,
+   `tenant_id` in `infra/terraform/variables.tf`), **`resource` is absent**, `scope` carries
    `https://zendesk-mcp.fiscaltec.com/mcp.access` after the client's own scopes, and `redirect_uri` is
    the origin's own `/oauth/callback`. The scope names production's App ID URI on **both** targets,
    because one app registration serves both.
@@ -752,8 +754,10 @@ configuration. There is no other provider to revert to.
   vault alone changes nothing the app sends (vitally-mcp#138). And `az containerapp secret set` does
   not roll a revision: production's warm replica keeps the old value until restarted, which
   staging's cold starts hide.
-- **Zendesk:** existing connections keep working until their access token expires, because the
-  secret is used only to connect, refresh and revoke. Then each refresh fails, by Zendesk's OAuth
+- **Zendesk:** existing connections keep working until their access token is within two minutes of
+  expiry (`ZendeskCredentialProvider`'s refresh skew), because the secret is used only to connect and
+  to refresh. Revoking (`Disconnect_zendesk`, a refused login) sends only the access token, so it
+  still works with a wrong secret, unless the token has to be refreshed first. Then each refresh fails, by Zendesk's OAuth
   documentation with `invalid_client` (docs-checked, not live-tested).
   That is deliberately not among the errors that forget a grant (`ZendeskCredentialProvider`), so
   the call fails with the SDK's generic error, nobody is disconnected, and fixing the secret recovers
