@@ -203,8 +203,8 @@ q 'AzureDiagnostics | where ResourceProvider == "MICROSOFT.KEYVAULT" and TimeGen
 q 'AppTraces | where TimeGenerated > ago(1h) and AppRoleName == "zendesk-staging-ca-uksouth" and Message has "Zendesk token revocation" | project TimeGenerated, Message'
 ```
 
-Expect a `SecretSet` 200 at the disconnect (the tombstone; two `SecretSet`s if the access token had
-expired and was refreshed first), preceded by a `SecretGet` only if the grant was not already cached
+Expect one `SecretSet` 200 at the disconnect (the tombstone; since #59 an expired access token is
+renewed and the renewed one revoked without being stored, so there is no second `SecretSet`), preceded by a `SecretGet` only if the grant was not already cached
 (a warm cache answers without Key Vault, so its absence there is not a failure); a `SecretGet` 200 at
 the sub-step 3 read, which is the uncached read of the tombstone; **no** `SecretDelete` — a delete would block
 reconnecting for the 90-day purge window — and no `Zendesk token revocation …` warning of either form. On 2026-11-04 this showed that a

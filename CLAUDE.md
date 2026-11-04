@@ -900,10 +900,12 @@ configuration. There is no other provider to revert to.
 - **Zendesk:** existing connections keep working until their access token is within two minutes of
   expiry (`ZendeskCredentialProvider`'s refresh skew), because the secret is used only to connect and
   to refresh. Revoking (`Disconnect_zendesk`, a refused login) sends only the access token, so it
-  still works with a wrong secret, unless the token has to be refreshed first. Then each refresh fails, by Zendesk's OAuth
+  still works with a wrong secret, unless Zendesk answers 401 (an expired token) and the grant has to
+  be renewed to be revoked; then `Disconnect_zendesk` forgets the grant and reports the revocation as
+  unconfirmed. Each refresh fails, by Zendesk's OAuth
   documentation with `invalid_client` (docs-checked, not live-tested).
   That is deliberately not among the errors that forget a grant (`ZendeskCredentialProvider`), so
-  the call fails with the SDK's generic error, nobody is disconnected, and fixing the secret recovers
+  a tool call fails with the SDK's generic error, nobody is disconnected, and fixing the secret recovers
   everyone, once the app's cached copy expires (`TokenCacheDuration`, 5 minutes) or the revision
   restarts. New connections fail at once. Each target has its own client and vault secret since #27.
   See `docs/runbooks/entra-and-zendesk-oauth.md`, *Rotate a client secret*.

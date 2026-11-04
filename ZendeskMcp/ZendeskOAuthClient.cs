@@ -171,14 +171,27 @@ public sealed class ZendeskOAuthClient(
             return false;
         }
 
+        // The renewed grant is held by nobody: if this revocation fails it stays live at Zendesk for
+        // the whole refresh lifetime. So a failure is retried once. A 401 is not: the token was issued
+        // moments ago, so a 401 now is unexplained, and is reported as unconfirmed rather than revoked.
         try
         {
-            // Just issued, so a 401 now would be unexplained: unconfirmed, not revoked.
-            return await SendRevocationAsync(renewed.AccessToken, cleanup.Token) == RevocationResult.Revoked;
+            var result = await SendRevocationAsync(renewed.AccessToken, cleanup.Token);
+            if (result == RevocationResult.Failed)
+            {
+                result = await SendRevocationAsync(renewed.AccessToken, cleanup.Token);
+            }
+
+            if (result != RevocationResult.Revoked)
+            {
+                logger.LogError("Zendesk did not confirm revoking a renewed grant ({RevocationResult}); it may be live with nobody holding it", result);
+            }
+
+            return result == RevocationResult.Revoked;
         }
         catch (OperationCanceledException)
         {
-            logger.LogWarning("Revoking a renewed Zendesk grant did not finish within {Timeout}", GrantCleanupTimeout);
+            logger.LogError("Revoking a renewed Zendesk grant did not finish within {Timeout}; it may be live with nobody holding it", GrantCleanupTimeout);
             return false;
         }
     }
