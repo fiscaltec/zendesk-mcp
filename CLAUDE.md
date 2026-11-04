@@ -499,7 +499,7 @@ record.
 | Upstream call duration | `durationMs` on the `ZendeskUpstreamCall` record (`AuditDurationMs` in `AppEvents`) | Which of a composite tool's upstream calls was slow, joined to the `ZendeskToolCall` record by correlation id. `SendAsync` times from send to body read, including any 429 waits. `DownloadAsync` times each hop to its response headers only, so an attachment's body is not in it |
 | 429 retries / exhaustion | `zendesk.ratelimit.retries`, `zendesk.ratelimit.exhausted` | How often the server exceeds the **account's** Zendesk budget, which every other integration shares |
 | Pager truncations | `zendesk.autopager.truncations`, tag `resource` | Whether `Zendesk:MaxAutoPageFetches` is set where people hit it |
-| Cache hit/miss | `zendesk.cache.lookups`, tags `cache` = `user_token` / `group_membership` / `oidc_discovery`, `result` = `hit` / `miss` | Per *lookup*. A miss means the cache did not answer, so an external lookup was needed |
+| Cache hit/miss | `zendesk.cache.lookups`, tags `cache` = `user_token` / `group_membership` / `oidc_discovery`, `result` = `hit` / `miss` | Per *lookup*. A miss means the cache did not answer, so an external lookup was needed. It is counted before the call, so a cancelled request is still a miss, and so is a stale Graph serve after a failed call |
 | MCP spans | activity source `Experimental.ModelContextProtocol` | A span per request, tool calls included. Sampled, and sanitised (below) |
 
 Three caveats on reading them, each of which would otherwise send a query wrong (the code cites them
@@ -509,7 +509,9 @@ here, in `ZendeskMetrics`):
   reaches `LogAction`, so there is no `ZendeskUpstreamCall` row. Timeouts are the slowest calls of
   all; look for them in the failure records. The clock also starts *after* the caller's credential
   is resolved, so a cold Key Vault read of the person's token, or a token refresh, shows in the
-  tool-call duration and in no upstream one. `Audit:Enabled` and `Audit:IncludeReads` gate it too,
+  tool-call duration and in no upstream one. The same goes for recovery after a `401`: the rejected
+  call and its retry each get a row, and the `OnTokenRejectedAsync` refresh between them is in
+  neither. `Audit:Enabled` and `Audit:IncludeReads` gate it too,
   so turning reads off to cut ingest cost removes every GET's duration as well. `AuditDurationMs`
   is the same property name on `ZendeskToolCall`, so filter on `Name`. Values are truncated to whole
   milliseconds: `0` is a real measurement, and only `-1` means unmeasured.
@@ -517,7 +519,10 @@ here, in `ZendeskMetrics`):
   does not memoise, and each `tools/call` runs several checks: vitally-mcp counted at least three on
   SDK 2.2.0, and that has not been re-counted on 2.3.0 here. A `tools/list` checks every tool. Read
   the rate as "how often Graph was spared", never as "how well `LiveGroupCacheSeconds` is tuned".
-  `user_token` is counted only by the Key Vault store, where a cached "not connected" is a hit.
+  `user_token` is inflated the same way: every upstream call resolves the caller's credential, and
+  the provider reads the store again near expiry and after a `401`, so a composite tool records one
+  lookup per upstream call. It is counted only by the Key Vault store, where a cached "not connected"
+  is a hit. Read it as "how often Key Vault was spared", not as tuning for `TokenCacheDuration`.
 - **The `oidc_discovery` hit rate looks healthy during a provider outage.** After a failed refresh,
   the last-known-good copy is re-cached for a minute (`FailedRefreshRetryInterval`), and reads in
   that minute are hits.
@@ -546,8 +551,9 @@ register it behind a view that drops `gen_ai.tool.name`. Never register it as-is
 ⚠️ **Metric tags carry only values this code fixes.** A caller-controlled tag value is a cardinality
 explosion, and it puts customer text in a metrics store. The pager's `resource` tag comes from
 `ZendeskService.ResourceTypeOf`: the first segment after `/api/v2/`, checked against the
-`KnownResourceTypes` allowlist that the failure log uses, so `/api/v2/tickets/…` and never a ticket
-id. Anything else reads `/api/v2/(unrecognised)`.
+`KnownResourceTypes` allowlist that the failure log uses. So the tag is `/api/v2/tickets` or
+`/api/v2/tickets/…`, never a ticket id, and anything else reads `/api/v2/(unrecognised)`. Every Help
+Center path collapses to `/api/v2/help_center…`, so the tag cannot tell articles from sections.
 
 **Sampling: 10% head sampling of traces.** It needs `SamplingRatio = 0.1F` **and**
 `TracesPerSecond = null`, because `TracesPerSecond` (default 5) overrides the ratio whenever it is
@@ -564,7 +570,7 @@ querying:
 
 **Spans are sanitised before export by `SpanSanitisingProcessor`**, because they go to
 `AppRequests` / `AppDependencies`. Those tables have their own retention, and tool arguments may not
-go there. The MCP branch works from an **allowlist**, not a list of known leaks. vitally-mcp's probes
+go there. They share a workspace with the audit records, so table-level RBAC cannot keep them apart. The MCP branch works from an **allowlist**, not a list of known leaks. vitally-mcp's probes
 of the SDK found caller text reaching spans by seven routes:
 
 | Where | What the SDK does | The processor |
@@ -576,14 +582,22 @@ of the SDK found caller text reaching spans by seven routes:
 | The span name, MCP spans | `<method>` or `<method> <target>`, where the target is the caller's tool, prompt or resource | **Rebuilt** from the cleaned method and tool, never patched |
 
 `QueryStringRedactingProcessor` replaces the query string on `HttpClient` dependency spans with `?*`.
-`Search_tickets` and `Search_users` send free text as `?query=`, often a customer's name or email.
+The search, count and analytics tools send free text as `?query=` (for example `Search_tickets`,
+`Search_users`, `Search_organizations`), often a customer's name or email.
 The .NET runtime already redacts it the same way, but a process-wide switch turns that off; the
 processor keeps the guarantee in this repository.
+
+⚠️ **Paths are not redacted.** `AppDependencies` still carries caller-typed **path segments**: ids,
+locales and custom-object keys. That gap is open. The PII test
+(`TheMcpSdk_PublishesTheSourceWeRegister_AndNoSanitisedSpanCarriesCallerText`) covers MCP SDK and
+ASP.NET Core server spans only, because its harness stubs the primary HTTP handler and so creates no
+dependency span. `jsonrpc.request.id` is covered by a unit test only, because the harness sends a
+constant id.
 
 **Processor order is pinned.** OpenTelemetry runs processors in the order they were added. The
 exporter test asserts that both processors run before the distro's Live Metrics and batch exporter.
 
-⚠️ **The exporter test disposes its `TracerProvider` explicitly** (`LoggingFilterTests`). Inside the
+⚠️ **The exporter test disposes its `TracerProvider` and `MeterProvider` explicitly** (`LoggingFilterTests`). Inside the
 suite, disposing the `WebApplicationFactory` did not dispose it. A leaked provider stayed subscribed
 to the MCP source and sanitised later tests' spans. A post-dispose guard catches a recurrence, and
 `TelemetryRedactionTests` is in the serialised collection so that guard cannot flake. vitally-mcp
