@@ -21,6 +21,9 @@ public static class ZendeskServerInstructions
           Get_sla_summary and Get_sla_queue rather than fetching tickets one by one. To read several
           tickets' conversations, use Bulk_get_ticket_conversations (up to 10 a call, one call at a time).
         - Before applying a macro, run Preview_macro and show the person what will change.
+        - Bulk_update_tickets previews first (leave out confirmation): show the person how many
+          tickets will change and what changes, and call again with the same arguments and the
+          confirmation only once they say yes. For one ticket, or for comments, use Update_ticket.
         - Public replies, article publishing, Help Center category and section changes, macro changes and
           user/organisation changes can each be switched off for the whole account; a refusal naming one
           of these is a setting, not a fault.
