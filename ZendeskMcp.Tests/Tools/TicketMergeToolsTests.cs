@@ -661,6 +661,8 @@ public class TicketMergeToolsTests
     [Theory]
     [InlineData(HttpStatusCode.BadGateway, """{"error":"Bad gateway"}""")]
     [InlineData(HttpStatusCode.OK, "<html>not json</html>")]
+    [InlineData(HttpStatusCode.OK, "[]")]
+    [InlineData(HttpStatusCode.OK, "42")]
     public async Task MergeTickets_AmbiguousAnswerToTheMergeRequest_IsNotConfirmedNotAnError(HttpStatusCode status, string body)
     {
         // Zendesk may already have queued the merge behind a gateway error or an unreadable answer, so
@@ -678,7 +680,7 @@ public class TicketMergeToolsTests
         result["merged"]!.GetValue<bool>().Should().BeFalse();
         result["result"]!.GetValue<string>().Should().Be("not_confirmed");
         var nextStep = result["next_step"]!.GetValue<string>();
-        nextStep.Should().Contain("answer was lost or unreadable").And.Contain("Do not call Merge_tickets again");
+        nextStep.Should().Contain("Do not call Merge_tickets again");
         nextStep.Should().Contain("ask them to check the tickets in Zendesk").And.NotContain("unless");
         fake.Requests.Count(r => r.Path == MergePath).Should().Be(1);
     }

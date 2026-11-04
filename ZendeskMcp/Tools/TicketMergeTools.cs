@@ -251,7 +251,9 @@ public static class TicketMerge
         // covers every exception, not only HTTP ones: a dropped connection (whose connect link says
         // "then try again"), a denial from a stale entitlement, a timeout. Only the caller's own
         // cancellation escapes, since nobody is left to read the answer.
-        var job = accepted["job_status"] as JsonObject;
+        // Indexed only through an object: a 200 with an array or scalar root would otherwise throw here,
+        // after the merge may already be queued, instead of reaching the not_confirmed answer below.
+        var job = (accepted as JsonObject)?["job_status"] as JsonObject;
         if (job is null)
         {
             return NotConfirmed(result, null, 0, "Zendesk accepted the merge request but returned no job status.");
@@ -266,7 +268,7 @@ public static class TicketMerge
                 await delay(pollDelays[polls], cancellationToken);
                 polls++;
                 var polled = await zendesk.GetAsync($"/api/v2/job_statuses/{ZendeskService.Segment(jobId)}", cancellationToken: cancellationToken);
-                job = polled["job_status"] as JsonObject ?? job;
+                job = (polled as JsonObject)?["job_status"] as JsonObject ?? job;
             }
         }
         catch (Exception ex) when (!cancellationToken.IsCancellationRequested)
