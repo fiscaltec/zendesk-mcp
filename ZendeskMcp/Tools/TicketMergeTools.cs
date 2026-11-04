@@ -16,7 +16,7 @@ public static class TicketMergeTools
 {
     [Authorize(Policy = "zendesk:write")]
     [McpServerTool(Name = "Merge_tickets", Title = "Merge tickets", ReadOnly = false, Destructive = true, Idempotent = false, OpenWorld = false),
-     Description("Merge one to five duplicate tickets (source_ticket_ids) into a target ticket. Zendesk closes each source ticket for good, tags it closed_by_merge and adds a comment to it and to the target; a merge cannot be undone. Before calling, show the person the tickets (subject, requester, status) and get their agreement: to find duplicates, use Search_tickets with exclude_tags ['closed_by_merge'] and read candidates with Get_ticket. Every source must have the same requester as the target. Closed tickets, solved sources, tickets already merged, tickets the agent cannot see and sources with a different requester are refused, naming each, before anything changes. Comments are private notes unless target_comment_public or source_comment_public is true; a public merge comment emails that ticket's requester and CCs. Returns result ('merged', 'partially_merged', or 'not_confirmed' when Zendesk had not finished or its answer was lost: do not merge again; check the sources with Get_ticket and, if any is still open, ask the person to check the tickets in Zendesk), the tickets as read before the merge, the job's final status and, once the job has completed, each source with its own result; a failed job is returned as an error that also says to check the tickets first, as some may have been merged. " + TicketWriteHelpers.UntrustedContentWarning)]
+     Description("Merge one to five duplicate tickets (source_ticket_ids) into a target ticket. Zendesk closes each source ticket for good, tags it closed_by_merge and adds a comment to it and to the target; a merge cannot be undone. Before calling, show the person the tickets (subject, requester, status) and get their agreement: to find duplicates, use Search_tickets with exclude_tags ['closed_by_merge'] and read candidates with Get_ticket. Every source must have the same requester as the target. Closed tickets, solved sources, tickets merged into a different ticket, tickets the agent cannot see and sources with a different requester are refused, naming each, before anything changes. Safe to repeat: a source already merged into this target is reported as already_merged and not merged again. Comments are private notes unless target_comment_public or source_comment_public is true; a public merge comment emails that ticket's requester and CCs. Returns result ('merged', 'partially_merged', 'already_merged', or 'not_confirmed' when Zendesk had not finished or its answer was lost: do not merge again; check the sources with Get_ticket and, if any is still open, ask the person to check the tickets in Zendesk), the tickets as read before the merge, the job's final status and, once the job has completed, each source with its own result; a failed job is returned as an error that also says to check the tickets first, as some may have been merged. " + TicketWriteHelpers.UntrustedContentWarning)]
     public static Task<string> MergeTickets(
         ZendeskService zendesk,
         [Description("Id of the ticket to keep; the sources are merged into it.")] long target_ticket_id,
@@ -122,12 +122,20 @@ public static class TicketMerge
         var before = await ReadTicketsAsync(zendesk, allIds, cancellationToken);
 
         var problems = new List<string>();
+        var mergedSources = new List<long>();
         foreach (var id in allIds)
         {
             var role = id == targetTicketId ? "target" : "source";
             if (!before.Tickets.TryGetValue(id, out var ticket))
             {
                 problems.Add($"Ticket {id} ({role}) was not found, or this agent cannot see it.");
+                continue;
+            }
+
+            // A source already merged is closed, so it is set aside here and judged below by where it went.
+            if (role == "source" && HasTag(ticket, "closed_by_merge"))
+            {
+                mergedSources.Add(id);
                 continue;
             }
 
@@ -155,9 +163,50 @@ public static class TicketMerge
             }
         }
 
+        // Safe to repeat, as Swifteq's merge_tickets is: a source already merged into this target is
+        // reported as already_merged and left out of the request. Only a merge Zendesk records against
+        // this target counts; one into any other ticket, or one whose record cannot be found, is refused.
+        var alreadyMerged = new List<long>();
+        if (problems.Count == 0)
+        {
+            foreach (var id in mergedSources)
+            {
+                var mergedHere = await WasMergedIntoAsync(zendesk, id, targetTicketId, cancellationToken);
+                if (mergedHere == true)
+                {
+                    alreadyMerged.Add(id);
+                }
+                else if (mergedHere is null)
+                {
+                    problems.Add($"Ticket {id} (source) has already been merged (tagged closed_by_merge), and its history could not be read to tell whether that was into ticket {targetTicketId}.");
+                }
+                else
+                {
+                    problems.Add($"Ticket {id} (source) has already been merged into another ticket (tagged closed_by_merge), and Zendesk's record does not show it going into ticket {targetTicketId}.");
+                }
+            }
+        }
+
         if (problems.Count > 0)
         {
             throw new ArgumentException("Nothing was merged. " + string.Join(" ", problems));
+        }
+
+        var toMerge = sources.Except(alreadyMerged).ToArray();
+        var alreadyMergedJson = new JsonArray(alreadyMerged.Select(s => (JsonNode)s).ToArray());
+        if (toMerge.Length == 0)
+        {
+            return new JsonObject
+            {
+                ["target_ticket_id"] = targetTicketId,
+                ["source_ticket_ids"] = new JsonArray(sources.Select(s => (JsonNode)s).ToArray()),
+                ["merged"] = true,
+                ["result"] = "already_merged",
+                ["already_merged"] = alreadyMergedJson,
+                ["sources_after"] = new JsonArray(sources.Select(id => (JsonNode)AlreadyMergedEntry(before, id)).ToArray()),
+                ["target_agent_url"] = $"{zendesk.BaseUrl}/agent/tickets/{Id(targetTicketId)}",
+                ["note"] = "Every source was already merged into this ticket; nothing was sent to Zendesk.",
+            }.ToJsonString();
         }
 
         // Zendesk's own merge dialogue adds a note to each side; without one the merge leaves no trace
@@ -165,8 +214,8 @@ public static class TicketMerge
         // are always sent, so Zendesk's behaviour when the comments are omitted does not arise.
         var body = new JsonObject
         {
-            ["ids"] = new JsonArray(sources.Select(s => (JsonNode)s).ToArray()),
-            ["target_comment"] = targetComment ?? DefaultTargetComment(sources),
+            ["ids"] = new JsonArray(toMerge.Select(s => (JsonNode)s).ToArray()),
+            ["target_comment"] = targetComment ?? DefaultTargetComment(toMerge),
             ["source_comment"] = sourceComment ?? $"This request was closed and merged into request #{Id(targetTicketId)}.",
             ["target_comment_is_public"] = targetPublic,
             ["source_comment_is_public"] = sourcePublic,
@@ -176,6 +225,7 @@ public static class TicketMerge
         {
             ["target_ticket_id"] = targetTicketId,
             ["source_ticket_ids"] = new JsonArray(sources.Select(s => (JsonNode)s).ToArray()),
+            ["already_merged"] = alreadyMergedJson,
             ["tickets_before"] = new JsonArray(allIds.Select(id => (JsonNode)Describe(before, id, id == targetTicketId ? "target" : "source")).ToArray()),
         };
 
@@ -248,7 +298,7 @@ public static class TicketMerge
         TicketRead after;
         try
         {
-            after = await ReadTicketsAsync(zendesk, sources, cancellationToken);
+            after = await ReadTicketsAsync(zendesk, toMerge, cancellationToken);
         }
         catch (Exception ex) when (!cancellationToken.IsCancellationRequested)
         {
@@ -260,6 +310,12 @@ public static class TicketMerge
         var confirmed = 0;
         foreach (var id in sources)
         {
+            if (alreadyMerged.Contains(id))
+            {
+                sourcesAfter.Add(AlreadyMergedEntry(before, id));
+                continue;
+            }
+
             after.Tickets.TryGetValue(id, out var ticket);
             var closedByMerge = ticket is not null && ToolJson.String(ticket["status"]) == "closed" && HasTag(ticket, "closed_by_merge");
             if (closedByMerge)
@@ -333,6 +389,52 @@ public static class TicketMerge
     };
 
     private static JsonObject JobSummary(JsonObject job) => ToolJson.Pick(job, "id", "status", "total", "progress", "message", "results");
+
+    private static JsonObject AlreadyMergedEntry(TicketRead before, long id) => new()
+    {
+        ["id"] = id,
+        ["status"] = ToolJson.String(before.Tickets[id]["status"]),
+        ["closed_by_merge"] = true,
+        ["result"] = "already_merged",
+    };
+
+    /// <summary>
+    /// Whether Zendesk's audit trail for <paramref name="sourceId"/> records a merge naming
+    /// <paramref name="targetId"/>. Zendesk marks a merge in an audit's or event's <c>via</c> as
+    /// <c>source.rel = "merge"</c>, naming the other ticket under <c>source.to</c> or <c>source.from</c>
+    /// as <c>ticket_id</c> or <c>ticket_ids</c>. Direction need not be read: the target has passed the
+    /// checks above (open, not merged anywhere), so the only merge between the two that leaves the source
+    /// closed is source into target.
+    /// </summary>
+    /// <remarks>
+    /// Null when the audits cannot be read. Unverified against the live API: the via shape of merge audits. A shape this does not recognise
+    /// only means the source is refused as merged elsewhere, which is what happened before this check.
+    /// </remarks>
+    private static async Task<bool?> WasMergedIntoAsync(ZendeskService zendesk, long sourceId, long targetId, CancellationToken cancellationToken)
+    {
+        // A merge is among the last things to happen to a ticket, so the newest page is enough. Nothing
+        // has been changed yet, so a failed read is a refusal (null), never a guess either way.
+        JsonNode page;
+        try
+        {
+            page = await zendesk.GetAsync($"/api/v2/tickets/{Id(sourceId)}/audits",
+                ToolJson.Query(("sort_order", "desc"), ("page[size]", 100)), cancellationToken: cancellationToken);
+        }
+        catch (HttpRequestException)
+        {
+            return null;
+        }
+
+        var vias = (page["audits"] as JsonArray ?? [])
+            .Where(audit => audit is not null)
+            .SelectMany(audit => new[] { audit!["via"] }.Concat((audit["events"] as JsonArray ?? []).Select(e => e?["via"])));
+        return vias.Any(via => ToolJson.String(via?["source"]?["rel"]) == "merge"
+            && (NamesTicket(via!["source"]!["to"], targetId) || NamesTicket(via["source"]!["from"], targetId)));
+    }
+
+    private static bool NamesTicket(JsonNode? end, long ticketId) =>
+        ToolJson.Long(end?["ticket_id"]) == ticketId
+        || (end?["ticket_ids"] as JsonArray ?? []).Any(t => ToolJson.Long(t) == ticketId);
 
     private static string DefaultTargetComment(long[] sources) =>
         sources.Length == 1

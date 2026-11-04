@@ -302,6 +302,110 @@ public class TicketMergeToolsTests
         result["sources_after"]!.AsArray().Select(x => x!["result"]!.GetValue<string>()).Should().Equal("merged", "not_confirmed");
     }
 
+    private const string Merged = "\"closed_by_merge\"";
+
+    private static string Audits(string via) => $$$"""{"audits":[{"id":9001,"via":{"channel":"web"},"events":[{"id":1,"type":"Comment","via":{{{via}}}}]}],"meta":{"has_more":false}}""";
+
+    private static string MergeVia(string end, long ticket) => "{\"channel\":\"web\",\"source\":{\"rel\":\"merge\",\"" + end + "\":{\"ticket_id\":" + ticket.ToString(System.Globalization.CultureInfo.InvariantCulture) + "}}}";
+
+    /// <summary>A fake where 102 is already merged (its audits answered by <paramref name="audits102"/>) and 103 is open.</summary>
+    private static FakeZendesk AlreadyMergedFake(Func<RecordedRequest, FakeResponse> audits102, bool include103 = true)
+    {
+        var reads = 0;
+        return TestHelpers.CreateFakeZendesk(r => (r.Method.Method, r.Path) switch
+        {
+            ("GET", ShowManyPath) => FakeResponse.Json(Interlocked.Increment(ref reads) == 1
+                ? (include103 ? ShowMany(Ticket(101), Ticket(102, "closed", Merged), Ticket(103)) : ShowMany(Ticket(101), Ticket(102, "closed", Merged)))
+                : ShowMany(Ticket(103, "closed", Merged))),
+            ("GET", "/api/v2/tickets/102/audits") => audits102(r),
+            ("POST", MergePath) => FakeResponse.Json(Job("completed")),
+            _ => FakeResponse.NotFound(),
+        });
+    }
+
+    [Fact]
+    public async Task MergeTickets_AllSourcesAlreadyMergedIntoTarget_IsAlreadyMergedAndSendsNothing()
+    {
+        using var fake = AlreadyMergedFake(_ => FakeResponse.Json(Audits(MergeVia("to", 101))), include103: false);
+
+        var result = JsonNode.Parse(await Merge(TestHelpers.BuildZendeskService(fake.Client), [102]))!;
+
+        result["result"]!.GetValue<string>().Should().Be("already_merged");
+        result["merged"]!.GetValue<bool>().Should().BeTrue();
+        result["already_merged"]!.ToJsonString().Should().Be("[102]");
+        result["sources_after"]![0]!["result"]!.GetValue<string>().Should().Be("already_merged");
+        fake.Requests.Should().NotContain(r => r.Method == HttpMethod.Post, "a repeat sends nothing to Zendesk");
+        var audits = fake.Requests.Single(r => r.Path == "/api/v2/tickets/102/audits");
+        audits.Query("sort_order").Should().Be("desc");
+        audits.Query("page[size]").Should().Be("100");
+    }
+
+    [Fact]
+    public async Task MergeTickets_SomeSourcesAlreadyMerged_MergesOnlyTheRest()
+    {
+        using var fake = AlreadyMergedFake(_ => FakeResponse.Json(Audits(MergeVia("to", 101))));
+
+        var result = JsonNode.Parse(await Merge(TestHelpers.BuildZendeskService(fake.Client), [102, 103]))!;
+
+        var body = JsonNode.Parse(fake.Requests.Single(r => r.Path == MergePath).Body!)!;
+        body["ids"]!.ToJsonString().Should().Be("[103]");
+        body["target_comment"]!.GetValue<string>().Should().Be("Request #103 was closed and merged into this request.");
+        fake.Requests.Last(r => r.Path == ShowManyPath).Query("ids").Should().Be("103");
+
+        result["result"]!.GetValue<string>().Should().Be("merged");
+        result["merged"]!.GetValue<bool>().Should().BeTrue();
+        result["already_merged"]!.ToJsonString().Should().Be("[102]");
+        result["sources_after"]!.AsArray().Select(x => x!["result"]!.GetValue<string>()).Should().Equal("already_merged", "merged");
+    }
+
+    [Theory]
+    [InlineData("to")]
+    [InlineData("from")]
+    public async Task MergeTickets_AlreadyMergedIntoAnotherTicket_IsRefused(string end)
+    {
+        // Negative control for the two tests above: the same audit naming a different ticket.
+        using var fake = AlreadyMergedFake(_ => FakeResponse.Json(Audits(MergeVia(end, 999))));
+
+        var act = () => Merge(TestHelpers.BuildZendeskService(fake.Client), [102, 103]);
+
+        await act.Should().ThrowAsync<ArgumentException>().WithMessage("*Ticket 102 (source) has already been merged into another ticket*does not show it going into ticket 101*");
+        fake.Requests.Should().NotContain(r => r.Method == HttpMethod.Post);
+    }
+
+    [Fact]
+    public async Task MergeTickets_MergeRecordedAsTicketIds_IsRecognised()
+    {
+        using var fake = AlreadyMergedFake(_ => FakeResponse.Json(Audits("""{"channel":"web","source":{"rel":"merge","from":{"ticket_ids":[101,555]}}}""")), include103: false);
+
+        var result = JsonNode.Parse(await Merge(TestHelpers.BuildZendeskService(fake.Client), [102]))!;
+
+        result["result"]!.GetValue<string>().Should().Be("already_merged");
+    }
+
+    [Theory]
+    [InlineData("""{"channel":"web","source":{"rel":"follow_up","to":{"ticket_id":101}}}""")]
+    [InlineData("""{"channel":"web"}""")]
+    public async Task MergeTickets_NoMergeRecordNamingTheTarget_IsRefused(string via)
+    {
+        using var fake = AlreadyMergedFake(_ => FakeResponse.Json(Audits(via)));
+
+        var act = () => Merge(TestHelpers.BuildZendeskService(fake.Client), [102, 103]);
+
+        await act.Should().ThrowAsync<ArgumentException>().WithMessage("*does not show it going into ticket 101*");
+        fake.Requests.Should().NotContain(r => r.Method == HttpMethod.Post);
+    }
+
+    [Fact]
+    public async Task MergeTickets_AuditsUnreadable_IsRefusedNotGuessed()
+    {
+        using var fake = AlreadyMergedFake(_ => FakeResponse.WithStatus(HttpStatusCode.Forbidden, """{"error":"Forbidden"}"""));
+
+        var act = () => Merge(TestHelpers.BuildZendeskService(fake.Client), [102, 103]);
+
+        await act.Should().ThrowAsync<ArgumentException>().WithMessage("*Ticket 102*history could not be read*");
+        fake.Requests.Should().NotContain(r => r.Method == HttpMethod.Post);
+    }
+
     [Fact]
     public async Task MergeTickets_ClosedTarget_IsRefused()
     {
