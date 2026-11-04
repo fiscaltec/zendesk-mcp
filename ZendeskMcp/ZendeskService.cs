@@ -383,8 +383,9 @@ public partial class ZendeskService
     {
         var baseUrl = await ResolveBrandBaseUrlAsync(brandUrl, cancellationToken);
         var url = BuildUrl(path, query, baseUrl);
-        using var content = body is null ? null : new StringContent(body.ToJsonString(), Encoding.UTF8, "application/json");
-        var json = await SendAsync(method, url, content, headers, cancellationToken);
+        var requestJson = body?.ToJsonString();
+        using var content = requestJson is null ? null : new StringContent(requestJson, Encoding.UTF8, "application/json");
+        var json = await SendAsync(method, url, content, headers, cancellationToken, requestJson);
         return ParseOrEmpty(json);
     }
 
@@ -405,7 +406,7 @@ public partial class ZendeskService
         }
     }
 
-    private async Task<string> SendAsync(HttpMethod method, string url, HttpContent? content, IReadOnlyDictionary<string, string>? headers, CancellationToken cancellationToken)
+    private async Task<string> SendAsync(HttpMethod method, string url, HttpContent? content, IReadOnlyDictionary<string, string>? headers, CancellationToken cancellationToken, string? requestJson = null)
     {
         await AuthorizeAsync(method, url, cancellationToken);
 
@@ -488,6 +489,11 @@ public partial class ZendeskService
             if (touched.IdsRecorded == 0)
             {
                 touched = AuditRecordIds.FromMutationUrl(method, url);
+            }
+
+            if (touched.IdsRecorded == 0)
+            {
+                touched = AuditRecordIds.FromBulkUpdateBody(method, url, requestJson);
             }
 
             _auditContext?.RecordUpstream(touched);
