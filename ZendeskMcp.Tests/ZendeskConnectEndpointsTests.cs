@@ -127,6 +127,46 @@ public class ZendeskConnectEndpointsTests
     }
 
     [Fact]
+    public async Task ASecondAttemptFromASpentLink_IsRefusedAndRevoked()
+    {
+        // One link opened in two browsers starts two attempts. Once the first stores a grant and
+        // spends the link, the second must not store another (#13).
+        using var factory = new Factory(zendeskEmail: "agent@example.com");
+        using var client = factory.CreateClient(new WebApplicationFactoryClientOptions { AllowAutoRedirect = false });
+        var link = await factory.IssueLinkAsync(ObjectId, "agent@example.com");
+        var firstState = QueryValue((await client.GetAsync(link)).Headers.Location!.ToString(), "state");
+        var secondState = QueryValue((await client.GetAsync(link)).Headers.Location!.ToString(), "state");
+        (await GetWithCookieAsync(client, $"/zendesk/callback?code=c1&state={firstState}", firstState))
+            .StatusCode.Should().Be(HttpStatusCode.OK);
+
+        var second = await GetWithCookieAsync(client, $"/zendesk/callback?code=c2&state={secondState}", secondState);
+
+        second.StatusCode.Should().Be(HttpStatusCode.BadRequest);
+        (await second.Content.ReadAsStringAsync()).Should().Contain("already been used");
+        (await factory.Store.GetAsync(ObjectId))!.AccessToken.Should().Be("issued-access", "the first connection stands");
+        factory.Revocations.Should().Equal(["issued-access-2"], "the refused grant is revoked, and the stored one is not");
+    }
+
+    [Fact]
+    public async Task ASecondAttemptFromASpentLink_DoesNotReconnectAfterADisconnect()
+    {
+        using var factory = new Factory(zendeskEmail: "agent@example.com");
+        using var client = factory.CreateClient(new WebApplicationFactoryClientOptions { AllowAutoRedirect = false });
+        var link = await factory.IssueLinkAsync(ObjectId, "agent@example.com");
+        var firstState = QueryValue((await client.GetAsync(link)).Headers.Location!.ToString(), "state");
+        var secondState = QueryValue((await client.GetAsync(link)).Headers.Location!.ToString(), "state");
+        (await GetWithCookieAsync(client, $"/zendesk/callback?code=c1&state={firstState}", firstState))
+            .StatusCode.Should().Be(HttpStatusCode.OK);
+        await factory.Store.RemoveAsync(ObjectId);
+
+        var second = await GetWithCookieAsync(client, $"/zendesk/callback?code=c2&state={secondState}", secondState);
+
+        second.StatusCode.Should().Be(HttpStatusCode.BadRequest);
+        (await factory.Store.GetAsync(ObjectId)).Should().BeNull("disconnecting must stay disconnected");
+        factory.Revocations.Should().Equal(["issued-access-2"]);
+    }
+
+    [Fact]
     public async Task AStateUsedOnce_CannotCompleteASecondTime()
     {
         using var factory = new Factory(zendeskEmail: "agent@example.com");
@@ -193,6 +233,7 @@ public class ZendeskConnectEndpointsTests
     private sealed class Factory(string zendeskEmail, string role = "agent", string name = "Agent Example") : WebApplicationFactory<Program>
     {
         private readonly List<RecordedRequest> _requests = [];
+        private int _exchanges;
 
         private string ZendeskEmail { get; } = zendeskEmail;
         private string Role { get; } = role;
@@ -210,6 +251,12 @@ public class ZendeskConnectEndpointsTests
         }
 
         public IZendeskTokenStore Store => Services.GetRequiredService<IZendeskTokenStore>();
+
+        /// <summary>The access tokens revoked at Zendesk, in order.</summary>
+        public IReadOnlyList<string> Revocations => ZendeskRequests
+            .Where(r => r.Method == HttpMethod.Delete && r.Path == "/api/v2/oauth/tokens/current.json")
+            .Select(r => r.Headers["Authorization"]["Bearer ".Length..])
+            .ToList();
 
         public Task<string> IssueLinkAsync(string objectId, string signInName) =>
             Services.GetRequiredService<ZendeskConnectLinks>().CreateAsync(objectId, signInName, "http://localhost");
@@ -246,7 +293,13 @@ public class ZendeskConnectEndpointsTests
 
                 var json = recorded.Path switch
                 {
-                    "/oauth/tokens" => "{\"access_token\":\"issued-access\",\"refresh_token\":\"issued-refresh\",\"expires_in\":7200,\"token_type\":\"bearer\"}",
+                    // The first exchange issues "issued-access", later ones "issued-access-2" and so on,
+                    // so a test can tell which grant was stored and which was revoked.
+                    "/oauth/tokens" => Interlocked.Increment(ref owner._exchanges) switch
+                    {
+                        1 => "{\"access_token\":\"issued-access\",\"refresh_token\":\"issued-refresh\",\"expires_in\":7200,\"token_type\":\"bearer\"}",
+                        var n => $"{{\"access_token\":\"issued-access-{n}\",\"refresh_token\":\"issued-refresh-{n}\",\"expires_in\":7200,\"token_type\":\"bearer\"}}",
+                    },
                     "/api/v2/users/me.json" => System.Text.Json.JsonSerializer.Serialize(new
                     {
                         user = new { id = 4242, name = owner.Name, email = owner.ZendeskEmail, role = owner.Role },
