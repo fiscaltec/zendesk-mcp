@@ -200,9 +200,11 @@ public static class TicketSearchQuery
 
     /// <summary>
     /// The via: search values a channel filter expands to, in the channel table's order. Each value is
-    /// one the live API accepts (TicketCountHelpers.Channels); repeating a keyword ORs its values, as
+    /// one the live API accepts (TicketCountHelpers.Channels). Repeating a keyword ORs its values:
     /// priority:low priority:normal counts the two priorities together (confirmed against the live API).
     /// </summary>
+    // Unverified against the live API: that two via: terms OR in the same way. No deployed tool could
+    // send two before this filter existed.
     public static IReadOnlyList<string> ChannelSearchValues(IReadOnlyList<string>? channels)
     {
         if (channels is null || channels.Count == 0)
@@ -242,7 +244,9 @@ public static class TicketSearchQuery
         }
     }
 
-    // custom_fields: each condition one term, all ANDed. Zendesk ORs two terms on the same field, so a
+    // custom_fields: each condition one term, all ANDed.
+    // Unverified against the live API: that terms on two different custom fields AND rather than OR
+    // (Zendesk might treat every custom_field_<id> as one keyword). No deployed tool could send two. Zendesk ORs two terms on the same field, so a
     // field may appear once, and not alongside custom_field_id. What a field's type allows (a checkbox is
     // never empty, a built-in field has its own filter) needs the field definitions, which
     // TicketSearchHelpers.CheckCustomFieldsAsync reads; this checks only the shape.
@@ -291,7 +295,7 @@ public static class TicketSearchQuery
             {
                 true => $"custom_field_{id}:*",
                 false => $"-custom_field_{id}:*",
-                null => $"custom_field_{id}:{Quote(condition.Value!)}",
+                null => $"custom_field_{id}:{ExactValue(condition.Value!)}",
             });
         }
     }
@@ -374,6 +378,16 @@ public static class TicketSearchQuery
         }
 
         return tag.ToLowerInvariant();
+    }
+
+    // An exact value: quoted when it carries search syntax (a wildcard, a comparison, a colon or a
+    // leading minus), as free text is, so '*' cannot turn into has_value true or 'a*' into a prefix match.
+    private static string ExactValue(string value)
+    {
+        var cleaned = Quote(value);
+        var bare = cleaned.Trim('"');
+        var hasSyntax = bare.IndexOfAny([':', '<', '>', '=', '*']) >= 0 || bare.StartsWith('-');
+        return hasSyntax && !cleaned.StartsWith('"') ? $"\"{bare}\"" : cleaned;
     }
 
     /// <summary>Quotes a value with whitespace; drops quote characters, which Zendesk search cannot escape.</summary>

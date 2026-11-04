@@ -295,6 +295,32 @@ public class TicketsToolsTests
     }
 
     [Fact]
+    public async Task SearchTickets_HasValueOnADropDown_IsAccepted()
+    {
+        using var fake = SearchFake();
+
+        await TicketsTools.SearchTickets(TestHelpers.BuildZendeskService(fake.Client),
+            custom_fields: [new TicketCustomFieldCondition(10, HasValue: false), new TicketCustomFieldCondition(11, Value: "none")]);
+
+        fake.Requests.Single(r => r.Path == "/api/v2/search/export").Query("query").Should().Be("type:ticket -custom_field_10:* custom_field_11:none");
+    }
+
+    [Fact]
+    public async Task SearchTickets_AFieldBeyondATruncatedListing_SaysItCouldNotBeChecked()
+    {
+        // A listing that stops early must not be read as "the field does not exist".
+        using var fake = TestHelpers.CreateFakeZendesk(r => r.Path switch
+        {
+            "/api/v2/ticket_fields" => Json("""{"ticket_fields":[{"id":10,"type":"tagger","removable":true}],"meta":{"has_more":true,"after_cursor":"c2"}}"""),
+            _ => Count(0),
+        });
+        var act = () => TicketsTools.SearchTickets(TestHelpers.BuildZendeskService(fake.Client, maxAutoPageFetches: 1),
+            custom_fields: [new TicketCustomFieldCondition(99, Value: "x")]);
+
+        await act.Should().ThrowAsync<ArgumentException>().WithMessage("*not among the first 1 fields*");
+    }
+
+    [Fact]
     public async Task SearchTickets_ChannelAlone_ReadsNoFieldDefinitions()
     {
         // Negative control for the lookup: without custom_fields or a 'none' value nothing needs checking.
@@ -314,6 +340,8 @@ public class TicketsToolsTests
     [InlineData(15, null, true, "*has_value does not apply*multi_lookup*")]
     [InlineData(99, "x", null, "*no ticket field 99*")]
     [InlineData(10, "none", null, "*'none' does not find*has_value*false*")]
+    [InlineData(10, "\"none\"", null, "*'none' does not find*")]
+    [InlineData(12, "none", null, "*checkbox; its value is true*")]
     public async Task SearchTickets_CustomFieldsTheFieldCannotTake_AreRefusedBeforeSearching(long id, string? value, bool? hasValue, string message)
     {
         using var fake = SearchFake();
@@ -344,6 +372,17 @@ public class TicketsToolsTests
             await act.Should().ThrowAsync<ArgumentException>().WithMessage("*custom_field_value 'none' does not find*");
             fake.Requests.Should().NotContain(r => r.Path == "/api/v2/search/count");
         }
+    }
+
+    [Fact]
+    public async Task CountTickets_CustomFieldValueNone_OnACheckbox_PointsToTrueOrFalse()
+    {
+        // has_value false would itself be refused on a checkbox, so the message must not suggest it.
+        using var fake = SearchFake();
+
+        var act = () => TicketsTools.CountTickets(TestHelpers.BuildZendeskService(fake.Client), custom_field_id: 12, custom_field_value: "none");
+
+        await act.Should().ThrowAsync<ArgumentException>().WithMessage("*'none' does not apply*checkbox*");
     }
 
     [Fact]

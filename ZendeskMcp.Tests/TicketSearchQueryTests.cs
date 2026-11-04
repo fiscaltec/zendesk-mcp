@@ -240,6 +240,19 @@ public class TicketSearchQueryTests
             .Should().Be("type:ticket custom_field_5:\"a status:solved b\"");
     }
 
+    [Theory]
+    [InlineData("*", "\"*\"")]
+    [InlineData("a*", "\"a*\"")]
+    [InlineData("-x", "\"-x\"")]
+    [InlineData("<5", "\"<5\"")]
+    [InlineData("10:30", "\"10:30\"")]
+    [InlineData("plain", "plain")]
+    public void ACustomFieldValue_IsExact_SoSearchSyntaxIsQuoted(string value, string expected)
+    {
+        TicketSearchQuery.Build(new TicketSearchFilters { CustomFields = [new TicketCustomFieldCondition(5, Value: value)] })
+            .Should().Be($"type:ticket custom_field_5:{expected}");
+    }
+
     [Fact]
     public void TheAgentSearchUrl_EscapesTheQuery()
     {

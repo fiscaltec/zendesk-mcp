@@ -26,8 +26,8 @@ public static class TicketFilterDescriptions
     public const string ExcludeTags = "Comma-separated tags the tickets must not have.";
     public const string CustomFieldId = "Numeric id of a ticket field to filter on. Give custom_field_value with it. Use List_ticket_fields to find ids.";
     public const string CustomFieldValue = "Value the custom field must have (for a drop-down, the option's tag). Requires custom_field_id. 'none' does not find empty fields: use custom_fields with has_value false.";
-    public const string CustomFields = "Custom field conditions, all of which must hold (at most 10, each field once, not the custom_field_id field): {id, value} for an exact value (a drop-down option's tag; true or false for a checkbox), {id, has_value: false} for an empty field, {id, has_value: true} for any value. has_value works on drop-down, multi-select, text, multi-line, number, decimal, date, regex, lookup and credit-card fields; a checkbox is never empty, so use value true or false. Built-in fields such as priority or group have their own filters. Use List_ticket_fields for ids.";
-    public const string Channel = "Channels the tickets came in on; a ticket on any of them matches: email, web, api, voice, native_messaging, chat, mobile, mobile_sdk, sms, facebook, twitter, whatsapp, web_widget, or messaging (native_messaging and whatsapp together). Each selects exactly the tickets of that channel's group in Count_tickets group_by channel. Use this, never 'via:' in text.";
+    public const string CustomFields = "Custom field conditions, all of which must hold (at most 10, each field once, not the custom_field_id field): {id, value} for an exact value as text (a drop-down option's tag; the text 'true' or 'false' for a checkbox), {id, has_value: false} for an empty field, {id, has_value: true} for any value. has_value works on drop-down, multi-select, text, multi-line, number, decimal, date, regex, lookup and credit-card fields; a checkbox is never empty, so use value true or false. Built-in fields such as priority or group have their own filters. Use List_ticket_fields for ids.";
+    public const string Channel = "Channels the tickets came in on; a ticket on any of them matches: email, web, api, voice, native_messaging, chat, mobile, mobile_sdk, sms, facebook, twitter, whatsapp, web_widget, or messaging (native_messaging and whatsapp together). Each value except messaging selects exactly the tickets of that channel's group in Count_tickets group_by channel. Use this, never 'via:' in text.";
     public const string CustomStatusId = "Numeric id of a custom ticket status.";
     public const string HasAttachments = "true for tickets with attachments, false for tickets without.";
     public const string StartDate = "Created on or after this date (YYYY-MM-DD, or an ISO date-time).";
@@ -626,8 +626,11 @@ public static class TicketSearchHelpers
     public static async Task CheckCustomFieldsAsync(ZendeskService zendesk, TicketSearchFilters filters, CancellationToken cancellationToken)
     {
         var conditions = (filters.CustomFields ?? []).ToList();
-        var noneValue = filters.CustomFieldId is not null
-            && string.Equals(filters.CustomFieldValue?.Trim(), "none", StringComparison.OrdinalIgnoreCase);
+        // Compared as it will be sent: Quote drops quote characters, so "\"none\"" is still none.
+        static bool IsNone(string? value) =>
+            value is not null && string.Equals(TicketSearchQuery.Quote(value), "none", StringComparison.OrdinalIgnoreCase);
+
+        var noneValue = filters.CustomFieldId is not null && IsNone(filters.CustomFieldValue);
         if (conditions.Count == 0 && !noneValue)
         {
             return;
@@ -650,7 +653,9 @@ public static class TicketSearchHelpers
                 .Any(o => string.Equals(ToolJson.String(o?["value"]), "none", StringComparison.OrdinalIgnoreCase));
 
         string NoneRefusal(long id, string parameter) =>
-            $"{parameter} 'none' does not find tickets with field {Id(id)} empty: Zendesk searches for the value 'none'. Use custom_fields [{{\"id\": {Id(id)}, \"has_value\": false}}].";
+            definitions.TryGetValue(id, out var f) && ToolJson.String(f["type"]) == "checkbox"
+                ? $"{parameter} 'none' does not apply to field {Id(id)}, a checkbox: use 'true' (checked) or 'false' (unchecked)."
+                : $"{parameter} 'none' does not find tickets with field {Id(id)} empty: Zendesk searches for the value 'none'. Use custom_fields [{{\"id\": {Id(id)}, \"has_value\": false}}].";
 
         if (noneValue)
         {
@@ -665,7 +670,9 @@ public static class TicketSearchHelpers
         {
             if (!definitions.TryGetValue(condition.Id, out var field))
             {
-                throw new ArgumentException($"custom_fields: there is no ticket field {Id(condition.Id)} (see List_ticket_fields).");
+                throw new ArgumentException(listing.HasMore
+                    ? $"custom_fields: ticket field {Id(condition.Id)} is not among the first {listing.Items.Count} fields this server reads, so it cannot be checked. Use custom_field_id and custom_field_value for it."
+                    : $"custom_fields: there is no ticket field {Id(condition.Id)} (see List_ticket_fields).");
             }
 
             var type = ToolJson.String(field["type"]) ?? string.Empty;
@@ -694,7 +701,7 @@ public static class TicketSearchHelpers
                 throw new ArgumentException($"custom_fields: has_value does not apply to field {Id(condition.Id)}, a '{type}' field. It works on drop-down, multi-select, text, multi-line, number, decimal, date, regex, lookup and credit-card fields.");
             }
 
-            if (string.Equals(condition.Value?.Trim(), "none", StringComparison.OrdinalIgnoreCase) && !HasNoneOption(field))
+            if (IsNone(condition.Value) && !HasNoneOption(field))
             {
                 throw new ArgumentException(NoneRefusal(condition.Id, "custom_fields value"));
             }
