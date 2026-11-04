@@ -294,6 +294,8 @@ public class FailureLoggingTests
         { "upstream-status", LogLevel.Error },
         { "transport", LogLevel.Error },
         { "validation", LogLevel.Warning },
+        // The connect link answer: expected, so not an Error, and its message (the link) never logged.
+        { "connect-required", LogLevel.Information },
         { "unexpected", LogLevel.Error },
         // Audited already by AuditLogger.LogDenied, with the caller and the path.
         { "denied", null },
@@ -306,6 +308,7 @@ public class FailureLoggingTests
         "transport" => new HttpRequestException("Connection refused " + CustomerEmail),
         "validation" => new ArgumentException("created_after must be ISO-8601 (got '" + CustomerEmail + "')"),
         "unexpected" => new InvalidOperationException("unexpected " + CustomerEmail),
+        "connect-required" => new ZendeskConnectionRequiredException("https://zendesk-mcp.example.com/zendesk/connect?ticket=" + CustomerEmail, "Not connected."),
         "denied" => new UnauthorizedAccessException("denied " + CustomerEmail),
         _ => throw new ArgumentOutOfRangeException(nameof(kind)),
     };
