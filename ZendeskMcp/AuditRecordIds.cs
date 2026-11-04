@@ -114,8 +114,69 @@ public static class AuditRecordIds
         }
     }
 
+    /// <summary>
+    /// The records a bulk update names in its own request body, <c>{"tickets":[{"id":…},…]}</c>.
+    /// Zendesk answers <c>PUT …/update_many</c> with a background job, not the records, so the request
+    /// is the only place the touched ids appear at the moment of the write.
+    /// </summary>
+    /// <remarks>
+    /// All or nothing: an entry without a whole-number <c>id</c> means the body is not the shape this
+    /// expects, and recording the rest would present part of it as the whole. The ids are the records
+    /// the write was <i>sent</i> for; the job may still fail some of them.
+    /// </remarks>
+    public static AuditedRecords FromBulkUpdateBody(HttpMethod method, string url, string? requestBody)
+    {
+        if (method != HttpMethod.Put || requestBody is null || !Uri.TryCreate(url, UriKind.Absolute, out var uri)
+            || !uri.AbsolutePath.EndsWith("/update_many", StringComparison.Ordinal) && !uri.AbsolutePath.EndsWith("/update_many.json", StringComparison.Ordinal))
+        {
+            return Unavailable;
+        }
+
+        try
+        {
+            using var document = JsonDocument.Parse(requestBody);
+            if (document.RootElement.ValueKind != JsonValueKind.Object
+                || !document.RootElement.TryGetProperty("tickets", out var tickets)
+                || tickets.ValueKind != JsonValueKind.Array
+                || tickets.GetArrayLength() == 0)
+            {
+                return Unavailable;
+            }
+
+            var ids = new List<string>();
+            foreach (var ticket in tickets.EnumerateArray())
+            {
+                if (ticket.ValueKind != JsonValueKind.Object || !ticket.TryGetProperty("id", out var id)
+                    || id.ValueKind != JsonValueKind.Number || !id.GetRawText().All(char.IsAsciiDigit))
+                {
+                    return Unavailable;
+                }
+
+                ids.Add(id.GetRawText());
+            }
+
+            return new AuditedRecords(ids.Take(MaxIds).ToList(), ids.Count, IdsAvailable: true);
+        }
+        catch (JsonException)
+        {
+            return Unavailable;
+        }
+    }
+
     private static AuditedRecords ExtractFrom(JsonElement root)
     {
+        // A background job is not a record: its own id is a job token, so reading it as one would put
+        // a fabricated record id in the trail. A finished job lists the records it worked on in
+        // `results`; until then the job names none, and the request has to (FromBulkUpdateBody).
+        if (root.ValueKind == JsonValueKind.Object
+            && root.TryGetProperty("job_status", out var job)
+            && job.ValueKind == JsonValueKind.Object)
+        {
+            return job.TryGetProperty("results", out var results) && results.ValueKind == JsonValueKind.Array && results.GetArrayLength() > 0
+                ? ExtractFrom(results)
+                : Unavailable;
+        }
+
         // A single record is looked for first. A get-by-id can sideload collections beside it —
         // Get_ticket always asks for `include=users,organizations` — and scanning for arrays first
         // would record those sideloaded users as the records read, and miss the ticket. A collection
