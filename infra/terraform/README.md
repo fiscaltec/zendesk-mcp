@@ -63,7 +63,7 @@ Settled on 2026-10-28 and committed as defaults, so the record and the build run
 | Decision | Value | Where |
 |---|---|---|
 | Zendesk subdomain | `fiscalsupport` | `zendesk_subdomain` |
-| Zendesk OAuth client | `fiscal_zendesk_mcp` (confidential, PKCE) | `zendesk_oauth_client_id` |
+| Zendesk OAuth clients | production `fiscal_zendesk_mcp` (allowed scopes `read write`); staging `fiscal_zendesk_mcp_staging` (allowed scopes `read`, split 2026-11-04). Both confidential, PKCE, one redirect URL each | `zendesk_oauth_client_id`, `staging_zendesk_oauth_client_id` |
 | Gate 1 — who may sign in | IT & Security Department only, to begin with | `entra_gate1_group_object_ids` (`entra.tf`) |
 | Gate 2 — tier membership | IT & Security Department nested in `sg-zendesk-readers`; Dan Searle in all three tier groups | out-of-band, build runbook Phase 12 |
 | Hostnames | `https://zendesk-mcp.fiscaltec.com`, `https://zendesk-mcp-staging.fiscaltec.com` | `public_base_url` and friends |

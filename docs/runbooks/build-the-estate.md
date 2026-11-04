@@ -150,7 +150,8 @@ SCANNER_CRON="0 8 * * 1"
 
 # ---- Zendesk (variables.tf) ----
 ZD_SUBDOMAIN=fiscalsupport                          # zendesk_subdomain
-ZD_CLIENT_ID=fiscal_zendesk_mcp                     # zendesk_oauth_client_id
+ZD_CLIENT_ID=fiscal_zendesk_mcp                     # zendesk_oauth_client_id (production's client)
+STG_ZD_CLIENT_ID=fiscal_zendesk_mcp_staging         # staging_zendesk_oauth_client_id (staging's own client)
 PROD_ALLOW_PUBLIC_REPLIES=true                      # zendesk_allow_public_replies
 PROD_ALLOW_ARTICLE_PUBLISHING=true                  # zendesk_allow_article_publishing
 PROD_ALLOW_HC_STRUCTURE=true                        # zendesk_allow_help_center_structure_changes
@@ -267,15 +268,28 @@ Activate them before starting and check they last long enough: a lapsed elevatio
 turns into `AuthorizationFailed` / `Authorization_RequestDenied` mid-phase. Run `az login` again in
 Cloud Shell after activating, or the cached token lacks the new rights.
 
-### 0.2 Zendesk OAuth client (Admin Centre, by hand)
+### 0.2 Zendesk OAuth clients (Admin Centre, by hand)
 
-Admin Centre → Apps and integrations → APIs → OAuth clients →
-`fiscal_zendesk_mcp`:
+**Two clients, one per target** (split on 2026-11-04; the first build shared one). Each lists only its
+own callback, and each has **allowed scopes** set to exactly what its target requests, so the client
+itself caps what a token can do. Admin Centre → Apps and integrations → APIs → OAuth clients:
 
-- **Client kind: Confidential.** Remove `http://localhost:5099/zendesk/callback`.
-- **Redirect URLs — both:** `https://zendesk-mcp.fiscaltec.com/zendesk/callback` and
-  `https://zendesk-mcp-staging.fiscaltec.com/zendesk/callback`.
-- Do **not** regenerate the secret yet — that is Phase 7, immediately before it is stored.
+| | Production | Staging |
+|---|---|---|
+| Name | `FISCAL Zendesk MCP` | `FISCAL Zendesk MCP (staging)` |
+| Unique identifier | `fiscal_zendesk_mcp` (`$ZD_CLIENT_ID`) | `fiscal_zendesk_mcp_staging` (`$STG_ZD_CLIENT_ID`) |
+| Client kind | Confidential | Confidential |
+| Redirect URL (only this) | `https://zendesk-mcp.fiscaltec.com/zendesk/callback` | `https://zendesk-mcp-staging.fiscaltec.com/zendesk/callback` |
+| Allowed scopes | `read` `write` | `read` |
+| The server requests | `read write` (application default) | `read` (`Zendesk__OAuthScopes`, Phase 9) |
+
+- No `http://localhost:5099/zendesk/callback` on either: local development uses a separate client.
+- A request for a scope outside a client's allowed list fails with `400 invalid_scope`, so the two
+  columns must agree. Allowed scopes apply to **new** tokens only.
+- Staging's `read`-only client is a second guard behind `Authorization__ReadOnly`: even with the
+  server's guard lifted, Zendesk refuses a write made with a staging token. It also means write
+  checks cannot be run through staging at all (see `CLAUDE.md` → *Staging validation*).
+- Do **not** regenerate either secret yet — that is Phase 7, immediately before they are stored.
 
 ### 0.3 Cloud Shell set-up and pre-flight
 
@@ -961,13 +975,14 @@ echo "Phase 6 verified"
 ## Phase 7 — Secrets
 
 Out-of-band in the Terraform too (`entra.tf`, `keyvault.tf`): neither value may live in any state or
-file outside the vault. Two secrets go into `zendesk-prod-kv-uksouth`, each with a **180-day expiry**
+file outside the vault. Three secrets go into `zendesk-prod-kv-uksouth`, each with a **180-day expiry**
 so the scanner warns 30 days ahead:
 
 | Vault secret | Source | Read by |
 |---|---|---|
 | `entra-mcp-client-secret` | a new Entra client secret on `Zendesk MCP` | nobody at runtime — it is the **record** of what is copied onto both apps as `entra-oauth-client-secret` (Phase 9). Rotating the vault copy alone changes nothing the app sends (vitally-mcp#138) |
-| `zendesk-oauth-client-secret` | regenerated on the Zendesk OAuth client | the app, from the vault (`Zendesk__OAuthClientSecretRef`, cached 5 minutes) |
+| `zendesk-oauth-client-secret` | regenerated on production's Zendesk OAuth client | production, from the vault (`Zendesk__OAuthClientSecretRef` default, cached 5 minutes) |
+| `zendesk-staging-oauth-client-secret` | regenerated on staging's Zendesk OAuth client | staging, from the vault (its `Zendesk__OAuthClientSecretRef`) |
 
 > ⚠️ **`printf %s`, never a `<<<` here-string.** A here-string appends a newline, `--file` stores it,
 > and the app sends the secret as stored, so every connect, refresh and revoke fails with
@@ -998,6 +1013,12 @@ current one was handled by hand during validation; it is shown once). Then, on i
 source ~/zendesk-estate.env; capture_secret zendesk-oauth-client-secret
 ```
 
+Then the same for staging's client, `fiscal_zendesk_mcp_staging`:
+
+```bash
+source ~/zendesk-estate.env; capture_secret zendesk-staging-oauth-client-secret
+```
+
 ### 7.2 Create the Entra client secret and store both
 
 Re-runnable: the Entra credential is created only if `$SECRET_DIR/entra-oauth-client-secret` does
@@ -1008,6 +1029,7 @@ finished, a re-run creates a **second** credential — delete the orphan afterwa
 ```bash
 ( set -euo pipefail; source ~/zendesk-estate.env; assert_context
 [ -s "$SECRET_DIR/zendesk-oauth-client-secret" ] || { fail "run 7.1 (capture_secret) first"; exit 1; }
+[ -s "$SECRET_DIR/zendesk-staging-oauth-client-secret" ] || { fail "run 7.1 for the staging client first"; exit 1; }
 APP_OBJ=$(az ad app list --display-name "$ENTRA_APP_NAME" --query "[?displayName=='$ENTRA_APP_NAME'] | [0].id" -o tsv)
 nonempty "app object id" "$APP_OBJ"
 END=$(date -u -d "+$SECRET_DAYS days" +%Y-%m-%dT%H:%M:%SZ)
@@ -1050,13 +1072,13 @@ done
 # The last error tells a DNS failure, a network refusal and a role still propagating apart.
 [ -n "$ok" ] || { fail "vault unreachable after 5 minutes — nothing stored. Last error: ${last:0:400}"; exit 1; }
 
-for name in entra-mcp-client-secret:entra-oauth-client-secret zendesk-oauth-client-secret:zendesk-oauth-client-secret; do
+for name in entra-mcp-client-secret:entra-oauth-client-secret zendesk-oauth-client-secret:zendesk-oauth-client-secret zendesk-staging-oauth-client-secret:zendesk-staging-oauth-client-secret; do
   vault_name=${name%%:*}; file="$SECRET_DIR/${name#*:}"
   az keyvault secret set --vault-name "$KV" --name "$vault_name" --file "$file" --expires "$END" -o none
   expect "$vault_name stored length" "$(wc -c < "$file" | tr -d ' ')" \
     "$(az keyvault secret show --vault-name "$KV" --name "$vault_name" --query "length(value)" -o tsv)"
 done
-rm -f "$SECRET_DIR/zendesk-oauth-client-secret"      # the app reads it from the vault; no copy needed
+rm -f "$SECRET_DIR/zendesk-oauth-client-secret" "$SECRET_DIR/zendesk-staging-oauth-client-secret"   # the apps read them from the vault
 )
 ```
 
@@ -1113,7 +1135,7 @@ n=$(az ad app credential list --id "$APP_ID" --query "length([?starts_with(displ
 KV_ID=$(az keyvault show -g "$RG" -n "$KV" --query id -o tsv)
 secrets() { az rest --method get --url "https://management.azure.com$KV_ID/secrets?api-version=$KV_API" --query "$1" -o tsv; }
 soon=$(date -u -d "+$((SECRET_DAYS - 2)) days" +%s)
-for s in entra-mcp-client-secret zendesk-oauth-client-secret; do
+for s in entra-mcp-client-secret zendesk-oauth-client-secret zendesk-staging-oauth-client-secret; do
   exp=$(secrets "value[?name=='$s'] | [0].properties.attributes.exp")
   nonempty "$s expiry (epoch)" "$exp"
   [ "$exp" -gt "$soon" ] && echo "OK   $s expires $(date -u -d "@$exp" +%F)" || fail "$s expiry $(date -u -d "@$exp" +%F) is not ~$SECRET_DAYS days out"
@@ -1286,7 +1308,6 @@ app_env() {  # app_env prod|staging
   printf '%s\t%s\n' \
     Zendesk__Subdomain "$ZD_SUBDOMAIN" \
     Zendesk__KeyVaultUri "$kv_uri" \
-    Zendesk__OAuthClientId "$ZD_CLIENT_ID" \
     AZURE_CLIENT_ID "$mi_cid" \
     OAuth__Authority "$OAUTH_AUTHORITY" \
     OAuth__Audience "$OAUTH_AUDIENCE" \
@@ -1302,6 +1323,7 @@ app_env() {  # app_env prod|staging
   case "$1" in
     prod) printf '%s\t%s\n' \
       Zendesk__TokenSecretPrefix zendesk-user- \
+      Zendesk__OAuthClientId "$ZD_CLIENT_ID" \
       OAuth__Resource "$OAUTH_RESOURCE" \
       OAuth__PublicBaseUrl "$PROD_ORIGIN" \
       Zendesk__Features__AllowPublicReplies "$PROD_ALLOW_PUBLIC_REPLIES" \
@@ -1311,6 +1333,9 @@ app_env() {  # app_env prod|staging
       Zendesk__Features__AllowUserAndOrganizationChanges "$PROD_ALLOW_USER_ORG_CHANGES" ;;
     staging) printf '%s\t%s\n' \
       Zendesk__TokenSecretPrefix zendesk-staging-user- \
+      Zendesk__OAuthClientId "$STG_ZD_CLIENT_ID" \
+      Zendesk__OAuthClientSecretRef zendesk-staging-oauth-client-secret \
+      Zendesk__OAuthScopes read \
       OAuth__Resource "$STG_OAUTH_RESOURCE" \
       OAuth__PublicBaseUrl "$STG_ORIGIN" \
       Authorization__ReadOnly "$STG_READ_ONLY" \

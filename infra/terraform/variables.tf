@@ -91,8 +91,14 @@ variable "zendesk_subdomain" {
 
 variable "zendesk_oauth_client_id" {
   type        = string
-  description = "Unique identifier of the Zendesk OAuth client (Admin Centre > Apps and integrations > APIs > OAuth clients). Shared by both targets; its redirect URLs must list BOTH /zendesk/callback URLs. Its secret goes into Key Vault as `zendesk-oauth-client-secret`, never here."
+  description = "Unique identifier of PRODUCTION's Zendesk OAuth client (Admin Centre > Apps and integrations > APIs > OAuth clients). Its only redirect URL is production's /zendesk/callback and its allowed scopes are `read write`. Its secret goes into Key Vault as `zendesk-oauth-client-secret`, never here."
   default     = "fiscal_zendesk_mcp"
+}
+
+variable "staging_zendesk_oauth_client_id" {
+  type        = string
+  description = "Unique identifier of STAGING's own Zendesk OAuth client (split from production's on 2026-11-04). Its only redirect URL is staging's /zendesk/callback and its allowed scopes are `read` alone, matching the Zendesk__OAuthScopes staging requests. Its secret goes into Key Vault as `zendesk-staging-oauth-client-secret`, never here."
+  default     = "fiscal_zendesk_mcp_staging"
 }
 
 # Account-wide safety switches (ZendeskFeatureOptions). Each guards an action that reaches beyond the
