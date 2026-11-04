@@ -641,6 +641,43 @@ public class TicketMergeToolsTests
     }
 
     [Fact]
+    public async Task MergeTickets_DuplicateKeyInTheMergeAnswer_IsNotConfirmedNotAnError()
+    {
+        // System.Text.Json accepts a duplicate key on parse and throws only when the object is indexed.
+        var reads = 0;
+        using var fake = TestHelpers.CreateFakeZendesk(r => (r.Method.Method, r.Path) switch
+        {
+            ("GET", ShowManyPath) => FakeResponse.Json(Interlocked.Increment(ref reads) == 1 ? ShowMany(Ticket(101), Ticket(102)) : ShowMany()),
+            ("POST", MergePath) => FakeResponse.Json("""{"job_status":{"id":"job1","status":"queued","status":"completed"}}"""),
+            _ => FakeResponse.NotFound(),
+        });
+
+        var result = JsonNode.Parse(await Merge(TestHelpers.BuildZendeskService(fake.Client), [102]))!;
+
+        result["result"]!.GetValue<string>().Should().Be("not_confirmed");
+        result["next_step"]!.GetValue<string>().Should().Contain("Do not call Merge_tickets again");
+    }
+
+    [Fact]
+    public async Task MergeTickets_DuplicateKeyInTheReadBack_IsNotConfirmedNotAnError()
+    {
+        var reads = 0;
+        using var fake = TestHelpers.CreateFakeZendesk(r => (r.Method.Method, r.Path) switch
+        {
+            ("GET", ShowManyPath) => FakeResponse.Json(Interlocked.Increment(ref reads) == 1
+                ? ShowMany(Ticket(101), Ticket(102))
+                : """{"tickets":[{"id":102,"status":"closed","status":"open","tags":["closed_by_merge"]}],"users":[]}"""),
+            ("POST", MergePath) => FakeResponse.Json(Job("completed")),
+            _ => FakeResponse.NotFound(),
+        });
+
+        var result = JsonNode.Parse(await Merge(TestHelpers.BuildZendeskService(fake.Client), [102]))!;
+
+        result["result"]!.GetValue<string>().Should().Be("not_confirmed");
+        result["merged"]!.GetValue<bool>().Should().BeFalse();
+    }
+
+    [Fact]
     public async Task MergeTickets_ClosedTarget_IsRefused()
     {
         using var fake = TestHelpers.CreateFakeZendesk(r => r.Path switch

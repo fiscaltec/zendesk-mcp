@@ -16,7 +16,7 @@ public static class TicketMergeTools
 {
     [Authorize(Policy = "zendesk:write")]
     [McpServerTool(Name = "Merge_tickets", Title = "Merge tickets", ReadOnly = false, Destructive = true, Idempotent = false, OpenWorld = false),
-     Description("Merge one to five duplicate tickets (source_ticket_ids) into a target ticket. Zendesk closes each source ticket for good, tags it closed_by_merge and adds a comment to it and to the target; a merge cannot be undone. Before calling, show the person the tickets (subject, requester, status) and get their agreement: to find duplicates, use Search_tickets with exclude_tags ['closed_by_merge'] and read candidates with Get_ticket. Every source must have the same requester as the target. Closed tickets, solved sources, shared tickets, tickets merged into a different ticket, tickets the agent cannot see and sources with a different requester are refused, naming each, before anything changes. Safe to repeat: a source already merged into this target is reported as already_merged and not merged again. Comments are private notes unless target_comment_public or source_comment_public is true (a public merge comment emails that ticket's requester and CCs, and is refused rather than downgraded when public replies are switched off). Leave source_comment out for a short default saying where the ticket went, and target_comment out for a default that names each merged ticket and quotes its latest public comment as plain text (cut at about 1,500 characters); a target_comment you write replaces that default, quotes included. Returns result ('merged', 'partially_merged', 'already_merged', or 'not_confirmed' when Zendesk had not finished or its answer was lost: do not merge again; check the sources with Get_ticket and, if any is still open, ask the person to check the tickets in Zendesk), the tickets as read before the merge, the job's final status and, once the job has completed, each source with its own result, the comments as Zendesk saved them, and warnings to relay (people Zendesk added as CCs on the target, sources Zendesk assigned when it closed them, a comment Zendesk made private); a failed job is returned as an error that also says to check the tickets first, as some may have been merged. " + TicketWriteHelpers.UntrustedContentWarning)]
+     Description("Merge one to five duplicate tickets (source_ticket_ids) into a target ticket. Zendesk closes each source ticket for good, tags it closed_by_merge and adds a comment to it and to the target; a merge cannot be undone. Before calling, show the person the tickets (subject, requester, status) and get their agreement: to find duplicates, use Search_tickets with exclude_tags ['closed_by_merge'] and read candidates with Get_ticket. Every source must have the same requester as the target. Closed tickets, solved sources, shared tickets, sources tagged closed_by_merge but still open, tickets merged into a different ticket, tickets the agent cannot see and sources with a different requester are refused, naming each, before anything changes. Safe to repeat: a source already merged into this target is reported as already_merged and not merged again. Comments are private notes unless target_comment_public or source_comment_public is true (a public merge comment emails that ticket's requester and CCs, and is refused rather than downgraded when public replies are switched off). Leave source_comment out for a short default saying where the ticket went, and target_comment out for a default that names each merged ticket and quotes its latest public comment as plain text (cut at about 1,500 characters); a target_comment you write replaces that default, quotes included. Returns result ('merged', 'partially_merged', 'already_merged', or 'not_confirmed' when Zendesk had not finished or its answer was lost: do not merge again; check the sources with Get_ticket and, if any is still open, ask the person to check the tickets in Zendesk), the tickets as read before the merge, the job's final status and, once the job has completed, each source with its own result, the comments as Zendesk saved them, and warnings to relay (people Zendesk added as CCs on the target, sources Zendesk assigned when it closed them, a comment Zendesk made private); a failed job is returned as an error that also says to check the tickets first, as some may have been merged. " + TicketWriteHelpers.UntrustedContentWarning)]
     public static Task<string> MergeTickets(
         ZendeskService zendesk,
         [Description("Id of the ticket to keep; the sources are merged into it.")] long target_ticket_id,
@@ -265,126 +265,145 @@ public static class TicketMerge
             return NotConfirmed(result, null, 0, Failure("The merge request's answer was lost or unreadable", ex));
         }
 
-        // From here on Zendesk has accepted the merge, so it may happen whatever goes wrong next. A
-        // failure is therefore never surfaced as a plain error, which a model would read as "nothing
-        // changed" and answer with a second merge: the pre-check above cannot refuse that retry while
-        // the first job is still queued, because the sources are not yet tagged closed_by_merge. That
-        // covers every exception, not only HTTP ones: a dropped connection (whose connect link says
-        // "then try again"), a denial from a stale entitlement, a timeout. Only the caller's own
-        // cancellation escapes, since nobody is left to read the answer.
-        // Indexed only through an object: a 200 with an array or scalar root would otherwise throw here,
-        // after the merge may already be queued, instead of reaching the not_confirmed answer below.
-        var job = (accepted as JsonObject)?["job_status"] as JsonObject;
-        if (job is null)
-        {
-            return NotConfirmed(result, null, 0, "Zendesk accepted the merge request but returned no job status.");
-        }
-
-        var jobId = JobId(job);
-        var polls = 0;
+        // One guard over everything after the POST, on top of the narrower ones inside: whatever
+        // Zendesk answers, a malformed reply (a duplicate JSON key throws only when it is first indexed)
+        // must reach not_confirmed, never a plain error. A failed job is the one deliberate error.
         try
         {
-            while (!IsTerminal(job) && polls < pollDelays.Count && !string.IsNullOrEmpty(jobId))
-            {
-                await delay(pollDelays[polls], cancellationToken);
-                polls++;
-                var polled = await zendesk.GetAsync($"/api/v2/job_statuses/{ZendeskService.Segment(jobId)}", cancellationToken: cancellationToken);
-                job = (polled as JsonObject)?["job_status"] as JsonObject ?? job;
-            }
+            return await AfterAcceptedAsync();
+        }
+        catch (MergeJobFailedException)
+        {
+            throw;
         }
         catch (Exception ex) when (!cancellationToken.IsCancellationRequested)
         {
-            return NotConfirmed(result, job, polls, Failure("Checking the merge job failed", ex));
+            return NotConfirmed(result, null, 0, Failure("Zendesk's answer to the merge could not be read", ex));
         }
 
-        var jobStatus = ToolJson.String(job["status"]) ?? "unknown";
-        if (jobStatus is "failed" or "killed")
+        async Task<string> AfterAcceptedAsync()
         {
-            // No status code: Zendesk answered every request with success; it is the job that failed.
-            // A multi-ticket job may have merged some sources before failing, so this is not "unchanged".
-            throw new HttpRequestException(
-                $"Zendesk's merge job{(string.IsNullOrEmpty(jobId) ? string.Empty : " " + jobId)} {jobStatus}. Some source tickets may still have been merged. Check each with Get_ticket (a merged source is closed and tagged closed_by_merge) before calling Merge_tickets again. Job: {Truncate(ToolJson.Pick(job, "id", "status", "total", "progress", "message", "results").ToJsonString(), 1024)}");
-        }
-
-        if (jobStatus != "completed")
-        {
-            return NotConfirmed(result, job, polls, string.IsNullOrEmpty(jobId)
-                ? $"Zendesk accepted the merge but its job status carried no id, so the job could not be followed (job status '{jobStatus}')."
-                : $"Zendesk had not finished the merge when this tool stopped waiting (job status '{jobStatus}').");
-        }
-
-        result["job"] = JobSummary(job);
-        result["polls"] = polls;
-
-        // The job's results shape is not documented for merges, so the outcome is read back from the
-        // tickets themselves: a merged source is closed and tagged closed_by_merge.
-        TicketRead after;
-        try
-        {
-            after = await ReadTicketsAsync(zendesk, toMerge.Append(targetTicketId), cancellationToken);
-        }
-        catch (Exception ex) when (!cancellationToken.IsCancellationRequested)
-        {
-            return NotConfirmed(result, job, polls, Failure("Zendesk reported the merge job completed, but reading the source tickets back failed", ex));
-        }
-
-        var sourcesAfter = new JsonArray();
-        var unconfirmed = new List<long>();
-        var confirmed = 0;
-        foreach (var id in sources)
-        {
-            if (alreadyMerged.Contains(id))
+            // From here on Zendesk has accepted the merge, so it may happen whatever goes wrong next. A
+            // failure is therefore never surfaced as a plain error, which a model would read as "nothing
+            // changed" and answer with a second merge: the pre-check above cannot refuse that retry while
+            // the first job is still queued, because the sources are not yet tagged closed_by_merge. That
+            // covers every exception, not only HTTP ones: a dropped connection (whose connect link says
+            // "then try again"), a denial from a stale entitlement, a timeout. Only the caller's own
+            // cancellation escapes, since nobody is left to read the answer.
+            // Indexed only through an object: a 200 with an array or scalar root would otherwise throw here,
+            // after the merge may already be queued, instead of reaching the not_confirmed answer below.
+            var job = (accepted as JsonObject)?["job_status"] as JsonObject;
+            if (job is null)
             {
-                sourcesAfter.Add(AlreadyMergedEntry(before, id));
-                continue;
+                return NotConfirmed(result, null, 0, "Zendesk accepted the merge request but returned no job status.");
             }
 
-            after.Tickets.TryGetValue(id, out var ticket);
-            var closedByMerge = ticket is not null && ToolJson.String(ticket["status"]) == "closed" && HasTag(ticket, "closed_by_merge");
-            if (closedByMerge)
+            var jobId = JobId(job);
+            var polls = 0;
+            try
             {
-                confirmed++;
+                while (!IsTerminal(job) && polls < pollDelays.Count && !string.IsNullOrEmpty(jobId))
+                {
+                    await delay(pollDelays[polls], cancellationToken);
+                    polls++;
+                    var polled = await zendesk.GetAsync($"/api/v2/job_statuses/{ZendeskService.Segment(jobId)}", cancellationToken: cancellationToken);
+                    job = (polled as JsonObject)?["job_status"] as JsonObject ?? job;
+                }
             }
-            else
+            catch (Exception ex) when (!cancellationToken.IsCancellationRequested)
             {
-                unconfirmed.Add(id);
+                return NotConfirmed(result, job, polls, Failure("Checking the merge job failed", ex));
             }
 
-            sourcesAfter.Add(new JsonObject
+            var jobStatus = ToolJson.String(job["status"]) ?? "unknown";
+            if (jobStatus is "failed" or "killed")
             {
-                ["id"] = id,
-                ["status"] = ticket is null ? null : ToolJson.String(ticket["status"]),
-                ["closed_by_merge"] = closedByMerge,
-                ["result"] = closedByMerge ? "merged" : "not_confirmed",
-            });
-        }
+                // No status code: Zendesk answered every request with success; it is the job that failed.
+                // A multi-ticket job may have merged some sources before failing, so this is not "unchanged".
+                throw new MergeJobFailedException(
+                    $"Zendesk's merge job{(string.IsNullOrEmpty(jobId) ? string.Empty : " " + jobId)} {jobStatus}. Some source tickets may still have been merged. Check each with Get_ticket (a merged source is closed and tagged closed_by_merge) before calling Merge_tickets again. Job: {Truncate(ToolJson.Pick(job, "id", "status", "total", "progress", "message", "results").ToJsonString(), 1024)}");
+            }
 
-        result["merged"] = unconfirmed.Count == 0;
-        result["result"] = unconfirmed.Count == 0 ? "merged" : confirmed > 0 ? "partially_merged" : "not_confirmed";
-        result["sources_after"] = sourcesAfter;
-        result["target_agent_url"] = $"{zendesk.BaseUrl}/agent/tickets/{Id(targetTicketId)}";
-        if (unconfirmed.Count > 0)
-        {
-            warnings.Add($"Zendesk reported the job completed, but ticket(s) {string.Join(", ", unconfirmed.Select(Id))} do not yet read as closed and tagged closed_by_merge.");
-            result["next_step"] = "Check those tickets with Get_ticket in a few minutes. Do not call Merge_tickets again for them: the job completed, so they are most likely merged and only reading back late.";
-        }
+            if (jobStatus != "completed")
+            {
+                return NotConfirmed(result, job, polls, string.IsNullOrEmpty(jobId)
+                    ? $"Zendesk accepted the merge but its job status carried no id, so the job could not be followed (job status '{jobStatus}')."
+                    : $"Zendesk had not finished the merge when this tool stopped waiting (job status '{jobStatus}').");
+            }
 
-        // What Zendesk did beyond the merge itself, for the model to relay, as Swifteq's merge_tickets
-        // does. Each is a read after the fact: a failure is reported as a warning and never changes the
-        // result, which the sources' own state has already decided.
-        try
-        {
-            AddSideEffectWarnings(before, after, targetTicketId, toMerge.Where(id => !unconfirmed.Contains(id)), warnings);
-            result["comments"] = await SavedCommentsAsync(zendesk, targetTicketId, toMerge, targetPublic, sourcePublic, warnings, cancellationToken);
-        }
-        catch (Exception ex) when (!cancellationToken.IsCancellationRequested)
-        {
-            // Belt and braces: the reads above already swallow their own failures, but nothing after the
-            // merge may turn a known result into a plain error.
-            warnings.Add($"Could not finish reading what Zendesk did beyond the merge ({ex.GetType().Name}).");
-        }
+            result["job"] = JobSummary(job);
+            result["polls"] = polls;
 
-        return result.ToJsonString();
+            // The job's results shape is not documented for merges, so the outcome is read back from the
+            // tickets themselves: a merged source is closed and tagged closed_by_merge.
+            TicketRead after;
+            try
+            {
+                after = await ReadTicketsAsync(zendesk, toMerge.Append(targetTicketId), cancellationToken);
+            }
+            catch (Exception ex) when (!cancellationToken.IsCancellationRequested)
+            {
+                return NotConfirmed(result, job, polls, Failure("Zendesk reported the merge job completed, but reading the source tickets back failed", ex));
+            }
+
+            var sourcesAfter = new JsonArray();
+            var unconfirmed = new List<long>();
+            var confirmed = 0;
+            foreach (var id in sources)
+            {
+                if (alreadyMerged.Contains(id))
+                {
+                    sourcesAfter.Add(AlreadyMergedEntry(before, id));
+                    continue;
+                }
+
+                after.Tickets.TryGetValue(id, out var ticket);
+                var closedByMerge = ticket is not null && ToolJson.String(ticket["status"]) == "closed" && HasTag(ticket, "closed_by_merge");
+                if (closedByMerge)
+                {
+                    confirmed++;
+                }
+                else
+                {
+                    unconfirmed.Add(id);
+                }
+
+                sourcesAfter.Add(new JsonObject
+                {
+                    ["id"] = id,
+                    ["status"] = ticket is null ? null : ToolJson.String(ticket["status"]),
+                    ["closed_by_merge"] = closedByMerge,
+                    ["result"] = closedByMerge ? "merged" : "not_confirmed",
+                });
+            }
+
+            result["merged"] = unconfirmed.Count == 0;
+            result["result"] = unconfirmed.Count == 0 ? "merged" : confirmed > 0 ? "partially_merged" : "not_confirmed";
+            result["sources_after"] = sourcesAfter;
+            result["target_agent_url"] = $"{zendesk.BaseUrl}/agent/tickets/{Id(targetTicketId)}";
+            if (unconfirmed.Count > 0)
+            {
+                warnings.Add($"Zendesk reported the job completed, but ticket(s) {string.Join(", ", unconfirmed.Select(Id))} do not yet read as closed and tagged closed_by_merge.");
+                result["next_step"] = "Check those tickets with Get_ticket in a few minutes. Do not call Merge_tickets again for them: the job completed, so they are most likely merged and only reading back late.";
+            }
+
+            // What Zendesk did beyond the merge itself, for the model to relay, as Swifteq's merge_tickets
+            // does. Each is a read after the fact: a failure is reported as a warning and never changes the
+            // result, which the sources' own state has already decided.
+            try
+            {
+                AddSideEffectWarnings(before, after, targetTicketId, toMerge.Where(id => !unconfirmed.Contains(id)), warnings);
+                result["comments"] = await SavedCommentsAsync(zendesk, targetTicketId, toMerge, targetPublic, sourcePublic, warnings, cancellationToken);
+            }
+            catch (Exception ex) when (!cancellationToken.IsCancellationRequested)
+            {
+                // Belt and braces: the reads above already swallow their own failures, but nothing after the
+                // merge may turn a known result into a plain error.
+                warnings.Add($"Could not finish reading what Zendesk did beyond the merge ({ex.GetType().Name}).");
+            }
+
+            return result.ToJsonString();
+        }
     }
 
     /// <summary>
@@ -393,17 +412,32 @@ public static class TicketMerge
     /// </summary>
     private static string NotConfirmed(JsonObject result, JsonObject? job, int polls, string reason)
     {
-        result["job"] = job is null ? null : JobSummary(job);
+        // The job may be the very thing that could not be read, so neither read of it may throw here.
+        JsonObject? summary = null;
+        string? jobId = null;
+        try
+        {
+            summary = job is null ? null : JobSummary(job);
+            jobId = job is null ? null : JobId(job);
+        }
+        catch (Exception)
+        {
+            // Left null: the next step still says not to merge again.
+        }
+
+        result["job"] = summary;
         result["polls"] = polls;
         result["merged"] = false;
         result["result"] = "not_confirmed";
         // No retry is ever suggested from here: a source that is still open and untagged looks the same
         // whether the job failed or is still queued, and no tool here can read a job's status, so only
         // a person looking in Zendesk can tell the two apart.
-        var jobId = job is null ? null : JobId(job);
         result["next_step"] = $"{reason} The merge may still happen or may already have happened. Do not call Merge_tickets again for these tickets. Check the source tickets with Get_ticket in a few minutes: a merged source is closed and tagged closed_by_merge. If any is still open, tell the person the merge's outcome is unknown{(string.IsNullOrEmpty(jobId) ? string.Empty : $" (Zendesk job {jobId})")} and ask them to check the tickets in Zendesk before deciding whether to merge again.";
         return result.ToJsonString();
     }
+
+    /// <summary>A merge job Zendesk reported as failed or killed: the one error surfaced after the merge request.</summary>
+    private sealed class MergeJobFailedException(string message) : HttpRequestException(message);
 
     // A refusal Zendesk or this server made before any merge could be queued: a 4xx answer, or a request
     // refused before sending (tier, read-only, no connection). Anything else is ambiguous.
