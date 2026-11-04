@@ -67,6 +67,23 @@ jobs:
       - name: Build image
         run: docker build -t zendesk-mcp:scan -f Dockerfile .
 
+      # Plain chiseled images carry no tzdata, and the reporting tools then fall back to UTC without
+      # an error (#13), so check the zone data and the globalisation switch in the built image.
+      - name: Image carries time-zone data
+        run: |
+          set -euo pipefail
+          c=$(docker create zendesk-mcp:scan)
+          trap 'docker rm -f "$c" >/dev/null' EXIT
+          # Listed in full before matching: `grep -q` stops reading early, and under pipefail the
+          # writer's SIGPIPE would then fail the step even when the file is there.
+          files=$(docker export "$c" | tar -t)
+          env=$(docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "$c")
+          grep -qx 'usr/share/zoneinfo/Europe/London' <<<"$files" \
+            || { echo '::error::the runtime image has no /usr/share/zoneinfo/Europe/London'; exit 1; }
+          grep -qx 'DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=true' <<<"$env" \
+            || { echo '::error::DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=true is not set in the runtime image'; exit 1; }
+          echo 'time-zone data present; invariant globalisation on'
+
       - name: Trivy scan (gate on High/Critical)
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:

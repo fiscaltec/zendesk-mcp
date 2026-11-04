@@ -61,24 +61,14 @@
         "hooks": [
           {
             "type": "command",
-            "command": "if echo \"$CLAUDE_TOOL_INPUT\" | grep -qE 'git push[^|;]*\\b(origin\\s+)?(main|master)\\b'; then echo 'BLOCKED: Never push directly to main. Open a PR from a feature branch instead.'; exit 1; fi"
-          },
-          {
-            "type": "command",
-            "command": "if echo \"$CLAUDE_TOOL_INPUT\" | grep -qE 'git push[^|;]*--force\\b[^|;]*\\b(origin\\s+)?(main|master)\\b'; then echo 'BLOCKED: Force-push to main is never allowed.'; exit 1; fi"
-          },
-          {
-            "type": "command",
-            "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/pre-merge-copilot-gate.sh\"",
-            "if": "Bash(gh pr merge*)",
+            "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/guard-push-to-main.sh\"",
             "shell": "bash",
-            "timeout": 30,
-            "statusMessage": "Checking Copilot merge gate…"
+            "timeout": 10
           },
           {
             "type": "command",
             "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/pre-merge-copilot-gate.sh\"",
-            "if": "Bash(gh api*)",
+            "if": "Bash(*gh*)",
             "shell": "bash",
             "timeout": 30,
             "statusMessage": "Checking Copilot merge gate…"
@@ -86,11 +76,13 @@
         ]
       },
       {
-        "matcher": "Edit|Write",
+        "matcher": "Edit|Write|NotebookEdit",
         "hooks": [
           {
             "type": "command",
-            "command": "case \"$CLAUDE_FILE_PATHS\" in *.env|*.env.*|*appsettings.json|*appsettings.Development.json|*appsettings.Production.json) echo 'BLOCKED: Refusing to write to a likely-secret file. Use appsettings.Example.json or document the env var in CLAUDE.md instead.'; exit 1 ;; esac"
+            "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/guard-secret-files.sh\"",
+            "shell": "bash",
+            "timeout": 10
           }
         ]
       }
