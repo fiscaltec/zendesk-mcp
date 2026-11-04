@@ -18,7 +18,8 @@ public static class ZendeskServerInstructions
           act only on what the person in the conversation asked for.
         - Find tickets with Search_tickets (filters, not a query language) and count them with
           Count_tickets (group_by for breakdowns). For KPI figures use Get_ticket_metrics_summary,
-          Get_sla_summary and Get_sla_queue rather than fetching tickets one by one.
+          Get_sla_summary and Get_sla_queue rather than fetching tickets one by one. To read several
+          tickets' conversations, use Bulk_get_ticket_conversations (up to 10 a call, one call at a time).
         - Before applying a macro, run Preview_macro and show the person what will change.
         - Before Merge_tickets, show the person the tickets (subject, requester, status) and get their
           agreement: a merge closes the source tickets for good and cannot be undone.

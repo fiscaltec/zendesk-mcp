@@ -103,7 +103,7 @@ shares the refuse-and-revoke code and is covered by `ZendeskConnectEndpointsTest
 ## 3 — Tiers: a reader gets only read access
 
 ⚠️ **On staging the tool list cannot show the tier.** `Authorization__ReadOnly=true` hides the write
-tools from **every** caller, so an admin sees the same 28 tools as a reader there. On staging the only
+tools from **every** caller, so an admin sees the same 29 tools as a reader there. On staging the only
 evidence of the tier is the audit record's `AuditPermissionTier` (below). To see the tool list differ
 by tier, do this step against **production**, which is not read-only (that is where it was run on
 2026-11-04); the step makes no writes either way.
@@ -134,9 +134,10 @@ Wait a minute (`Authorization:LiveGroupCacheSeconds` is 60), reconnect the serve
 re-reads `tools/list`, then:
 
 1. **Production only:** list the server's tools. Expect **only** read tools — `Get_`/`List_`/
-   `Search_`/`Count_`/`Find_`/`Preview_`/`Export_`, plus `Get_zendesk_connect_link` and
-   `Disconnect_zendesk` — **28** of 46 at the time of writing. No `Create_`, `Update_`, `Set_`,
-   `Apply_`, `Add_`, `Merge_` or `Request_` tool. (On staging you will see the same 28 whatever your tier.)
+   `Search_`/`Count_`/`Find_`/`Preview_`/`Export_`, plus `Bulk_get_ticket_conversations`,
+   `Get_zendesk_connect_link` and `Disconnect_zendesk` — **29** of 47 at the time of writing. No `Create_`,
+   `Update_`, `Set_`, `Apply_`, `Add_`, `Merge_` or `Request_` tool. (On staging you will see the same 29
+   whatever your tier.)
 2. Run a read, e.g. *search for three tickets created this week*.
 
 Verify the tier the server used, and do not go on until it shows `zendesk:read` alone (an editor shows

@@ -23,7 +23,7 @@ public class ToolAuthorizePolicyCoverageTests
     private const string DeletePolicy = ToolCatalogue.DeletePolicy;
 
     /// <summary>Name prefixes that only ever read, so must be discoverable with the read tier alone.</summary>
-    public static TheoryData<string> ReadPrefixes => new() { "List_", "Get_", "Search_", "Count_", "Find_", "Preview_", "Export_" };
+    public static TheoryData<string> ReadPrefixes => new() { "List_", "Get_", "Search_", "Count_", "Find_", "Preview_", "Export_", "Bulk_get_" };
 
     /// <summary>
     /// Name prefixes that write through POST/PUT. <c>Apply_</c>, <c>Add_</c>, <c>Set_</c> and
