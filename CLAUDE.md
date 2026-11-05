@@ -753,7 +753,7 @@ Ticket comments, article bodies and user fields are written by customers and can
 | Configuration | `ConfigurationTools.cs` | `List_ticket_fields`, `List_ticket_forms`, `List_triggers`, `List_brands` |
 | Help Center | `HelpCenterArticlesTools.cs`, `HelpCenterStructureTools.cs`, `HelpCenterMediaTools.cs` | `Search_help_center_articles`, `Get_help_center_article`, `Create_help_center_article`, `Update_article_translation`, `Set_help_center_article_visibility`, `Export_help_center_articles`, `List_help_center_categories`, `Create_help_center_category`, `Update_help_center_category`, `List_help_center_sections`, `Create_help_center_section`, `Update_help_center_section`, `List_user_segments`, `List_permission_groups`, `Request_help_center_image_upload`, `Create_help_center_image` |
 
-Dropped from Swifteq's set: `get_usage` and `submit_mcp_feedback` (Swifteq billing and support).
+Dropped from Swifteq's set: `get_usage` and `submit_mcp_feedback` (Swifteq billing and support), and `get_ticket_report` (decided 2026-11-05, #25). That one is Swifteq's opt-in paid tool, answered from a ticket store Swifteq keeps in step with Zendesk. Porting it means running such a store, a new copy of customer data, which FISCAL's volume (about 200 tickets a month) does not need. Its questions map to `Count_tickets` with `group_by` (totals and cross-tabs at any volume) and `Get_ticket_metrics_summary` (timings, CSAT-split medians and p90, up to `MaxAnalyticsTickets` per call, split by date beyond that).
 
 ### Adding a tool
 
