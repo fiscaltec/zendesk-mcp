@@ -122,6 +122,7 @@ Each tool carries `ReadOnly` / `Destructive` / `Idempotent` / `OpenWorld` hints 
 Compared with Swifteq's server: the same tools and parameters (snake_case, so prompts written for one work with the other). The differences:
 
 - `get_usage` and `submit_mcp_feedback` are dropped: they are about Swifteq's billing and support.
+- `get_ticket_report` is not ported (#25). It is Swifteq's paid reporting tool, served from a ticket store Swifteq keeps. Use `Count_tickets` with `group_by` for totals and cross-tabs, and `Get_ticket_metrics_summary` for timing figures.
 - The connection tools are added.
 - `Merge_tickets` follows Swifteq's `merge_tickets`: the same parameters, defaults (the target note quotes each merged ticket's latest public comment), refusals (a different requester, solved or shared sources), `already_merged` on a repeat, result values, saved comments and side-effect warnings. It departs in three ways. It needs the `zendesk:write` tier, and public comments need `AllowPublicReplies`. It does not refuse AI-agent tickets itself: Zendesk documents no field marking them, so Zendesk's own job refuses them. And its result adds fields: `merged`, `job`, `polls`, `tickets_before`, `next_step` and `target_agent_url` (#22).
 - Tool names use the Vitally capitalisation (`Search_tickets`).
